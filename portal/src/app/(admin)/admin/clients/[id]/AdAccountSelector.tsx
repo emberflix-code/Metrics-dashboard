@@ -2,13 +2,18 @@
 
 import { useState } from 'react';
 
+interface AgencyAccount {
+  id: string;
+  name: string;
+}
+
 interface Props {
   clientId: string;
-  agencyAccountIds: string[];
+  agencyAccounts: AgencyAccount[];
   currentAccountIds: string[];
 }
 
-export default function AdAccountSelector({ clientId, agencyAccountIds, currentAccountIds }: Props) {
+export default function AdAccountSelector({ clientId, agencyAccounts, currentAccountIds }: Props) {
   const [selected, setSelected] = useState<Set<string>>(new Set(currentAccountIds));
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [errorMsg, setErrorMsg] = useState('');
@@ -40,9 +45,12 @@ export default function AdAccountSelector({ clientId, agencyAccountIds, currentA
     }
   }
 
-  if (agencyAccountIds.length === 0) {
+  if (agencyAccounts.length === 0) {
     return (
-      <p className="text-sm text-slate-500">No ad accounts configured yet. Add them in <a href="/admin/settings" className="text-blue-400 hover:text-blue-300 underline">Agency Settings</a>.</p>
+      <p className="text-sm text-slate-500">
+        No ad accounts configured yet. Add them in{' '}
+        <a href="/admin/settings" className="text-blue-400 hover:text-blue-300 underline">Agency Settings</a>.
+      </p>
     );
   }
 
@@ -50,21 +58,24 @@ export default function AdAccountSelector({ clientId, agencyAccountIds, currentA
     <div className="space-y-3">
       <div className="bg-slate-800 border border-slate-700 rounded-lg divide-y divide-slate-700/50">
         <div className="px-3 py-2 flex items-center justify-between">
-          <span className="text-xs text-slate-400">{selected.size} of {agencyAccountIds.length} selected</span>
+          <span className="text-xs text-slate-400">{selected.size} of {agencyAccounts.length} selected</span>
           <div className="flex gap-3">
-            <button type="button" onClick={() => setSelected(new Set(agencyAccountIds))} className="text-xs text-blue-400 hover:text-blue-300">All</button>
+            <button type="button" onClick={() => setSelected(new Set(agencyAccounts.map(a => a.id)))} className="text-xs text-blue-400 hover:text-blue-300">All</button>
             <button type="button" onClick={() => setSelected(new Set())} className="text-xs text-slate-400 hover:text-white">None</button>
           </div>
         </div>
-        {agencyAccountIds.map(id => (
-          <label key={id} className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-slate-700/30">
+        {agencyAccounts.map(acc => (
+          <label key={acc.id} className="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-slate-700/30">
             <input
               type="checkbox"
-              checked={selected.has(id)}
-              onChange={() => toggle(id)}
+              checked={selected.has(acc.id)}
+              onChange={() => toggle(acc.id)}
               className="accent-blue-500"
             />
-            <span className="text-sm text-slate-200 font-mono">act_{id}</span>
+            <div className="flex-1 min-w-0">
+              {acc.name && <p className="text-sm text-white">{acc.name}</p>}
+              <p className={`font-mono ${acc.name ? 'text-xs text-slate-400' : 'text-sm text-slate-200'}`}>act_{acc.id}</p>
+            </div>
           </label>
         ))}
       </div>

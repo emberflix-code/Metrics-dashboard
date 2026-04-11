@@ -65,10 +65,15 @@ export default function AgencyMetaForm({ hasToken }: { hasToken: boolean }) {
     }
 
     try {
+      const ad_accounts = Array.from(selected).map(id => {
+        const found = accounts.find(a => a.account_id === id);
+        return { id, name: found?.name ?? '' };
+      });
+
       const res = await fetch('/api/admin/settings/meta', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ access_token: token.trim(), ad_account_ids }),
+        body: JSON.stringify({ access_token: token.trim(), ad_account_ids, ad_accounts }),
       });
       const data = await res.json();
       if (!res.ok) { setErrorMsg(data.error || 'Failed to save'); setStatus('error'); return; }

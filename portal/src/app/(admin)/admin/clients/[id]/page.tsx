@@ -14,8 +14,14 @@ interface ClientDetail {
   ad_account_ids: string[];
 }
 
+interface AgencyAccount {
+  id: string;
+  name: string;
+}
+
 interface AgencySettings {
   meta_account_ids: string[];
+  meta_accounts: AgencyAccount[];
 }
 
 export default async function ClientDetailPage({ params }: { params: { id: string } }) {
@@ -33,7 +39,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!client) redirect('/admin');
 
   const [agency] = await query<AgencySettings>(
-    `SELECT meta_account_ids FROM agency_settings WHERE id = 1`
+    `SELECT meta_account_ids, meta_accounts FROM agency_settings WHERE id = 1`
   );
 
   return (
@@ -64,7 +70,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           </p>
           <AdAccountSelector
             clientId={client.id}
-            agencyAccountIds={agency?.meta_account_ids ?? []}
+            agencyAccounts={agency?.meta_accounts?.length ? agency.meta_accounts : (agency?.meta_account_ids ?? []).map(id => ({ id, name: '' }))}
             currentAccountIds={client.ad_account_ids ?? []}
           />
         </div>
