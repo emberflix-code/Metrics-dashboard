@@ -1,6 +1,7 @@
 'use client';
 
 import { Suspense, useState } from 'react';
+import Image from 'next/image';
 import { signIn } from 'next-auth/react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
@@ -90,12 +91,10 @@ export default function LoginPage() {
     <div className="min-h-screen bg-slate-950 flex items-center justify-center p-4">
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
-          <div className="w-10 h-10 bg-blue-600 rounded-xl mx-auto mb-4 flex items-center justify-center">
-            <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
-            </svg>
+          <div className="mx-auto mb-4 w-16 h-16 relative">
+            <Image src="/gmnlogo.png" alt="GMN Logo" fill className="object-contain" priority />
           </div>
-          <h1 className="text-xl font-bold text-white">Ads Portal</h1>
+          <h1 className="text-xl font-bold text-white">GMN Ads Portal</h1>
           <p className="text-sm text-slate-400 mt-1">Sign in to your account</p>
         </div>
 
