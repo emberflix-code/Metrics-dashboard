@@ -41,7 +41,7 @@ export default function AgencyMetaForm({ hasToken }: { hasToken: boolean }) {
   function toggleAccount(accountId: string) {
     setSelected(prev => {
       const next = new Set(prev);
-      next.has(accountId) ? next.delete(accountId) : next.add(accountId);
+      if (next.has(accountId)) { next.delete(accountId); } else { next.add(accountId); }
       return next;
     });
   }
