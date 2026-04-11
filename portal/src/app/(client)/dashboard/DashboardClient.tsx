@@ -93,7 +93,7 @@ function _dpPresetRange(key: string): { since: string; until: string } | null {
     case 'last_week': { const sw=sow(t); sw.setDate(sw.getDate()-7); const ew=new Date(sw); ew.setDate(ew.getDate()+6); return {since:_dpFmt(sw),until:_dpFmt(ew)}; }
     case 'this_month': { const s=new Date(t.getFullYear(),t.getMonth(),1); return {since:_dpFmt(s),until:_dpFmt(t)}; }
     case 'last_month': { const s=new Date(t.getFullYear(),t.getMonth()-1,1); const e=new Date(t.getFullYear(),t.getMonth(),0); return {since:_dpFmt(s),until:_dpFmt(e)}; }
-    case 'maximum': return {since:'2010-01-01',until:_dpFmt(t)};
+    case 'maximum': { const s=new Date(t); s.setMonth(s.getMonth()-37); return {since:_dpFmt(s),until:_dpFmt(t)}; }
     default: return null;
   }
 }
@@ -484,13 +484,14 @@ async function fetchMetaCampaigns() {
     const lvl = levelConfig[_currentLevel];
     let allMapped: any[] = [];
 
-    for (const accountId of accountIds) {
+    async function fetchOneAccount(accountId: string): Promise<any[]> {
       const statusRes = await fetch(`/api/meta/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}`);
       const statusJson = await statusRes.json();
       if (statusJson.error) { const e=statusJson.error; throw new Error([e.message,e.type&&`(${e.type})`,e.code&&`Code ${e.code}`].filter(Boolean).join(' ')); }
       const statusMap: Record<string,string>={};
       for (const c of (statusJson.data||[])) statusMap[c.id]=c.effective_status;
 
+      const rows: any[] = [];
       let url: string|null = `/api/meta/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(timeRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
       let isFirstPage = true;
       while (url) {
@@ -507,11 +508,15 @@ async function fetchMetaCampaigns() {
           const entityId=item[lvl.idField];
           return {id:entityId,name:item[lvl.nameField]||item.campaign_name,campaignId:item.campaign_id||'',adsetId:item.adset_id||'',campaignName:item.campaign_name||'',adsetName:item.adset_name||'',adName:item.ad_name||'',account:`act_${accountId}`,status:statusMap[entityId]||'UNKNOWN',reach:parseInt(item.reach||0),impressions:parseInt(item.impressions||0),spent:Math.round(parseFloat(item.spend||0)*100)/100,linkClicks:parseInt(item.inline_link_clicks||0),results};
         });
-        allMapped = allMapped.concat(mapped);
+        rows.push(...mapped);
         url = (json.paging&&json.paging.next)||null;
         isFirstPage = false;
       }
+      return rows;
     }
+
+    const results = await Promise.all(accountIds.map(fetchOneAccount));
+    allMapped = results.flat();
 
     // Apply client campaign filter (agency has multiple clients — filter by name prefix/keyword)
     if (_campaignFilter) {
@@ -604,10 +609,16 @@ async function fetchMetaCampaigns() {
     renderTable();
     if (_currentView==='analytics') renderAnalytics();
     showNotification(`Loaded ${allMapped.length} campaign${allMapped.length!==1?'s':''}`, 'success');
+    const statusEl = document.getElementById('data-status');
+    if (statusEl) {
+      const now = new Date().toLocaleTimeString('en-US',{hour:'2-digit',minute:'2-digit'});
+      statusEl.textContent = `Updated ${now}`;
+      statusEl.className = 'text-xs text-slate-400';
+    }
   } catch(err: any) {
     showNotification(err.message||'Failed to fetch data', 'error');
-    const status = document.getElementById('data-status');
-    if (status) { status.textContent='API error — check admin panel'; status.className='text-xs text-red-400'; }
+    const statusEl = document.getElementById('data-status');
+    if (statusEl) { statusEl.textContent='Failed to load — try again'; statusEl.className='text-xs text-red-400'; }
   } finally {
     hideLoadingBar();
     const cards = document.getElementById('cards-grid');
