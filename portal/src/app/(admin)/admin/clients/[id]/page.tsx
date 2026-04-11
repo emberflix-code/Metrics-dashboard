@@ -3,6 +3,7 @@ import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import CampaignFilterForm from './CampaignFilterForm';
+import AdAccountSelector from './AdAccountSelector';
 
 interface ClientDetail {
   id: string;
@@ -10,6 +11,11 @@ interface ClientDetail {
   email: string;
   created_at: string;
   campaign_filter: string;
+  ad_account_ids: string[];
+}
+
+interface AgencySettings {
+  meta_account_ids: string[];
 }
 
 export default async function ClientDetailPage({ params }: { params: { id: string } }) {
@@ -17,7 +23,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!session || session.user.role !== 'admin') redirect('/login');
 
   const [client] = await query<ClientDetail>(`
-    SELECT c.id, c.name, c.campaign_filter, c.created_at, u.email
+    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.created_at, u.email
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
@@ -25,6 +31,10 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   `, [params.id]);
 
   if (!client) redirect('/admin');
+
+  const [agency] = await query<AgencySettings>(
+    `SELECT meta_account_ids FROM agency_settings WHERE id = 1`
+  );
 
   return (
     <div className="min-h-screen bg-slate-950 p-6">
@@ -44,6 +54,19 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
               Created {new Date(client.created_at).toLocaleDateString()}
             </span>
           </div>
+        </div>
+
+        {/* Ad Account Assignment */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Ad Accounts</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Select which agency ad accounts this client can see data from.
+          </p>
+          <AdAccountSelector
+            clientId={client.id}
+            agencyAccountIds={agency?.meta_account_ids ?? []}
+            currentAccountIds={client.ad_account_ids ?? []}
+          />
         </div>
 
         {/* Campaign filter */}

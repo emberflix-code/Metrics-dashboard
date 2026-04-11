@@ -1,0 +1,1 @@
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS ad_account_ids TEXT[] NOT NULL DEFAULT '{}';
