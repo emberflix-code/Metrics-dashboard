@@ -9,10 +9,17 @@ interface ClientRow {
   email: string;
   created_at: string;
   campaign_filter: string;
+  ad_account_ids: string[];
+}
+
+interface AgencyAccount {
+  id: string;
+  name: string;
 }
 
 interface AgencySettings {
   meta_token_enc: string | null;
+  meta_accounts: AgencyAccount[];
 }
 
 export default async function AdminPage() {
@@ -20,11 +27,11 @@ export default async function AdminPage() {
   if (!session || session.user.role !== 'admin') redirect('/login');
 
   const [agency] = await query<AgencySettings>(
-    `SELECT meta_token_enc FROM agency_settings WHERE id = 1`
+    `SELECT meta_token_enc, meta_accounts FROM agency_settings WHERE id = 1`
   );
 
   const clients = await query<ClientRow>(`
-    SELECT c.id, c.name, c.campaign_filter, c.created_at, u.email
+    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.created_at, u.email
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
@@ -72,6 +79,7 @@ export default async function AdminPage() {
               <tr className="border-b border-slate-800">
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Client</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Email</th>
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Ad Accounts</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Campaign Filter</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Created</th>
                 <th className="px-4 py-3"></th>
@@ -80,7 +88,7 @@ export default async function AdminPage() {
             <tbody>
               {clients.length === 0 && (
                 <tr>
-                  <td colSpan={5} className="px-4 py-8 text-center text-slate-500">
+                  <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
                     No clients yet. Create your first client.
                   </td>
                 </tr>
@@ -89,6 +97,22 @@ export default async function AdminPage() {
                 <tr key={c.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
                   <td className="px-4 py-3 font-medium text-white">{c.name}</td>
                   <td className="px-4 py-3 text-slate-300">{c.email}</td>
+                  <td className="px-4 py-3">
+                    {c.ad_account_ids?.length > 0 ? (
+                      <div className="flex flex-col gap-1">
+                        {c.ad_account_ids.map(id => {
+                          const acc = agency?.meta_accounts?.find(a => a.id === id);
+                          return (
+                            <span key={id} className="text-xs font-mono text-slate-300">
+                              {acc?.name ? <><span className="text-slate-200">{acc.name}</span><span className="text-slate-500 ml-1">({id})</span></> : `act_${id}`}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <span className="text-xs text-slate-600">— all accounts —</span>
+                    )}
+                  </td>
                   <td className="px-4 py-3">
                     {c.campaign_filter
                       ? <code className="text-xs bg-slate-800 text-blue-300 px-2 py-0.5 rounded">{c.campaign_filter}</code>

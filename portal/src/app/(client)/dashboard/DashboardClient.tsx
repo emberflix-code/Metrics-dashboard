@@ -484,7 +484,7 @@ async function fetchMetaCampaigns() {
     const lvl = levelConfig[_currentLevel];
     let allMapped: any[] = [];
 
-    async function fetchOneAccount(accountId: string): Promise<any[]> {
+    const fetchOneAccount = async (accountId: string): Promise<any[]> => {
       const statusRes = await fetch(`/api/meta/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}`);
       const statusJson = await statusRes.json();
       if (statusJson.error) { const e=statusJson.error; throw new Error([e.message,e.type&&`(${e.type})`,e.code&&`Code ${e.code}`].filter(Boolean).join(' ')); }
