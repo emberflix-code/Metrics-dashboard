@@ -3,7 +3,7 @@ import { getClientConnection, sanitizePaging } from '@/lib/meta';
 
 export async function GET(req: NextRequest) {
   try {
-    const { token, accountIds } = await getClientConnection();
+    const { token, accountIds, campaignFilter } = await getClientConnection();
     const sp = req.nextUrl.searchParams;
 
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
@@ -17,6 +17,14 @@ export async function GET(req: NextRequest) {
     url.searchParams.set('limit', sp.get('limit') || '100');
     if (sp.get('time_increment')) url.searchParams.set('time_increment', sp.get('time_increment')!);
     if (sp.get('action_attribution_windows')) url.searchParams.set('action_attribution_windows', sp.get('action_attribution_windows')!);
+
+    // Push campaign filter to Meta API — avoids fetching all campaigns then filtering client-side
+    if (campaignFilter) {
+      url.searchParams.set('filtering', JSON.stringify([
+        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }
+      ]));
+    }
+
     url.searchParams.set('access_token', token);
 
     const res = await fetch(url.toString());

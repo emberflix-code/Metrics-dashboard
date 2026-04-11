@@ -523,12 +523,6 @@ async function fetchMetaCampaigns() {
     const results = await Promise.all(accountIds.map(fetchOneAccount));
     allMapped = results.flat();
 
-    // Apply client campaign filter (agency has multiple clients — filter by name prefix/keyword)
-    if (_campaignFilter) {
-      const f = _campaignFilter.toLowerCase();
-      allMapped = allMapped.filter(c => (c.campaignName || c.name).toLowerCase().includes(f));
-    }
-
     if (allMapped.length===0) { _campaigns.splice(0,_campaigns.length); renderTable(); showNotification('No campaign data found for this date range','success'); return; }
     _campaigns.splice(0,_campaigns.length,...allMapped);
 

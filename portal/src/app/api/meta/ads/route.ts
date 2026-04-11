@@ -3,7 +3,7 @@ import { getClientConnection, sanitizePaging } from '@/lib/meta';
 
 export async function GET(req: NextRequest) {
   try {
-    const { token, accountIds } = await getClientConnection();
+    const { token, accountIds, campaignFilter } = await getClientConnection();
     const sp = req.nextUrl.searchParams;
 
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
@@ -13,6 +13,13 @@ export async function GET(req: NextRequest) {
     const url = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
     url.searchParams.set('fields', sp.get('fields') || 'id,name,effective_status');
     url.searchParams.set('limit', sp.get('limit') || '200');
+
+    if (campaignFilter) {
+      url.searchParams.set('filtering', JSON.stringify([
+        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }
+      ]));
+    }
+
     url.searchParams.set('access_token', token);
 
     const res = await fetch(url.toString());
