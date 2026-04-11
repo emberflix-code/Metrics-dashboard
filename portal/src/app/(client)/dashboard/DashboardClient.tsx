@@ -32,7 +32,6 @@ let _comparisonPeriod = 'none';
 let _searchMode = 'all';
 const _searchChips: string[] = [];
 let _isInitialized = false;
-let _campaignFilter = '';
 let _showAccount = false;
 
 const _charts: Record<string, any> = {};
@@ -703,7 +702,7 @@ function downloadFile(content: string, filename: string, type: string) {
 function initDashboard(accountIds: string[], campaignFilter: string, showAccount: boolean) {
   if (_isInitialized) return;
   _isInitialized = true;
-  _campaignFilter = campaignFilter;
+  void campaignFilter; // filter is now applied server-side via Meta API
   _showAccount = showAccount;
 
   // Populate account dropdown from server-provided IDs
