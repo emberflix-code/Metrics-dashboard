@@ -92,7 +92,7 @@ export default function LoginPage() {
       <div className="w-full max-w-sm">
         <div className="text-center mb-8">
           <div className="mx-auto mb-4 w-16 h-16 relative">
-            <Image src="/gmnlogo.png" alt="GMN Logo" fill className="object-contain" priority />
+            <Image src="/gmn.png" alt="GMN Logo" fill className="object-contain" priority />
           </div>
           <h1 className="text-xl font-bold text-white">GMN Ads Portal</h1>
           <p className="text-sm text-slate-400 mt-1">Sign in to your account</p>
