@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(start \"\" \"c:\\\\Users\\\\Ember\\\\Desktop\\\\Web App\\\\Meta.html\")",
+      "Bash(npm install:*)"
+    ]
+  }
+}

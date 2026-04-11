@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.local
+.env*.local
+portal/node_modules/
+portal/.next/
+portal/.env
+portal/.env.local
+portal/.env*.local
+portal/tsconfig.tsbuildinfo
+*.log

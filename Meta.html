@@ -1,0 +1,2067 @@
+<!doctype html>
+<html lang="en" class="h-full">
+ <head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Meta Ads Dashboard</title>
+  <link rel="icon" type="image/png" href="gmnlogo.png">
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.263.0/dist/umd/lucide.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <script src="/_sdk/element_sdk.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&amp;family=Space+Mono:wght@400;700&amp;display=swap" rel="stylesheet">
+  <script>
+tailwind.config = {
+  theme: {
+    extend: {
+      fontFamily: {
+        display: ['DM Sans', 'sans-serif'],
+        mono: ['Space Mono', 'monospace']
+      }
+    }
+  }
+}
+</script>
+  <style>
+  html, body { height: 100%; margin: 0; }
+  .scrollbar-thin::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(12px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(-12px); } to { opacity:1; transform:translateY(0); } }
+  @keyframes fadeOut { from { opacity:1; transform:translateY(0); } to { opacity:0; transform:translateY(-12px); } }
+  .fade-up { animation: fadeUp 0.4s ease both; }
+  .fade-up-1 { animation-delay: 0.05s; }
+  .fade-up-2 { animation-delay: 0.1s; }
+  .fade-up-3 { animation-delay: 0.15s; }
+  .fade-up-4 { animation-delay: 0.2s; }
+  .fade-up-5 { animation-delay: 0.25s; }
+  .fade-up-6 { animation-delay: 0.3s; }
+  .animate-spin { animation: spin 1s linear infinite; }
+  @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+  /* ── Loading bar ── */
+  #loading-bar { position:fixed; top:0; left:0; right:0; height:3px; z-index:9999; pointer-events:none; background:transparent; }
+  #loading-bar.active { background: linear-gradient(90deg,#3b82f6 0%,#818cf8 40%,#3b82f6 100%); background-size:200% 100%; animation: loadbar 1.4s ease infinite; }
+  @keyframes loadbar { 0%{background-position:100% 0} 100%{background-position:-100% 0} }
+  /* ── Skeleton shimmer ── */
+  @keyframes shimmer { 0%{background-position:-400px 0} 100%{background-position:400px 0} }
+  .skeleton { background: linear-gradient(90deg,#1e293b 25%,#334155 50%,#1e293b 75%); background-size:800px 100%; animation:shimmer 1.3s ease infinite; border-radius:4px; }
+</style>
+  <style>body { box-sizing: border-box; }</style>
+  <script src="/_sdk/data_sdk.js" type="text/javascript"></script>
+ </head>
+ <body class="h-full bg-slate-950 text-slate-200 font-display overflow-auto">
+  <div id="loading-bar"></div>
+  <div id="app" class="w-full min-h-full flex flex-col"><!-- Header -->
+   <header class="bg-slate-900/80 backdrop-blur-md border-b border-slate-800 sticky top-0 z-30">
+    <div class="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
+     <div class="flex items-center gap-3">
+      <img src="gmnlogo.png" alt="GMN Logo" class="w-9 h-9 rounded-lg object-contain">
+      <h1 id="dashboard-title" class="text-lg font-bold text-white tracking-tight">Meta Ads Dashboard</h1><span class="text-[10px] font-mono bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full uppercase tracking-wider">Gym-Members-Now</Gym-Members-Now></span>
+     </div>
+     <div class="flex items-center gap-3">
+      <div class="flex items-center gap-2 text-xs text-slate-400"><i data-lucide="info" class="w-3.5 h-3.5"></i> <span id="data-status">Sample data — connect Meta API for live results</span>
+      </div>
+      <div class="flex items-center gap-2"><div class="relative"><button onclick="toggleExportMenu()" class="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"> <i data-lucide="download" class="w-3 h-3"></i> <span>Export</span> </button><div id="export-menu" class="hidden absolute right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-40 min-w-[168px] py-1"><button onclick="exportToCSV()" class="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 transition-colors flex items-center gap-2"><i data-lucide="file-text" class="w-3.5 h-3.5"></i> Download CSV</button><button onclick="exportToJSON()" class="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 transition-colors flex items-center gap-2"><i data-lucide="file-code" class="w-3.5 h-3.5"></i> Download JSON</button><button onclick="copyToClipboard()" class="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 transition-colors flex items-center gap-2"><i data-lucide="clipboard" class="w-3.5 h-3.5"></i> Copy to Clipboard</button></div></div> <button onclick="toggleIntegrationModal()" class="text-xs bg-blue-600/20 hover:bg-blue-600/30 text-blue-400 border border-blue-500/30 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"> <i data-lucide="link" class="w-3 h-3"></i> <span>Connect API</span> </button>
+      </div>
+     </div>
+    </div>
+   </header><!-- Controls -->
+   <div class="max-w-[1600px] mx-auto w-full px-4 sm:px-6 pt-5 pb-3">
+    <div class="flex flex-wrap gap-3 items-end"><!-- Ad Account -->
+     <div class="flex flex-col gap-1.5 min-w-[200px]"><label for="ad-account" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Ad Account</label>
+      <div class="flex flex-col gap-0.5">
+       <div class="relative"><select id="ad-account" onchange="handleAccountChange()" class="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 pr-8 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 cursor-pointer"> <option value="all">All Accounts</option> <option value="act_1">Acme Corp (act_182736451)</option> <option value="act_2">Brand Studio (act_293847562)</option> <option value="act_3">Growth Team (act_374958673)</option> </select> <i data-lucide="chevron-down" class="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none"></i>
+       </div>
+       <span class="h-4 block"></span>
+      </div>
+     </div><!-- Date Range Picker Trigger -->
+     <div class="flex flex-col gap-1.5"><label class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Date Range</label>
+      <div class="flex flex-col gap-0.5">
+       <button id="date-picker-btn" onclick="openDatePicker()" class="flex items-center gap-2 bg-slate-900 border border-slate-700 hover:border-slate-500 rounded-lg px-3 py-2 text-sm text-white transition-colors whitespace-nowrap">
+        <i data-lucide="calendar" class="w-4 h-4 text-slate-400"></i>
+        <span id="date-picker-label">Last 30 days</span>
+        <i data-lucide="chevron-down" class="w-3.5 h-3.5 text-slate-400 ml-1"></i>
+       </button>
+       <span id="date-range-label" class="text-[10px] text-slate-400 font-mono px-1 h-4 whitespace-nowrap"></span>
+      </div>
+     </div>
+     <!-- hidden legacy inputs kept for getDateRange() compatibility -->
+     <select id="date-preset" class="hidden"><option value="last_30d" selected>Last 30 days</option></select>
+     <input type="date" id="date-start" class="hidden">
+     <input type="date" id="date-end" class="hidden">
+     <select id="compare-period" class="hidden"><option value="none" selected>No comparison</option></select>
+     <span id="compare-range-label" class="hidden"></span>
+     <!-- Delivery Filter -->
+     <div class="flex flex-col gap-1.5"><label for="delivery-filter" class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Delivery</label>
+      <div class="flex flex-col gap-0.5">
+       <div class="relative"><select id="delivery-filter" onchange="handleSearch()" class="bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 pr-8 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 cursor-pointer min-w-[150px]">
+        <option value="all">All Delivery</option>
+        <option value="ACTIVE">Active</option>
+        <option value="PAUSED">Paused</option>
+        <option value="IN_PROCESS">In Process</option>
+        <option value="WITH_ISSUES">With Issues</option>
+        <option value="ARCHIVED">Archived</option>
+       </select><i data-lucide="chevron-down" class="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none"></i>
+       </div>
+       <span class="h-4 block"></span>
+      </div>
+     </div><!-- Search -->
+     <div class="flex flex-col gap-1.5 flex-1 min-w-[280px]"><label class="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Search Campaigns</label>
+      <div class="flex flex-col gap-0.5">
+       <div class="flex items-stretch gap-0">
+        <!-- Mode dropdown -->
+        <div class="relative">
+         <button id="search-mode-btn" onclick="toggleSearchModeMenu(event)" class="h-full bg-slate-900 border border-slate-700 border-r-0 rounded-l-lg px-3 py-2 text-sm text-slate-300 flex items-center gap-1.5 whitespace-nowrap hover:bg-slate-800 transition-colors">
+          <span id="search-mode-label">contains all of</span>
+          <i data-lucide="chevron-down" class="w-3 h-3 text-slate-400"></i>
+         </button>
+         <div id="search-mode-menu" class="hidden absolute left-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-lg shadow-xl z-50 min-w-[200px] py-1">
+          <button onclick="setSearchMode('all')"      class="search-mode-opt w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 flex items-center gap-2"><span class="w-3 h-3 rounded-full border-2 border-blue-500 flex-shrink-0" id="mode-dot-all"></span>contains all of</button>
+          <button onclick="setSearchMode('any')"      class="search-mode-opt w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 flex items-center gap-2"><span class="w-3 h-3 rounded-full border-2 border-slate-500 flex-shrink-0" id="mode-dot-any"></span>contains any of</button>
+          <button onclick="setSearchMode('none')"     class="search-mode-opt w-full text-left px-4 py-2 text-sm text-slate-300 hover:bg-slate-700 flex items-center gap-2"><span class="w-3 h-3 rounded-full border-2 border-slate-500 flex-shrink-0" id="mode-dot-none"></span>doesn't contain any of</button>
+         </div>
+        </div>
+        <!-- Chip + text input area -->
+        <div id="search-chip-area" onclick="document.getElementById('search-input').focus()" class="flex-1 flex flex-wrap items-center gap-1 bg-slate-900 border border-slate-700 rounded-r-lg px-2 py-1.5 cursor-text min-h-[38px]">
+         <div id="search-chips" class="flex flex-wrap gap-1"></div>
+         <input type="text" id="search-input" placeholder="Enter a name or keyword..." onkeydown="handleSearchKey(event)" oninput="handleSearch()" class="flex-1 min-w-[120px] bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none py-0.5">
+        </div>
+       </div>
+       <span class="h-4 block" id="search-hint"></span>
+      </div>
+</div><button onclick="handleApply()" class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold px-5 py-2 rounded-lg transition-colors flex items-center gap-2 self-end mb-[20px]"> <i data-lucide="refresh-cw" class="w-4 h-4"></i> Apply </button>
+    </div>
+   </div><!-- Summary Cards -->
+   <div id="summary-cards" class="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-3">
+    <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3" id="cards-grid"></div>
+   </div><!-- Table -->
+   <div class="max-w-[1600px] mx-auto w-full px-4 sm:px-6 pb-6 flex-1">
+    <div class="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
+     <!-- Level Switcher -->
+     <div class="flex items-center gap-1 px-4 pt-3 pb-0 border-b border-slate-800">
+      <button onclick="handleLevelChange('campaign')" id="tab-campaign" class="level-tab active-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">Campaigns</button>
+      <button onclick="handleLevelChange('adset')" id="tab-adset" class="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">Ad Sets</button>
+      <button onclick="handleLevelChange('ad')" id="tab-ad" class="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">Ads</button>
+      <div class="ml-auto flex items-center gap-2 pb-2">
+        <span id="selection-summary" class="text-xs text-slate-500 hidden"></span>
+        <div class="flex items-center gap-0.5 bg-slate-800/60 rounded-lg p-0.5">
+          <button onclick="setView('table')" id="view-btn-table" class="view-btn active-view-btn flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold"><i data-lucide="table-2" class="w-3 h-3"></i> Table</button>
+          <button onclick="setView('analytics')" id="view-btn-analytics" class="view-btn flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold"><i data-lucide="bar-chart-2" class="w-3 h-3"></i> Analytics</button>
+        </div>
+      </div>
+     </div>
+     <style>
+      .level-tab { color: #94a3b8; background: transparent; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+      .level-tab:hover { color: #e2e8f0; }
+      .active-tab { color: #fff; border-bottom-color: #3b82f6; }
+      .sort-th { cursor: pointer; user-select: none; }
+      .sort-th:hover { color: #e2e8f0; }
+      .view-btn { color: #94a3b8; background: transparent; border-radius: 6px; transition: all 0.15s; }
+      .view-btn:hover { color: #e2e8f0; background: rgba(255,255,255,0.06); }
+      .active-view-btn { color: #fff !important; background: rgba(59,130,246,0.2) !important; }
+      .sort-btn { font-size: 10px; padding: 2px 7px; border-radius: 4px; border: 1px solid rgba(148,163,184,0.2); color: #64748b; background: transparent; cursor: pointer; transition: all 0.12s; }
+      .sort-btn:hover { color: #e2e8f0; border-color: rgba(148,163,184,0.4); }
+      .active-sort-btn { color: #fff !important; background: rgba(59,130,246,0.25) !important; border-color: rgba(59,130,246,0.4) !important; }
+      .delta-up-good { color: #34d399; font-size: 10px; }
+      .delta-down-good { color: #34d399; font-size: 10px; }
+      .delta-up-bad { color: #f87171; font-size: 10px; }
+      .delta-down-bad { color: #f87171; font-size: 10px; }
+      .delta-neutral { color: #64748b; font-size: 10px; }
+     </style>
+     <div id="table-view">
+     <div id="drilldown-banner" class="hidden items-center gap-2 px-4 py-2 bg-blue-500/10 border-b border-blue-500/20 text-xs text-blue-300"></div>
+     <div class="overflow-x-auto scrollbar-thin">
+      <table class="w-full text-sm">
+       <thead>
+        <tr class="border-b border-slate-800" id="table-head-row">
+         <th class="w-8 px-3 py-3 sticky left-0 bg-slate-900/90 backdrop-blur-sm"><input type="checkbox" id="select-all" onchange="handleSelectAll(this.checked)" class="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-blue-500 cursor-pointer"></th>
+         <th class="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 sticky left-8 bg-slate-900/90 backdrop-blur-sm min-w-[200px]" id="col-name">Campaign</th>
+         <th class="text-left px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">Delivery</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">Reach</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">Impressions</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">CPM</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">Results</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">Spent (USD)</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">CTR</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">Link Clicks</th>
+         <th class="text-right px-4 py-3 text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">CPC</th>
+        </tr>
+       </thead>
+       <tbody id="table-body"></tbody>
+       <tfoot id="table-foot"></tfoot>
+      </table>
+     </div>
+     <div id="no-results" class="hidden px-6 py-12 text-center text-slate-500"><i data-lucide="search-x" class="w-10 h-10 mx-auto mb-3 opacity-40"></i>
+      <p class="font-medium">No campaigns found</p>
+      <p class="text-xs mt-1">Try adjusting your search or filters</p>
+     </div>
+     </div><!-- #table-view -->
+
+     <!-- Analytics View -->
+     <div id="analytics-view" class="hidden p-5 space-y-4">
+
+       <!-- Row 1: Daily Spend & Results + Top by Results -->
+       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+         <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="trending-up" class="w-3.5 h-3.5 text-emerald-400"></i> Daily Spend &amp; Results</h3>
+             <span id="chart-trend-range" class="text-[10px] font-mono text-slate-500"></span>
+           </div>
+           <div id="chart-trend-wrap" style="position:relative;height:180px"><canvas id="chart-trend"></canvas></div>
+           <div id="chart-trend-empty" class="hidden text-center text-slate-500 py-8 text-xs">Select a multi-day date range to see daily trends</div>
+         </div>
+         <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="target" class="w-3.5 h-3.5 text-amber-400"></i> Top by Results</h3>
+             <div class="flex gap-1">
+               <button id="sort-results-desc" class="sort-btn active-sort-btn" onclick="setChartSort('results','desc')">High → Low</button>
+               <button id="sort-results-asc"  class="sort-btn" onclick="setChartSort('results','asc')">Low → High</button>
+             </div>
+           </div>
+           <div id="chart-results-wrap" style="position:relative;height:180px"><canvas id="chart-results"></canvas></div>
+           <div id="chart-results-empty" class="hidden text-center text-slate-500 py-8 text-xs">No data</div>
+         </div>
+       </div>
+
+       <!-- Row 2: Top by Spend + Daily CPL Trend -->
+       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+         <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="dollar-sign" class="w-3.5 h-3.5 text-emerald-400"></i> Top by Spend</h3>
+             <div class="flex gap-1">
+               <button id="sort-spend-desc" class="sort-btn active-sort-btn" onclick="setChartSort('spend','desc')">High → Low</button>
+               <button id="sort-spend-asc"  class="sort-btn" onclick="setChartSort('spend','asc')">Low → High</button>
+             </div>
+           </div>
+           <div id="chart-spend-wrap" style="position:relative;height:240px"><canvas id="chart-spend"></canvas></div>
+           <div id="chart-spend-empty" class="hidden text-center text-slate-500 py-8 text-xs">No data</div>
+         </div>
+         <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="receipt" class="w-3.5 h-3.5 text-violet-400"></i> Daily CPL Trend</h3>
+             <span id="chart-cpl-trend-range" class="text-[10px] font-mono text-slate-500"></span>
+           </div>
+           <div id="chart-cpl-trend-wrap" style="position:relative;height:240px"><canvas id="chart-cpl-trend"></canvas></div>
+           <div id="chart-cpl-trend-empty" class="hidden text-center text-slate-500 py-8 text-xs">Select a multi-day date range to see CPL trend</div>
+         </div>
+       </div>
+
+       <!-- Row 3: CPL Efficiency + CPL vs Spend Scatter -->
+       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+         <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="receipt" class="w-3.5 h-3.5 text-violet-400"></i> CPL by Campaign</h3>
+             <div class="flex gap-1">
+               <button id="sort-cplEff-asc"  class="sort-btn active-sort-btn" onclick="setChartSort('cplEff','asc')">Best First</button>
+               <button id="sort-cplEff-desc" class="sort-btn" onclick="setChartSort('cplEff','desc')">Worst First</button>
+             </div>
+           </div>
+           <div id="chart-cpl-wrap" style="position:relative;height:240px"><canvas id="chart-cpl"></canvas></div>
+           <div id="chart-cpl-empty" class="hidden text-center text-slate-500 py-8 text-xs">No lead data</div>
+         </div>
+         <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+           <div class="flex items-center justify-between mb-3">
+             <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="scatter-chart" class="w-3.5 h-3.5 text-blue-400"></i> CPL vs Results (bubble = spend)</h3>
+           </div>
+           <div id="chart-scatter-wrap" style="position:relative;height:240px"><canvas id="chart-scatter"></canvas></div>
+           <div id="chart-scatter-empty" class="hidden text-center text-slate-500 py-8 text-xs">No lead data</div>
+         </div>
+       </div>
+
+       <!-- Row 4: Delivery Mix full width -->
+       <div class="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+         <h3 class="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2 mb-3"><i data-lucide="pie-chart" class="w-3.5 h-3.5 text-blue-400"></i> Delivery Mix</h3>
+         <div id="chart-delivery-wrap" style="position:relative;height:180px"><canvas id="chart-delivery"></canvas></div>
+         <div id="chart-delivery-empty" class="hidden text-center text-slate-500 py-8 text-xs">No data</div>
+       </div>
+
+     </div><!-- #analytics-view -->
+
+    </div>
+   </div><!-- Footer -->
+   <footer class="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-4 text-center text-[11px] text-slate-600 border-t border-slate-800/50">
+    Demo dashboard with sample data. Connect your Meta Business account for live campaign metrics.
+   </footer>
+  </div><!-- API Integration Modal -->
+  <div id="integration-modal" class="hidden fixed inset-0 z-50 flex items-center justify-center p-4">
+   <div class="absolute inset-0 bg-black/60 backdrop-blur-sm" onclick="toggleIntegrationModal()"></div>
+   <div class="relative bg-slate-900 border border-slate-700 rounded-xl max-w-md w-full shadow-2xl">
+    <div class="flex items-center justify-between p-4 border-b border-slate-700">
+     <h2 class="text-base font-bold text-white flex items-center gap-2"><i data-lucide="link" class="w-5 h-5 text-blue-400"></i> Connect Meta API</h2><button onclick="toggleIntegrationModal()" class="text-slate-400 hover:text-white transition-colors"><i data-lucide="x" class="w-5 h-5"></i></button>
+    </div>
+    <div class="p-4 space-y-4">
+     <div>
+      <p class="text-xs text-slate-400 mb-3">Enter your Meta Business API credentials to fetch live campaign data.</p>
+      <div class="space-y-3">
+       <div class="flex flex-col gap-1.5">
+        <label class="text-xs font-semibold uppercase tracking-wider text-slate-500">Access Token</label> <input type="password" id="api-token" placeholder="Paste your access token..." class="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 font-mono text-xs">
+       </div>
+       <div class="bg-amber-500/10 border border-amber-500/30 rounded-lg p-3">
+        <p class="text-xs text-amber-300"><strong>Note:</strong> Your token is stored locally in this session only and never sent to external servers.</p>
+       </div>
+      </div>
+     </div>
+    </div>
+    <div class="flex gap-2 p-4 border-t border-slate-700 bg-slate-900/50">
+     <button onclick="toggleIntegrationModal()" class="flex-1 px-4 py-2 text-sm font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors">Cancel</button> <button onclick="connectMetaAPI()" id="connect-btn" class="flex-1 px-4 py-2 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-500 rounded-lg transition-colors flex items-center justify-center gap-2"><i data-lucide="check" class="w-4 h-4"></i> Connect</button>
+    </div>
+   </div>
+  </div>
+  <script>
+// Integration state
+let apiConnected = false;
+let apiToken = '';
+let businessAccountId = '';
+let currentLevel = 'campaign';
+let selectedRows = new Set();
+let sortCol = null;
+let sortDir = 'asc';
+let drilldownParentIds = new Set();
+let drilldownParentLevel = null;
+let currentView = 'table';
+let trendData = []; // [{date, spend, results}]
+const _charts = {};
+const _chartSort = { spend: 'desc', results: 'desc', cplEff: 'asc' };
+let comparisonPeriod = 'none';
+let comparisonTotals = null; // {reach, impressions, spent, results, linkClicks}
+let comparisonTrendData = [];
+let comparisonRange = null; // {since, until} of last-fetched comparison period
+
+function setChartSort(chart, dir) {
+  _chartSort[chart] = dir;
+  // update button states
+  ['asc','desc'].forEach(d => {
+    const btn = document.getElementById(`sort-${chart}-${d}`);
+    if (btn) btn.classList.toggle('active-sort-btn', d === dir);
+  });
+  renderAnalytics();
+}
+
+function setView(v) {
+  currentView = v;
+  localStorage.setItem('meta_view', v);
+  document.getElementById('table-view').classList.toggle('hidden', v !== 'table');
+  document.getElementById('analytics-view').classList.toggle('hidden', v !== 'analytics');
+  document.getElementById('view-btn-table').classList.toggle('active-view-btn', v === 'table');
+  document.getElementById('view-btn-analytics').classList.toggle('active-view-btn', v === 'analytics');
+  if (v === 'analytics') renderAnalytics();
+}
+
+function formatDateLabel(since, until) {
+  if (!since || !until) return '';
+  const M = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const [sy,sm,sd] = since.split('-').map(Number);
+  const [ey,em,ed] = until.split('-').map(Number);
+  if (since === until) return `${M[sm-1]} ${sd}, ${sy}`;
+  const s = `${M[sm-1]} ${sd}`;
+  const e = `${M[em-1]} ${ed}`;
+  return sy === ey ? `${s} – ${e}, ${ey}` : `${s}, ${sy} – ${e}, ${ey}`;
+}
+
+function getComparisonDateRange(since, until, mode) {
+  const parse = s => { const [y,m,d] = s.split('-').map(Number); return new Date(y, m-1, d); };
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const s = parse(since), e = parse(until);
+  const days = Math.round((e - s) / 86400000);
+  let cs, ce;
+  if (mode === 'prev_period') {
+    ce = new Date(s); ce.setDate(ce.getDate() - 1);
+    cs = new Date(ce); cs.setDate(cs.getDate() - days);
+  } else if (mode === 'DoD') {
+    cs = new Date(s); cs.setDate(cs.getDate() - 1);
+    ce = new Date(e); ce.setDate(ce.getDate() - 1);
+  } else if (mode === 'WoW') {
+    cs = new Date(s); cs.setDate(cs.getDate() - 7);
+    ce = new Date(e); ce.setDate(ce.getDate() - 7);
+  } else if (mode === 'MoM') {
+    // Clamp day to last day of target month to avoid overflow (e.g. Mar 31 → Feb 28, not Mar 3)
+    const momStartLastDay = new Date(s.getFullYear(), s.getMonth(), 0).getDate();
+    cs = new Date(s.getFullYear(), s.getMonth() - 1, Math.min(s.getDate(), momStartLastDay));
+    const momEndLastDay = new Date(e.getFullYear(), e.getMonth(), 0).getDate();
+    ce = new Date(e.getFullYear(), e.getMonth() - 1, Math.min(e.getDate(), momEndLastDay));
+  } else if (mode === 'YoY') {
+    // Clamp day for leap year edge cases (e.g. Feb 29 in leap year → Feb 28 in non-leap)
+    const yoyStartLastDay = new Date(s.getFullYear() - 1, s.getMonth() + 1, 0).getDate();
+    cs = new Date(s.getFullYear() - 1, s.getMonth(), Math.min(s.getDate(), yoyStartLastDay));
+    const yoyEndLastDay = new Date(e.getFullYear() - 1, e.getMonth() + 1, 0).getDate();
+    ce = new Date(e.getFullYear() - 1, e.getMonth(), Math.min(e.getDate(), yoyEndLastDay));
+  } else return null;
+  return { since: fmt(cs), until: fmt(ce) };
+}
+
+function updateDateLabel() {
+  try {
+    const { since, until } = getDateRange();
+    const lbl = document.getElementById('date-range-label');
+    if (lbl && since && until) lbl.textContent = formatDateLabel(since, until);
+    const clbl = document.getElementById('compare-range-label');
+    if (clbl) {
+      if (comparisonPeriod !== 'none') {
+        const cr = getComparisonDateRange(since, until, comparisonPeriod);
+        clbl.textContent = cr ? `vs ${formatDateLabel(cr.since, cr.until)}` : '';
+      } else {
+        clbl.textContent = '';
+      }
+    }
+  } catch(_) {}
+}
+
+function handleCompareChange() {
+  comparisonPeriod = document.getElementById('compare-period').value;
+  localStorage.setItem('meta_compare', comparisonPeriod);
+  updateDateLabel();
+  if (apiConnected) fetchMetaCampaigns().catch(err => showNotification(err.message, 'error'));
+}
+
+function shortName(name, max = 22) {
+  return name.length > max ? name.slice(0, max - 1) + '…' : name;
+}
+
+function destroyChart(id) {
+  if (_charts[id]) { _charts[id].destroy(); delete _charts[id]; }
+}
+
+const CHART_DEFAULTS = {
+  color: '#94a3b8',
+  grid: 'rgba(148,163,184,0.08)',
+  font: { family: 'Space Mono, monospace', size: 10 }
+};
+
+function renderAnalytics() {
+  const data = getFiltered().map(calcMetrics);
+  const CD = CHART_DEFAULTS;
+
+  // helper: show/hide wrap+empty
+  function toggle(wrapId, emptyId, show) {
+    document.getElementById(wrapId).classList.toggle('hidden', !show);
+    document.getElementById(emptyId).classList.toggle('hidden', show);
+  }
+
+  // ── Offset-aligned comparison data ───────────────────────────────────────
+  // Index-aligning comparisonTrendData directly is wrong when either period's
+  // first data day doesn't match the period's calendar start (e.g. campaigns
+  // weren't running the first N days). Instead, map each trendData day to its
+  // comparison counterpart by computing the day offset from the period start.
+  const { since } = getDateRange();
+  const _compByDate = {};
+  for (const c of comparisonTrendData) _compByDate[c.date] = c;
+  const _addDays = (dateStr, n) => {
+    const d = new Date(dateStr + 'T00:00:00');
+    d.setDate(d.getDate() + n);
+    return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  };
+  // compTrendAligned[i] is the comparison record for trendData[i]'s calendar position, or null
+  const compTrendAligned = trendData.map(d => {
+    if (!comparisonRange) return null;
+    const offset = Math.round((new Date(d.date+'T00:00:00') - new Date(since+'T00:00:00')) / 86400000);
+    return _compByDate[_addDays(comparisonRange.since, offset)] || null;
+  });
+
+  const _fmtDay = s => { if(!s)return''; const [y,m,d]=s.split('-'); const ms=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']; return `${ms[+m-1]} ${+d}`; };
+
+  // ── 1. Daily Spend & Results trend ───────────────────────────────────────
+  destroyChart('trend');
+  const hasTrend = trendData.length >= 2;
+  toggle('chart-trend-wrap', 'chart-trend-empty', hasTrend);
+  if (hasTrend) {
+    const hasCompTrend = compTrendAligned.some(c => c !== null);
+    const rangeStr = formatDateLabel(trendData[0].date, trendData[trendData.length-1].date);
+    const compRangeStr = (hasCompTrend && comparisonRange)
+      ? ` vs ${formatDateLabel(comparisonRange.since, comparisonRange.until)}` : '';
+    document.getElementById('chart-trend-range').textContent = rangeStr + compRangeStr;
+    const trendDatasets = [
+      { label:'Spend ($)', data: trendData.map(d=>d.spend),
+        borderColor:'#34d399', backgroundColor:'rgba(52,211,153,0.10)',
+        yAxisID:'ySpend', tension:0.35, pointRadius:3, fill:true },
+      { label:'Results', data: trendData.map(d=>d.results),
+        borderColor:'#f59e0b', backgroundColor:'rgba(245,158,11,0.10)',
+        yAxisID:'yResults', tension:0.35, pointRadius:3, fill:true }
+    ];
+    if (hasCompTrend) {
+      trendDatasets.push(
+        { label:'Spend (prev)', data: compTrendAligned.map(c => c?.spend ?? null),
+          borderColor:'rgba(52,211,153,0.35)', backgroundColor:'transparent',
+          yAxisID:'ySpend', tension:0.35, pointRadius:2, fill:false, borderDash:[5,4], spanGaps:true },
+        { label:'Results (prev)', data: compTrendAligned.map(c => c?.results ?? null),
+          borderColor:'rgba(245,158,11,0.35)', backgroundColor:'transparent',
+          yAxisID:'yResults', tension:0.35, pointRadius:2, fill:false, borderDash:[5,4], spanGaps:true }
+      );
+    }
+    _charts.trend = new Chart(document.getElementById('chart-trend').getContext('2d'), {
+      type: 'line',
+      data: { labels: trendData.map(d => d.date.slice(5)), datasets: trendDatasets },
+      options: {
+        responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+        plugins:{
+          legend:{ labels:{ color:CD.color, font:CD.font, boxWidth:10 } },
+          tooltip:{ callbacks:{
+            title: items => {
+              const idx = items[0].dataIndex;
+              const main = trendData[idx]?.date;
+              const comp = compTrendAligned[idx]?.date;
+              return main ? (_fmtDay(main) + (comp ? '  ·  prev: ' + _fmtDay(comp) : '')) : items[0].label;
+            }
+          }}
+        },
+        scales:{
+          x:{ ticks:{color:(ctx)=>{ const d=trendData[ctx.index]?.date; if(!d)return CD.color; const wd=new Date(d+'T12:00:00').getDay(); return(wd===0||wd===6)?'#f87171':CD.color; },font:CD.font}, grid:{color:(ctx)=>{ const d=trendData[ctx.index]?.date; if(!d)return CD.grid; const wd=new Date(d+'T12:00:00').getDay(); return(wd===0||wd===6)?'rgba(248,113,113,0.18)':CD.grid; }} },
+          ySpend:{ position:'left', title:{display:true,text:'Daily Spend',color:'#34d399',font:{size:10}}, ticks:{color:'#34d399',font:CD.font,callback:v=>'$'+v.toLocaleString()}, grid:{color:CD.grid} },
+          yResults:{ position:'right', title:{display:true,text:'Daily Results',color:'#f59e0b',font:{size:10}}, ticks:{color:'#f59e0b',font:CD.font}, grid:{drawOnChartArea:false} }
+        }
+      }
+    });
+  }
+
+  // ── 2. Daily CPL Trend ───────────────────────────────────────────────────
+  destroyChart('cplTrend');
+  const cplTrendDays = trendData.map(d => ({
+    date: d.date, cpl: d.results > 0 ? parseFloat((d.spend / d.results).toFixed(2)) : null
+  }));
+  const hasCplTrend = cplTrendDays.some(d => d.cpl !== null) && cplTrendDays.length >= 2;
+  toggle('chart-cpl-trend-wrap', 'chart-cpl-trend-empty', hasCplTrend);
+  if (hasCplTrend) {
+    const compCplAligned = compTrendAligned.map(c => {
+      if (!c || c.results === 0) return null;
+      return parseFloat((c.spend / c.results).toFixed(2));
+    });
+    const hasCompCpl = compCplAligned.some(v => v !== null);
+    document.getElementById('chart-cpl-trend-range').textContent =
+      formatDateLabel(trendData[0].date, trendData[trendData.length-1].date);
+    const cplDatasets = [
+      { label:'CPL ($)', data: cplTrendDays.map(d=>d.cpl),
+        borderColor:'#a78bfa', backgroundColor:'rgba(167,139,250,0.10)',
+        tension:0.35, pointRadius:3, fill:true, spanGaps:true }
+    ];
+    if (hasCompCpl) {
+      cplDatasets.push({
+        label:'CPL (prev)', data: compCplAligned,
+        borderColor:'rgba(167,139,250,0.35)', backgroundColor:'transparent',
+        tension:0.35, pointRadius:2, fill:false, borderDash:[5,4], spanGaps:true
+      });
+    }
+    _charts.cplTrend = new Chart(document.getElementById('chart-cpl-trend').getContext('2d'), {
+      type: 'line',
+      data: { labels: trendData.map(d => d.date.slice(5)), datasets: cplDatasets },
+      options: {
+        responsive:true, maintainAspectRatio:false, interaction:{mode:'index',intersect:false},
+        plugins:{
+          legend:{ labels:{color:CD.color,font:CD.font,boxWidth:10} },
+          tooltip:{ callbacks:{
+            title: items => {
+              const idx = items[0].dataIndex;
+              const main = trendData[idx]?.date;
+              const comp = compTrendAligned[idx]?.date;
+              return main ? (_fmtDay(main) + (comp ? '  ·  prev: ' + _fmtDay(comp) : '')) : items[0].label;
+            }
+          }}
+        },
+        scales:{
+          x:{ ticks:{color:(ctx)=>{ const d=trendData[ctx.index]?.date; if(!d)return CD.color; const wd=new Date(d+'T12:00:00').getDay(); return(wd===0||wd===6)?'#f87171':CD.color; },font:CD.font}, grid:{color:(ctx)=>{ const d=trendData[ctx.index]?.date; if(!d)return CD.grid; const wd=new Date(d+'T12:00:00').getDay(); return(wd===0||wd===6)?'rgba(248,113,113,0.18)':CD.grid; }} },
+          y:{ ticks:{color:'#a78bfa',font:CD.font,callback:v=>'$'+v.toFixed(2)}, grid:{color:CD.grid} }
+        }
+      }
+    });
+  }
+
+  // ── 3. Top 8 by Spend ────────────────────────────────────────────────────
+  destroyChart('spend');
+  const spendSorted = [...data].sort((a,b) => _chartSort.spend==='desc' ? b.spent-a.spent : a.spent-b.spent).slice(0,8);
+  toggle('chart-spend-wrap', 'chart-spend-empty', spendSorted.length > 0);
+  if (spendSorted.length) {
+    _charts.spend = new Chart(document.getElementById('chart-spend').getContext('2d'), {
+      type:'bar',
+      data:{
+        labels: spendSorted.map(c=>shortName(c.name)),
+        datasets:[{ label:'Spend ($)', data:spendSorted.map(c=>c.spent),
+          backgroundColor:'rgba(52,211,153,0.7)', borderRadius:4 }]
+      },
+      options:{
+        indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{ticks:{color:CD.color,font:CD.font,callback:v=>'$'+v.toLocaleString()},grid:{color:CD.grid}},
+          y:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}}
+        }
+      }
+    });
+  }
+
+  // ── 4. Top 8 by Results ──────────────────────────────────────────────────
+  destroyChart('results');
+  const resultsSorted = [...data].sort((a,b) => _chartSort.results==='desc' ? b.results-a.results : a.results-b.results).slice(0,8);
+  toggle('chart-results-wrap', 'chart-results-empty', resultsSorted.length > 0);
+  if (resultsSorted.length) {
+    _charts.results = new Chart(document.getElementById('chart-results').getContext('2d'), {
+      type:'bar',
+      data:{
+        labels: resultsSorted.map(c=>shortName(c.name)),
+        datasets:[{ label:'Results', data:resultsSorted.map(c=>c.results),
+          backgroundColor:'rgba(245,158,11,0.7)', borderRadius:4 }]
+      },
+      options:{
+        indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}},
+          y:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}}
+        }
+      }
+    });
+  }
+
+  // ── 5. CPL by Campaign ───────────────────────────────────────────────────
+  destroyChart('cpl');
+  const withLeads = [...data].filter(c=>c.results>0&&c.cpl>0)
+    .sort((a,b) => _chartSort.cplEff==='asc' ? a.cpl-b.cpl : b.cpl-a.cpl).slice(0,8);
+  toggle('chart-cpl-wrap', 'chart-cpl-empty', withLeads.length > 0);
+  if (withLeads.length) {
+    _charts.cpl = new Chart(document.getElementById('chart-cpl').getContext('2d'), {
+      type:'bar',
+      data:{
+        labels: withLeads.map(c=>shortName(c.name)),
+        datasets:[{ label:'CPL ($)', data:withLeads.map(c=>parseFloat(c.cpl.toFixed(2))),
+          backgroundColor: withLeads.map((_,i)=>`rgba(167,139,250,${_chartSort.cplEff==='asc' ? 0.9-i*0.09 : 0.3+i*0.09})`),
+          borderRadius:4 }]
+      },
+      options:{
+        indexAxis:'y', responsive:true, maintainAspectRatio:false,
+        plugins:{legend:{display:false}},
+        scales:{
+          x:{ticks:{color:CD.color,font:CD.font,callback:v=>'$'+v.toFixed(2)},grid:{color:CD.grid}},
+          y:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}}
+        }
+      }
+    });
+  }
+
+  // ── 6. CPL vs Results scatter (bubble size = spend) ──────────────────────
+  destroyChart('scatter');
+  const scatterData = data.filter(c=>c.results>0&&c.cpl>0);
+  toggle('chart-scatter-wrap', 'chart-scatter-empty', scatterData.length > 0);
+  if (scatterData.length) {
+    const maxSpend = Math.max(...scatterData.map(c=>c.spent));
+    _charts.scatter = new Chart(document.getElementById('chart-scatter').getContext('2d'), {
+      type:'bubble',
+      data:{
+        datasets:[{
+          label:'Campaigns',
+          data: scatterData.map(c=>({
+            x: c.results,
+            y: parseFloat(c.cpl.toFixed(2)),
+            r: Math.max(4, Math.round((c.spent/maxSpend)*20)),
+            name: c.name
+          })),
+          backgroundColor:'rgba(167,139,250,0.55)',
+          borderColor:'rgba(167,139,250,0.9)',
+          borderWidth:1
+        }]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false,
+        plugins:{
+          legend:{display:false},
+          tooltip:{
+            callbacks:{
+              label: ctx => {
+                const p = ctx.raw;
+                return [`${shortName(p.name,30)}`, `Results: ${p.x}`, `CPL: $${p.y.toFixed(2)}`];
+              }
+            }
+          }
+        },
+        scales:{
+          x:{ title:{display:true,text:'Results',color:CD.color,font:CD.font},
+              ticks:{color:CD.color,font:CD.font}, grid:{color:CD.grid} },
+          y:{ title:{display:true,text:'CPL ($)',color:CD.color,font:CD.font},
+              ticks:{color:CD.color,font:CD.font,callback:v=>'$'+v.toFixed(2)}, grid:{color:CD.grid} }
+        }
+      }
+    });
+  }
+
+  // ── 7. Delivery Mix (donut) ──────────────────────────────────────────────
+  destroyChart('delivery');
+  const deliveryCounts = {};
+  data.forEach(c => { deliveryCounts[c.status] = (deliveryCounts[c.status]||0)+1; });
+  const dKeys = Object.keys(deliveryCounts);
+  const DELIVERY_COLORS = { ACTIVE:'#34d399', PAUSED:'#94a3b8', IN_PROCESS:'#60a5fa', WITH_ISSUES:'#fbbf24', ARCHIVED:'#475569', UNKNOWN:'#334155' };
+  toggle('chart-delivery-wrap', 'chart-delivery-empty', dKeys.length > 0);
+  if (dKeys.length) {
+    _charts.delivery = new Chart(document.getElementById('chart-delivery').getContext('2d'), {
+      type:'doughnut',
+      data:{
+        labels: dKeys.map(k=>k.charAt(0)+k.slice(1).toLowerCase().replace(/_/g,' ')),
+        datasets:[{ data:dKeys.map(k=>deliveryCounts[k]),
+          backgroundColor:dKeys.map(k=>DELIVERY_COLORS[k]||'#475569'),
+          borderColor:'#0f172a', borderWidth:3, hoverOffset:6 }]
+      },
+      options:{
+        responsive:true, maintainAspectRatio:false, cutout:'68%',
+        plugins:{ legend:{ position:'right', labels:{color:CD.color,font:CD.font,boxWidth:10,padding:12} } }
+      }
+    });
+  }
+
+  lucide.createIcons();
+}
+
+function toggleExportMenu() {
+  const menu = document.getElementById('export-menu');
+  menu.classList.toggle('hidden');
+}
+
+function closeExportMenu() {
+  document.getElementById('export-menu').classList.add('hidden');
+}
+
+function exportToCSV() {
+  const data = getFiltered().map(calcMetrics);
+  if (data.length === 0) {
+    showNotification('No data to export', 'error');
+    return;
+  }
+
+  const headers = ['Campaign', 'Account', 'Delivery', 'Reach', 'Impressions', 'CPM', 'Results', 'Spent (USD)', 'CTR (%)', 'Link Clicks', 'CPC', 'CPL'];
+  const rows = data.map(c => [
+    c.name, c.account, c.status || '—', c.reach, c.impressions, c.cpm.toFixed(2), c.results, c.spent.toFixed(2), c.ctr.toFixed(2), c.linkClicks, c.cpc.toFixed(2), c.cpl.toFixed(2)
+  ]);
+
+  const csv = [headers, ...rows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+  downloadFile(csv, 'meta-ads-' + new Date().toISOString().split('T')[0] + '.csv', 'text/csv');
+  showNotification('Downloaded as CSV', 'success');
+  closeExportMenu();
+}
+
+function exportToJSON() {
+  const data = getFiltered().map(calcMetrics);
+  if (data.length === 0) {
+    showNotification('No data to export', 'error');
+    return;
+  }
+
+  const json = JSON.stringify(data, null, 2);
+  downloadFile(json, 'meta-ads-' + new Date().toISOString().split('T')[0] + '.json', 'application/json');
+  showNotification('Downloaded as JSON', 'success');
+  closeExportMenu();
+}
+
+function copyToClipboard() {
+  const data = getFiltered().map(calcMetrics);
+  if (data.length === 0) {
+    showNotification('No data to copy', 'error');
+    return;
+  }
+
+  const headers = ['Campaign', 'Account', 'Delivery', 'Reach', 'Impressions', 'CPM', 'Results', 'Spent', 'CTR', 'Link Clicks', 'CPC', 'CPL'];
+  const rows = data.map(c => [
+    c.name, c.account, c.status || '—', fmt(c.reach), fmt(c.impressions), fmtUsd(c.cpm), fmt(c.results), fmtUsd(c.spent), fmtPct(c.ctr), fmt(c.linkClicks), fmtUsd(c.cpc), fmtUsd(c.cpl)
+  ]);
+
+  const text = [headers, ...rows].map(r => r.join('\t')).join('\n');
+  navigator.clipboard.writeText(text).then(() => {
+    showNotification('Copied to clipboard', 'success');
+    closeExportMenu();
+  }).catch(() => {
+    showNotification('Failed to copy', 'error');
+  });
+}
+
+function downloadFile(content, filename, type) {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+}
+
+document.addEventListener('click', (e) => {
+  const menu = document.getElementById('export-menu');
+  const btn = e.target.closest('button[onclick*="toggleExportMenu"]');
+  if (!btn && !menu.classList.contains('hidden') && !menu.contains(e.target)) {
+    closeExportMenu();
+  }
+});
+
+function toggleIntegrationModal() {
+  const modal = document.getElementById('integration-modal');
+  if (modal.classList.contains('hidden')) {
+    modal.classList.remove('hidden');
+    // Pre-fill token field so user can retry without re-pasting
+    const tokenInput = document.getElementById('api-token');
+    if (!tokenInput.value) {
+      const saved = localStorage.getItem('meta_api_token');
+      if (saved) tokenInput.value = saved;
+    }
+    lucide.createIcons();
+  } else {
+    modal.classList.add('hidden');
+  }
+}
+
+async function doConnect(token, silent = false) {
+  apiToken = token;
+  if (!silent) showNotification('Fetching ad accounts...', 'success');
+
+  try {
+    const res = await fetch(`/api/meta/adaccounts?access_token=${encodeURIComponent(apiToken)}`);
+    const json = await res.json();
+
+    if (json.error) {
+      const e = json.error;
+      throw new Error([e.message, e.type && `(${e.type})`, e.code && `Code ${e.code}`].filter(Boolean).join(' '));
+    }
+
+    const accounts = json.data || [];
+    if (accounts.length === 0) {
+      if (!silent) showNotification('No ad accounts found for this token', 'error');
+      return;
+    }
+
+    const select = document.getElementById('ad-account');
+    select.innerHTML = '<option value="all">All Accounts</option>' +
+      accounts.map(a => `<option value="${a.id}">${a.name} (${a.id})</option>`).join('');
+    // Restore previously selected account
+    const savedAccount = localStorage.getItem('meta_ad_account');
+    if (savedAccount && [...select.options].some(o => o.value === savedAccount)) {
+      select.value = savedAccount;
+    }
+    businessAccountId = null;
+    apiConnected = true;
+    localStorage.setItem('meta_api_token', token);
+
+    document.getElementById('data-status').textContent = `Live data — ${accounts.length} account${accounts.length !== 1 ? 's' : ''} connected`;
+    document.getElementById('data-status').classList.add('text-green-400');
+
+    if (!silent) showNotification(`Connected! Found ${accounts.length} ad account${accounts.length !== 1 ? 's' : ''}`, 'success');
+    setTimeout(() => fetchMetaCampaigns(), 500);
+  } catch (err) {
+    if (silent) {
+      // Auto-reconnect failed (network blip, API hiccup) — keep token in memory and
+      // localStorage so the user can retry with Apply without re-entering the token.
+      document.getElementById('data-status').textContent = 'Could not auto-reconnect — click Apply to retry';
+    } else {
+      // Explicit connect attempt failed — bad token, clear everything.
+      apiToken = '';
+      localStorage.removeItem('meta_api_token');
+      showNotification(err.message || 'Failed to connect. Check your token.', 'error');
+    }
+  }
+}
+
+async function connectMetaAPI() {
+  const token = document.getElementById('api-token').value.trim();
+  if (!token) { showNotification('Enter your access token', 'error'); return; }
+  document.getElementById('api-token').value = '';
+  toggleIntegrationModal();
+  await doConnect(token);
+}
+
+async function fetchMetaCampaigns() {
+  const connectBtn = document.getElementById('connect-btn');
+  connectBtn.disabled = true;
+  connectBtn.innerHTML = '<i data-lucide="loader" class="w-4 h-4 animate-spin"></i> Fetching...';
+  lucide.createIcons();
+  showLoadingBar();
+  showTableSkeleton();
+  // Dim the cards while refreshing
+  document.getElementById('cards-grid').style.opacity = '0.4';
+  document.getElementById('cards-grid').style.transition = 'opacity 0.2s';
+
+  try {
+    const selectedAccount = document.getElementById('ad-account').value;
+    const { since, until } = getDateRange();
+    const timeRange = JSON.stringify({ since, until });
+
+    // Determine which accounts to fetch
+    const select = document.getElementById('ad-account');
+    const accountIds = selectedAccount === 'all'
+      ? Array.from(select.options).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i, ''))
+      : [selectedAccount.replace(/^act_/i, '')];
+
+    let allMapped = [];
+
+    // Level-specific config
+    const levelConfig = {
+      campaign: { endpoint: 'campaigns', idField: 'campaign_id', nameField: 'campaign_name',
+                  insightFields: 'campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions' },
+      adset:    { endpoint: 'adsets',    idField: 'adset_id',    nameField: 'adset_name',
+                  insightFields: 'adset_id,adset_name,campaign_name,reach,impressions,spend,inline_link_clicks,actions' },
+      ad:       { endpoint: 'ads',       idField: 'ad_id',       nameField: 'ad_name',
+                  insightFields: 'ad_id,ad_name,adset_name,campaign_name,reach,impressions,spend,inline_link_clicks,actions' },
+    };
+    const lvl = levelConfig[currentLevel];
+
+    for (const accountId of accountIds) {
+      // Fetch entity statuses
+      const statusRes = await fetch(`/api/meta/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}&access_token=${encodeURIComponent(apiToken)}`);
+      const statusJson = await statusRes.json();
+      if (statusJson.error) {
+        const e = statusJson.error;
+        throw new Error([e.message, e.type && `(${e.type})`, e.code && `Code ${e.code}`].filter(Boolean).join(' '));
+      }
+      const statusMap = {};
+      for (const c of (statusJson.data || [])) statusMap[c.id] = c.effective_status;
+
+      // Fetch insights at current level
+      const firstUrl = `/api/meta/insights?account_id=${encodeURIComponent(accountId)}` +
+        `&fields=${encodeURIComponent(lvl.insightFields)}&level=${currentLevel}` +
+        `&time_range=${encodeURIComponent(timeRange)}&limit=100` +
+        `&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}` +
+        `&access_token=${encodeURIComponent(apiToken)}`;
+
+      let url = firstUrl;
+      let isFirstPage = true;
+
+      while (url) {
+        const fetchUrl = isFirstPage ? url : `/api/meta/next?url=${encodeURIComponent(url)}`;
+        const response = await fetch(fetchUrl);
+        const json = await response.json();
+
+        if (json.error) {
+          const e = json.error;
+          const detail = [e.message, e.type && `(${e.type})`, e.code && `Code ${e.code}`].filter(Boolean).join(' ');
+          throw new Error(detail || 'Meta API error');
+        }
+
+        const mapped = (json.data || []).map(item => {
+          const actions = item.actions || [];
+          // Build a quick action type → value lookup
+          const am = {};
+          for (const a of actions) am[a.action_type] = parseInt(a.value || 0);
+
+          // Use exclusive priority: Website Lead pixel → Instant Form grouped → generic lead fallback.
+          // Never sum two types together — a campaign is one type, not both.
+          const pixelLeads = am['offsite_conversion.fb_pixel_lead'] || 0;
+          const formLeads  = am['onsite_conversion.lead_grouped']   || 0;
+          const results = pixelLeads > 0 ? pixelLeads
+                        : formLeads  > 0 ? formLeads
+                        : (am['lead'] || 0);
+          const entityId = item[lvl.idField];
+          return {
+            id: entityId,
+            name: item[lvl.nameField] || item.campaign_name,
+            campaignId: item.campaign_id || '',
+            adsetId: item.adset_id || '',
+            campaignName: item.campaign_name || '',
+            adsetName: item.adset_name || '',
+            adName: item.ad_name || '',
+            account: `act_${accountId}`,
+            status: statusMap[entityId] || 'UNKNOWN',
+            reach: parseInt(item.reach || 0),
+            impressions: parseInt(item.impressions || 0),
+            spent: Math.round(parseFloat(item.spend || 0) * 100) / 100,
+            linkClicks: parseInt(item.inline_link_clicks || 0),
+            results
+          };
+        });
+
+        allMapped = allMapped.concat(mapped);
+        url = (json.paging && json.paging.next) || null;
+        isFirstPage = false;
+      }
+    }
+
+    if (allMapped.length === 0) {
+      campaigns.splice(0, campaigns.length);
+      renderTable();
+      showNotification('No campaign data found for this date range', 'success');
+      return;
+    }
+
+    campaigns.splice(0, campaigns.length, ...allMapped);
+
+    // Persist UI state
+    localStorage.setItem('meta_date_preset', document.getElementById('date-preset').value);
+    localStorage.setItem('meta_delivery', document.getElementById('delivery-filter').value);
+    localStorage.setItem('meta_level', currentLevel);
+    localStorage.setItem('meta_compare', comparisonPeriod);
+
+    // Build a set of campaign IDs that match the current search/delivery filter,
+    // so the trend graph only shows data for campaigns visible in the scorecard.
+    const _trendDelivery = document.getElementById('delivery-filter').value;
+    const _filteredForTrend = allMapped.filter(c => {
+      if (!_matchesSearch(c.name)) return false;
+      if (_trendDelivery !== 'all' && c.status !== _trendDelivery) return false;
+      return true;
+    });
+    // For campaign level use the entity id; for adset/ad level use the parent campaign id.
+    const filteredCampaignIds = new Set(
+      _filteredForTrend.map(c => currentLevel === 'campaign' ? c.id : c.campaignId).filter(Boolean)
+    );
+
+    // Fetch daily trend (campaign level, time_increment=1) for analytics view
+    // Using campaign level so per-campaign exclusive priority matches the scorecard totals exactly.
+    trendData = [];
+    try {
+      if (since !== until) {
+        const trendFields = 'campaign_id,spend,actions';
+        const trendAcc = accountIds[0];
+        const tUrl = `/api/meta/insights?account_id=${encodeURIComponent(trendAcc)}&fields=${encodeURIComponent(trendFields)}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since,until}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}&access_token=${encodeURIComponent(apiToken)}`;
+        const byDate = {};
+        let tNextUrl = tUrl, tFirstPage = true;
+        while (tNextUrl) {
+          const tFetchUrl = tFirstPage ? tNextUrl : `/api/meta/next?url=${encodeURIComponent(tNextUrl)}`;
+          tFirstPage = false;
+          const tRes = await fetch(tFetchUrl);
+          const tJson = await tRes.json();
+          if (tJson.error || !tJson.data) break;
+          for (const d of tJson.data) {
+            if (filteredCampaignIds.size > 0 && !filteredCampaignIds.has(d.campaign_id)) continue;
+            const am = {};
+            for (const a of (d.actions || [])) am[a.action_type] = parseInt(a.value || 0);
+            const pL = am['offsite_conversion.fb_pixel_lead'] || 0;
+            const fL = am['onsite_conversion.lead_grouped'] || 0;
+            const results = pL > 0 ? pL : fL > 0 ? fL : (am['lead'] || 0);
+            const spend = Math.round(parseFloat(d.spend||0)*100)/100;
+            const dt = d.date_start;
+            if (!byDate[dt]) byDate[dt] = { date: dt, spend: 0, results: 0 };
+            byDate[dt].spend = Math.round((byDate[dt].spend + spend) * 100) / 100;
+            byDate[dt].results += results;
+          }
+          tNextUrl = tJson.paging?.next || null;
+        }
+        trendData = Object.values(byDate).sort((a,b) => a.date.localeCompare(b.date));
+      }
+    } catch(_) {}
+
+    // Fetch comparison period data
+    comparisonTotals = null;
+    comparisonTrendData = [];
+    comparisonRange = null;
+    if (comparisonPeriod !== 'none') {
+      const cr = getComparisonDateRange(since, until, comparisonPeriod);
+      if (cr) {
+        comparisonRange = cr;
+        try {
+          const compFields = 'spend,reach,impressions,inline_link_clicks,actions';
+          const compAcc = accountIds[0];
+          // Fetch totals (no time_increment)
+          const ctotUrl = `/api/meta/insights?account_id=${encodeURIComponent(compAcc)}&fields=${encodeURIComponent(compFields)}&level=account&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&limit=10&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}&access_token=${encodeURIComponent(apiToken)}`;
+          const ctotRes = await fetch(ctotUrl);
+          const ctotJson = await ctotRes.json();
+          if (!ctotJson.error && ctotJson.data && ctotJson.data.length > 0) {
+            const d = ctotJson.data[0];
+            const am = {};
+            for (const a of (d.actions || [])) am[a.action_type] = parseInt(a.value || 0);
+            const pL = am['offsite_conversion.fb_pixel_lead'] || 0;
+            const fL = am['onsite_conversion.lead_grouped'] || 0;
+            comparisonTotals = {
+              reach: parseInt(d.reach || 0),
+              impressions: parseInt(d.impressions || 0),
+              spent: Math.round(parseFloat(d.spend || 0) * 100) / 100,
+              linkClicks: parseInt(d.inline_link_clicks || 0),
+              results: pL > 0 ? pL : fL > 0 ? fL : (am['lead'] || 0)
+            };
+          }
+          // Fetch daily comparison trend (campaign level to match scorecard logic)
+          if (cr.since !== cr.until) {
+            const ctrendUrl = `/api/meta/insights?account_id=${encodeURIComponent(compAcc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}&access_token=${encodeURIComponent(apiToken)}`;
+            const cByDate = {};
+            let ctNextUrl = ctrendUrl, ctFirstPage = true;
+            while (ctNextUrl) {
+              const ctFetchUrl = ctFirstPage ? ctNextUrl : `/api/meta/next?url=${encodeURIComponent(ctNextUrl)}`;
+              ctFirstPage = false;
+              const ctrendRes = await fetch(ctFetchUrl);
+              const ctrendJson = await ctrendRes.json();
+              if (ctrendJson.error || !ctrendJson.data) break;
+              for (const d of ctrendJson.data) {
+                if (filteredCampaignIds.size > 0 && !filteredCampaignIds.has(d.campaign_id)) continue;
+                const am = {};
+                for (const a of (d.actions || [])) am[a.action_type] = parseInt(a.value || 0);
+                const pL = am['offsite_conversion.fb_pixel_lead'] || 0;
+                const fL = am['onsite_conversion.lead_grouped'] || 0;
+                const results = pL > 0 ? pL : fL > 0 ? fL : (am['lead'] || 0);
+                const spend = Math.round(parseFloat(d.spend||0)*100)/100;
+                const dt = d.date_start;
+                if (!cByDate[dt]) cByDate[dt] = { date: dt, spend: 0, results: 0 };
+                cByDate[dt].spend = Math.round((cByDate[dt].spend + spend) * 100) / 100;
+                cByDate[dt].results += results;
+              }
+              ctNextUrl = ctrendJson.paging?.next || null;
+            }
+            comparisonTrendData = Object.values(cByDate).sort((a,b) => a.date.localeCompare(b.date));
+          }
+        } catch(_) {}
+      }
+    }
+
+    renderTable();
+    if (currentView === 'analytics') renderAnalytics();
+    showNotification(`Loaded ${allMapped.length} campaign${allMapped.length !== 1 ? 's' : ''}`, 'success');
+  } catch (err) {
+    showNotification(err.message || 'Failed to fetch campaigns. Check your credentials.', 'error');
+    apiConnected = false;
+    document.getElementById('data-status').textContent = 'Sample data — API connection failed';
+    document.getElementById('data-status').classList.remove('text-green-400');
+  } finally {
+    connectBtn.disabled = false;
+    connectBtn.innerHTML = '<i data-lucide="check" class="w-4 h-4"></i> Connect';
+    lucide.createIcons();
+    hideLoadingBar();
+    document.getElementById('cards-grid').style.opacity = '';
+    document.getElementById('cards-grid').style.transition = '';
+  }
+}
+
+// ── Loading bar ──────────────────────────────────────────────────────────────
+function showLoadingBar() {
+  document.getElementById('loading-bar').classList.add('active');
+}
+function hideLoadingBar() {
+  const bar = document.getElementById('loading-bar');
+  bar.classList.remove('active');
+  bar.style.background = 'linear-gradient(90deg,#3b82f6,#818cf8)';
+  bar.style.width = '100%';
+  bar.style.transition = 'opacity 0.3s';
+  bar.style.opacity = '1';
+  setTimeout(() => { bar.style.opacity = '0'; setTimeout(() => { bar.style.background=''; bar.style.width=''; bar.style.transition=''; bar.style.opacity=''; }, 300); }, 120);
+}
+
+// ── Table skeleton ────────────────────────────────────────────────────────────
+function showTableSkeleton() {
+  const body = document.getElementById('table-body');
+  const foot = document.getElementById('table-foot');
+  if (foot) foot.innerHTML = '';
+  const cols = 11;
+  const rows = 8;
+  const widths = ['w-4','w-40','w-16','w-14','w-16','w-12','w-12','w-16','w-10','w-14','w-10'];
+  body.innerHTML = Array.from({length: rows}, () =>
+    `<tr class="border-b border-slate-800/50">${Array.from({length: cols}, (_, i) =>
+      `<td class="px-3 py-3.5"><div class="skeleton h-3.5 mx-auto ${widths[i]||'w-12'}"></div></td>`
+    ).join('')}</tr>`
+  ).join('');
+}
+
+function showNotification(msg, type) {
+  const notification = document.createElement('div');
+  const bgColor = type === 'success' ? 'bg-emerald-500' : 'bg-red-500';
+  const icon = type === 'success' ? 'check-circle' : 'alert-circle';
+
+  notification.className = `fixed top-4 right-4 ${bgColor} text-white px-4 py-3 rounded-lg flex items-center gap-2 text-sm font-semibold shadow-lg z-50 animate-fadeIn`;
+  notification.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4"></i> ${msg}`;
+
+  document.body.appendChild(notification);
+  lucide.createIcons();
+
+  setTimeout(() => {
+    notification.style.animation = 'fadeOut 0.3s ease forwards';
+    setTimeout(() => notification.remove(), 300);
+  }, 3000);
+}
+
+// Sample campaign data
+const campaigns = [
+  { name:"[TOF] Brand Awareness — Lookalike US", account:"act_1", status:"ACTIVE", reach:482300, impressions:1245800, results:3842, spent:4521.30, linkClicks:12450 },
+  { name:"[TOF] Video Views — Interest Stack", account:"act_1", status:"ACTIVE", reach:318700, impressions:876200, results:2156, spent:2987.45, linkClicks:7823 },
+  { name:"[MOF] Retargeting — Website Visitors 30d", account:"act_2", status:"PAUSED", reach:87600, impressions:342100, results:1847, spent:3215.80, linkClicks:9241 },
+  { name:"[MOF] Engagement — IG Story Viewers", account:"act_2", status:"ACTIVE", reach:124500, impressions:498300, results:987, spent:1876.20, linkClicks:4532 },
+  { name:"[BOF] Conversions — Add to Cart 7d", account:"act_3", status:"ACTIVE", reach:45200, impressions:178400, results:623, spent:2843.90, linkClicks:3218 },
+  { name:"[BOF] Catalog Sales — DPA Broad", account:"act_3", status:"WITH_ISSUES", reach:67800, impressions:234500, results:891, spent:3674.15, linkClicks:5467 },
+  { name:"[TOF] Reach — Cold Audiences Q4", account:"act_1", status:"PAUSED", reach:724100, impressions:1832400, results:5234, spent:6123.50, linkClicks:18932 },
+  { name:"[MOF] Lead Gen — Gated Whitepaper", account:"act_2", status:"IN_PROCESS", reach:56300, impressions:198700, results:412, spent:1945.60, linkClicks:2876 },
+  { name:"[BOF] App Install — Android US", account:"act_3", status:"ACTIVE", reach:93400, impressions:312600, results:1245, spent:4287.30, linkClicks:6543 },
+  { name:"[TOF] Brand Awareness — Broad EU", account:"act_1", status:"ARCHIVED", reach:389200, impressions:1023400, results:2876, spent:3456.70, linkClicks:10234 },
+];
+
+const DELIVERY_STYLES = {
+  ACTIVE:      { dot: 'bg-emerald-400', text: 'text-emerald-400', label: 'Active' },
+  PAUSED:      { dot: 'bg-slate-400',   text: 'text-slate-400',   label: 'Paused' },
+  IN_PROCESS:  { dot: 'bg-blue-400 animate-pulse', text: 'text-blue-400', label: 'In Process' },
+  WITH_ISSUES: { dot: 'bg-amber-400',   text: 'text-amber-400',   label: 'With Issues' },
+  ARCHIVED:    { dot: 'bg-slate-600',   text: 'text-slate-500',   label: 'Archived' },
+};
+
+function deliveryBadge(status) {
+  const s = DELIVERY_STYLES[status] || { dot: 'bg-slate-500', text: 'text-slate-400', label: status || '—' };
+  return `<span class="inline-flex items-center gap-1.5 ${s.text} text-xs font-medium whitespace-nowrap">
+    <span class="w-2 h-2 rounded-full ${s.dot} flex-shrink-0"></span>${s.label}
+  </span>`;
+}
+
+function fmt(n) { return n.toLocaleString('en-US'); }
+function fmtUsd(n) { return '$' + n.toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}); }
+function fmtPct(n) { return n.toFixed(2) + '%'; }
+
+// ── Search mode state ──────────────────────────────────────────────────────
+let _searchMode = 'all'; // 'all' | 'any' | 'none'
+let _searchChips = [];   // committed keyword chips
+
+function toggleSearchModeMenu(e) {
+  e.stopPropagation();
+  const menu = document.getElementById('search-mode-menu');
+  menu.classList.toggle('hidden');
+}
+document.addEventListener('click', () => {
+  const menu = document.getElementById('search-mode-menu');
+  if (menu) menu.classList.add('hidden');
+});
+
+function setSearchMode(mode) {
+  _searchMode = mode;
+  const labels = { all: 'contains all of', any: 'contains any of', none: "doesn't contain any of" };
+  document.getElementById('search-mode-label').textContent = labels[mode];
+  ['all','any','none'].forEach(m => {
+    const dot = document.getElementById(`mode-dot-${m}`);
+    if (dot) {
+      dot.classList.toggle('border-blue-500', m === mode);
+      dot.classList.toggle('bg-blue-500', m === mode);
+      dot.classList.toggle('border-slate-500', m !== mode);
+      dot.classList.toggle('bg-transparent', m !== mode);
+    }
+  });
+  document.getElementById('search-mode-menu').classList.add('hidden');
+  handleSearch();
+}
+
+function handleSearchKey(e) {
+  const input = document.getElementById('search-input');
+  const val = input.value.trim();
+  if ((e.key === 'Enter' || e.key === ',') && val) {
+    e.preventDefault();
+    if (!_searchChips.includes(val.toLowerCase())) {
+      _searchChips.push(val.toLowerCase());
+      renderSearchChips();
+    }
+    input.value = '';
+    handleSearch();
+  } else if (e.key === 'Backspace' && !val && _searchChips.length > 0) {
+    _searchChips.pop();
+    renderSearchChips();
+    handleSearch();
+  }
+}
+
+function removeChip(idx) {
+  _searchChips.splice(idx, 1);
+  renderSearchChips();
+  handleSearch();
+}
+
+function renderSearchChips() {
+  const container = document.getElementById('search-chips');
+  container.innerHTML = _searchChips.map((chip, i) => `
+    <span class="inline-flex items-center gap-1 bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs rounded px-2 py-0.5 font-mono">
+      ${chip}
+      <button onclick="removeChip(${i})" class="ml-0.5 text-blue-400 hover:text-white leading-none">&times;</button>
+    </span>`).join('');
+}
+
+function _matchesSearch(name) {
+  const input = document.getElementById('search-input').value.toLowerCase().trim();
+  const allTokens = [..._searchChips, ...(input ? [input] : [])];
+  if (allTokens.length === 0) return true;
+  const n = name.toLowerCase();
+  if (_searchMode === 'all')  return allTokens.every(t => n.includes(t));
+  if (_searchMode === 'any')  return allTokens.some(t => n.includes(t));
+  if (_searchMode === 'none') return !allTokens.some(t => n.includes(t));
+  return true;
+}
+
+function getFiltered() {
+  const acct = document.getElementById('ad-account').value;
+  const delivery = document.getElementById('delivery-filter').value;
+  return campaigns.filter(c => {
+    if (acct !== 'all' && c.account !== acct) return false;
+    if (!_matchesSearch(c.name)) return false;
+    if (delivery !== 'all' && c.status !== delivery) return false;
+    if (drilldownParentIds.size > 0) {
+      if (currentLevel === 'adset' && !drilldownParentIds.has(c.campaignId)) return false;
+      if (currentLevel === 'ad' && !drilldownParentIds.has(c.adsetId)) return false;
+    }
+    return true;
+  });
+}
+
+function getSelectedTotals(data) {
+  const src = selectedRows.size > 0 ? data.filter(c => selectedRows.has(c.id || c.name)) : data;
+  return src.reduce((a, c) => ({
+    reach: a.reach + c.reach,
+    impressions: a.impressions + c.impressions,
+    results: a.results + c.results,
+    spent: a.spent + c.spent,
+    linkClicks: a.linkClicks + c.linkClicks
+  }), { reach:0, impressions:0, results:0, spent:0, linkClicks:0 });
+}
+
+function calcMetrics(c) {
+  const cpm = c.impressions > 0 ? (c.spent / c.impressions) * 1000 : 0;
+  const ctr = c.impressions > 0 ? (c.linkClicks / c.impressions) * 100 : 0;
+  const cpc = c.linkClicks > 0 ? c.spent / c.linkClicks : 0;
+  const cpl = c.results > 0 ? c.spent / c.results : 0;
+  return { ...c, cpm, ctr, cpc, cpl };
+}
+
+function setSortCol(col) {
+  if (sortCol === col) sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  else { sortCol = col; sortDir = 'asc'; }
+  renderTable();
+}
+
+function renderTable() {
+  const rawData = getFiltered().map(calcMetrics);
+  // Sort
+  if (sortCol) {
+    rawData.sort((a, b) => {
+      const va = a[sortCol], vb = b[sortCol];
+      const cmp = typeof va === 'string' ? va.localeCompare(vb) : (va - vb);
+      return sortDir === 'asc' ? cmp : -cmp;
+    });
+  }
+  const data = rawData;
+
+  const tbody = document.getElementById('table-body');
+  const tfoot = document.getElementById('table-foot');
+  const noRes = document.getElementById('no-results');
+
+  // Drilldown banner
+  const banner = document.getElementById('drilldown-banner');
+  if (drilldownParentIds.size > 0 && drilldownParentLevel) {
+    const parentLabel = { campaign: 'campaign', adset: 'ad set' }[drilldownParentLevel] || drilldownParentLevel;
+    banner.innerHTML = `<i data-lucide="filter" class="w-3.5 h-3.5 flex-shrink-0"></i>
+      <span>Showing ${currentLevel === 'adset' ? 'ad sets' : 'ads'} for <strong>${drilldownParentIds.size} selected ${parentLabel}${drilldownParentIds.size > 1 ? 's' : ''}</strong></span>
+      <button onclick="clearDrilldown()" class="ml-2 text-blue-400 hover:text-white underline">Clear filter</button>`;
+    banner.classList.remove('hidden');
+    banner.classList.add('flex');
+    lucide.createIcons();
+  } else {
+    banner.classList.add('hidden');
+    banner.classList.remove('flex');
+  }
+
+  // Build sortable header
+  const levelLabel = { campaign: 'Campaign', adset: 'Ad Set', ad: 'Ad' };
+  const arrow = col => sortCol === col ? (sortDir === 'asc' ? ' ▲' : ' ▼') : ' ⇅';
+  const thBase = 'text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap sort-th';
+  const headRow = document.getElementById('table-head-row');
+  headRow.innerHTML = `
+    <th class="w-8 px-3 py-3 sticky left-0 bg-slate-900/90 backdrop-blur-sm">
+      <input type="checkbox" id="select-all" onchange="handleSelectAll(this.checked)" class="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-blue-500 cursor-pointer">
+    </th>
+    <th class="text-left px-4 py-3 sticky left-8 bg-slate-900/90 backdrop-blur-sm min-w-[200px] ${thBase}" onclick="setSortCol('name')">${levelLabel[currentLevel] || 'Campaign'}${arrow('name')}</th>
+    <th class="text-left px-4 py-3 ${thBase}" onclick="setSortCol('status')">Delivery${arrow('status')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('reach')">Reach${arrow('reach')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('impressions')">Impressions${arrow('impressions')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('cpm')">CPM${arrow('cpm')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('results')">Results${arrow('results')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('spent')">Spent (USD)${arrow('spent')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('ctr')">CTR${arrow('ctr')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('linkClicks')">Link Clicks${arrow('linkClicks')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('cpc')">CPC${arrow('cpc')}</th>
+    <th class="text-right px-4 py-3 ${thBase}" onclick="setSortCol('cpl')">CPL${arrow('cpl')}</th>
+  `;
+
+  if (data.length === 0) {
+    tbody.innerHTML = '';
+    tfoot.innerHTML = '';
+    noRes.classList.remove('hidden');
+    renderCards({ reach:0, impressions:0, spent:0, linkClicks:0, results:0 });
+    return;
+  }
+  noRes.classList.add('hidden');
+
+  const totals = data.reduce((a,c) => ({
+    reach: a.reach+c.reach, impressions: a.impressions+c.impressions,
+    results: a.results+c.results, spent: a.spent+c.spent, linkClicks: a.linkClicks+c.linkClicks
+  }), { reach:0, impressions:0, results:0, spent:0, linkClicks:0 });
+
+  const tCpm = totals.impressions > 0 ? (totals.spent/totals.impressions)*1000 : 0;
+  const tCtr = totals.impressions > 0 ? (totals.linkClicks/totals.impressions)*100 : 0;
+  const tCpc = totals.linkClicks > 0 ? totals.spent/totals.linkClicks : 0;
+  const tCpl = totals.results > 0 ? totals.spent/totals.results : 0;
+
+  const levelUnit = { campaign: 'campaign', adset: 'ad set', ad: 'ad' }[currentLevel] || 'campaign';
+
+  tbody.innerHTML = data.map((c,i) => {
+    const rowKey = c.id || c.name;
+    const checked = selectedRows.has(rowKey);
+    const subLabel = currentLevel === 'ad' ? `<div class="text-[10px] text-slate-500 mt-0.5 truncate max-w-xs">${c.campaignName || ''} › ${c.adsetName || ''}</div>`
+                   : currentLevel === 'adset' ? `<div class="text-[10px] text-slate-500 mt-0.5 truncate max-w-xs">${c.campaignName || ''}</div>`
+                   : '';
+    return `
+    <tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors fade-up ${checked ? 'bg-blue-500/5' : ''}" style="animation-delay:${i*30}ms" id="row-${i}">
+      <td class="w-8 px-3 py-3 sticky left-0 bg-inherit">
+        <input type="checkbox" data-key="${rowKey}" onchange="handleCheckbox('${rowKey}')" ${checked ? 'checked' : ''} class="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-blue-500 cursor-pointer">
+      </td>
+      <td class="px-4 py-3 sticky left-8 bg-inherit">
+        <div class="font-medium text-white leading-tight">${c.name}</div>${subLabel}
+      </td>
+      <td class="px-4 py-3">${deliveryBadge(c.status)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.reach)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.impressions)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmtUsd(c.cpm)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.results)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-emerald-400">${fmtUsd(c.spent)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmtPct(c.ctr)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.linkClicks)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmtUsd(c.cpc)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs">${fmtUsd(c.cpl)}</td>
+    </tr>`;
+  }).join('');
+
+  // Sync select-all checkbox state
+  const selectAll = document.getElementById('select-all');
+  if (selectAll) selectAll.checked = data.length > 0 && data.every(c => selectedRows.has(c.id || c.name));
+
+  tfoot.innerHTML = `
+    <tr class="bg-slate-800/40 border-t-2 border-blue-500/30 font-semibold">
+      <td class="px-3 py-3 sticky left-0 bg-slate-900/90"></td>
+      <td class="px-4 py-3 sticky left-8 bg-slate-900/90 backdrop-blur-sm text-blue-400 text-xs uppercase tracking-wider">Subtotal (${data.length} ${levelUnit}s)</td>
+      <td class="px-4 py-3"></td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.reach)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.impressions)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmtUsd(tCpm)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.results)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-emerald-400">${fmtUsd(totals.spent)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmtPct(tCtr)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.linkClicks)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmtUsd(tCpc)}</td>
+      <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmtUsd(tCpl)}</td>
+    </tr>
+  `;
+
+  // Scorecards reflect selected rows; fall back to full subtotal if none selected
+  const cardTotals = getSelectedTotals(data);
+  renderCards(cardTotals, selectedRows.size);
+  if (currentView === 'analytics') renderAnalytics();
+  lucide.createIcons();
+}
+
+function renderCards(t, selCount = 0) {
+  const ctr = t.impressions > 0 ? (t.linkClicks/t.impressions)*100 : 0;
+  const cpl = t.results > 0 ? t.spent/t.results : 0;
+
+  // Comparison deltas
+  let compCtr = 0, compCpl = 0;
+  if (comparisonTotals) {
+    compCtr = comparisonTotals.impressions > 0 ? (comparisonTotals.linkClicks/comparisonTotals.impressions)*100 : 0;
+    compCpl = comparisonTotals.results > 0 ? comparisonTotals.spent/comparisonTotals.results : 0;
+  }
+  function makeDelta(curr, comp, lowerIsBetter) {
+    if (!comparisonTotals || !comp) return '';
+    const pct = ((curr - comp) / Math.abs(comp)) * 100;
+    if (Math.abs(pct) < 0.05) return '<span class="delta-neutral font-mono">—</span>';
+    const up = pct > 0;
+    const good = lowerIsBetter ? !up : up;
+    const cls = good ? (up ? 'delta-up-good' : 'delta-down-good') : (up ? 'delta-up-bad' : 'delta-down-bad');
+    return `<span class="${cls} font-mono">${up ? '↑' : '↓'}${Math.abs(pct).toFixed(1)}%</span>`;
+  }
+
+  const cards = [
+    { label:'Total Reach',   value:fmt(t.reach),       icon:'users',               color:'blue',    delta: makeDelta(t.reach, comparisonTotals?.reach) },
+    { label:'Impressions',   value:fmt(t.impressions),  icon:'eye',                 color:'indigo',  delta: makeDelta(t.impressions, comparisonTotals?.impressions) },
+    { label:'Amount Spent',  value:fmtUsd(t.spent),    icon:'dollar-sign',          color:'emerald', delta: makeDelta(t.spent, comparisonTotals?.spent) },
+    { label:'Results',       value:fmt(t.results),      icon:'target',              color:'amber',   delta: makeDelta(t.results, comparisonTotals?.results) },
+    { label:'CTR',           value:fmtPct(ctr),         icon:'mouse-pointer-click', color:'rose',    delta: makeDelta(ctr, compCtr) },
+    { label:'CPL',           value:fmtUsd(cpl),         icon:'receipt',             color:'violet',  delta: makeDelta(cpl, compCpl, true) },
+  ];
+  const colors = { blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20', indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20', emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20', amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20', rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20', violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20' };
+  const iconColors = { blue:'text-blue-400', indigo:'text-indigo-400', emerald:'text-emerald-400', amber:'text-amber-400', rose:'text-rose-400', violet:'text-violet-400' };
+  const selBadge = selCount > 0 ? `<span class="text-[10px] text-blue-400 font-normal normal-case">${selCount} selected</span>` : '';
+
+  document.getElementById('cards-grid').innerHTML = cards.map((c,i) => `
+    <div class="bg-gradient-to-br ${colors[c.color]} border rounded-xl px-4 py-3 fade-up fade-up-${i+1}">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">${c.label} ${i===0 ? selBadge : ''}</span>
+        <i data-lucide="${c.icon}" class="w-4 h-4 ${iconColors[c.color]}"></i>
+      </div>
+      <div class="text-xl font-bold text-white font-mono">${c.value}</div>
+      ${c.delta ? `<div class="mt-1 h-4">${c.delta}</div>` : '<div class="mt-1 h-4"></div>'}
+    </div>
+  `).join('');
+  lucide.createIcons();
+
+  // Update selection summary
+  const summary = document.getElementById('selection-summary');
+  if (selCount > 0) {
+    summary.textContent = `${selCount} row${selCount > 1 ? 's' : ''} selected`;
+    summary.classList.remove('hidden');
+  } else {
+    summary.classList.add('hidden');
+  }
+}
+
+function getDateRange() {
+  // Use the date picker's confirmed selection if available
+  if (typeof _dpSince !== 'undefined' && _dpSince && _dpUntil) {
+    return { since: _dpSince, until: _dpUntil };
+  }
+  // Fallback: derive from preset (used on initial load before picker runs)
+  const preset = localStorage.getItem('meta_date_preset') || 'last_30d';
+  const today = new Date();
+  const fmt = d => `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const sow = d => { const c=new Date(d); c.setDate(c.getDate()-c.getDay()); return c; };
+  switch (preset) {
+    case 'today': return { since: fmt(today), until: fmt(today) };
+    case 'yesterday': { const y=new Date(today); y.setDate(y.getDate()-1); return { since:fmt(y), until:fmt(y) }; }
+    case 'today_and_yesterday': { const y=new Date(today); y.setDate(y.getDate()-1); return { since:fmt(y), until:fmt(today) }; }
+    case 'last_7d': { const s=new Date(today); s.setDate(s.getDate()-6); return { since:fmt(s), until:fmt(today) }; }
+    case 'last_14d': { const s=new Date(today); s.setDate(s.getDate()-13); return { since:fmt(s), until:fmt(today) }; }
+    case 'last_28d': { const s=new Date(today); s.setDate(s.getDate()-27); return { since:fmt(s), until:fmt(today) }; }
+    case 'last_30d': { const s=new Date(today); s.setDate(s.getDate()-29); return { since:fmt(s), until:fmt(today) }; }
+    case 'this_week': return { since:fmt(sow(today)), until:fmt(today) };
+    case 'last_week': { const sw=sow(today); sw.setDate(sw.getDate()-7); const ew=new Date(sw); ew.setDate(ew.getDate()+6); return { since:fmt(sw), until:fmt(ew) }; }
+    case 'this_month': { const s=new Date(today.getFullYear(),today.getMonth(),1); return { since:fmt(s), until:fmt(today) }; }
+    case 'last_month': { const s=new Date(today.getFullYear(),today.getMonth()-1,1); const e=new Date(today.getFullYear(),today.getMonth(),0); return { since:fmt(s), until:fmt(e) }; }
+    case 'maximum': return { since:'2010-01-01', until:fmt(today) };
+    default: { const s=new Date(today); s.setDate(s.getDate()-29); return { since:fmt(s), until:fmt(today) }; }
+  }
+}
+
+function handleDatePreset() {
+  updateDateLabel(); // no-op shim — date state now managed by date picker
+}
+
+function handleCheckbox(key) {
+  if (selectedRows.has(key)) selectedRows.delete(key);
+  else selectedRows.add(key);
+  const data = getFiltered().map(calcMetrics);
+  const cardTotals = getSelectedTotals(data);
+  renderCards(cardTotals, selectedRows.size);
+  // Sync select-all
+  const selectAll = document.getElementById('select-all');
+  if (selectAll) selectAll.checked = data.length > 0 && data.every(c => selectedRows.has(c.id || c.name));
+  // Update selection summary
+  const summary = document.getElementById('selection-summary');
+  if (selectedRows.size > 0) { summary.textContent = `${selectedRows.size} row${selectedRows.size > 1 ? 's' : ''} selected`; summary.classList.remove('hidden'); }
+  else summary.classList.add('hidden');
+}
+
+function handleSelectAll(checked) {
+  const data = getFiltered();
+  if (checked) data.forEach(c => selectedRows.add(c.id || c.name));
+  else selectedRows.clear();
+  renderTable();
+}
+
+function handleLevelChange(level) {
+  if (level === currentLevel) return;
+  const levelOrder = ['campaign', 'adset', 'ad'];
+  const prevIdx = levelOrder.indexOf(currentLevel);
+  const newIdx = levelOrder.indexOf(level);
+
+  if (newIdx > prevIdx && selectedRows.size > 0) {
+    // Drilling down — remember current selection as parent filter
+    drilldownParentIds = new Set(selectedRows);
+    drilldownParentLevel = currentLevel;
+  } else {
+    // Going up or lateral — clear drill-down
+    drilldownParentIds.clear();
+    drilldownParentLevel = null;
+  }
+
+  currentLevel = level;
+  selectedRows.clear();
+  sortCol = null;
+  localStorage.setItem('meta_level', level);
+
+  ['campaign','adset','ad'].forEach(l => {
+    const tab = document.getElementById(`tab-${l}`);
+    if (l === level) tab.classList.add('active-tab');
+    else tab.classList.remove('active-tab');
+  });
+  if (apiConnected) {
+    fetchMetaCampaigns().catch(err => showNotification(err.message, 'error'));
+  } else {
+    renderTable();
+  }
+}
+
+function clearDrilldown() {
+  drilldownParentIds.clear();
+  drilldownParentLevel = null;
+  selectedRows.clear();
+  renderTable();
+}
+
+function handleSearch() { renderTable(); }
+function handleAccountChange() {
+  const selected = document.getElementById('ad-account').value;
+  localStorage.setItem('meta_ad_account', selected);
+  if (apiConnected) {
+    businessAccountId = selected === 'all' ? null : selected.replace(/^act_/i, '');
+  }
+  renderTable();
+}
+function handleApply() {
+  if (apiConnected) {
+    fetchMetaCampaigns().catch(err => {
+      showNotification(err.message || 'Failed to fetch data', 'error');
+    });
+  } else {
+    renderTable();
+  }
+}
+
+// Element SDK
+const defaultConfig = {
+  dashboard_title: 'Meta Ads Dashboard',
+  background_color: '#020617',
+  surface_color: '#0f172a',
+  text_color: '#e2e8f0',
+  primary_action_color: '#2563eb',
+  accent_color: '#34d399',
+  font_family: 'DM Sans',
+  font_size: 14
+};
+
+window.elementSdk.init({
+  defaultConfig,
+  onConfigChange: async (config) => {
+    const bg = config.background_color || defaultConfig.background_color;
+    const surface = config.surface_color || defaultConfig.surface_color;
+    const txt = config.text_color || defaultConfig.text_color;
+    const primary = config.primary_action_color || defaultConfig.primary_action_color;
+    const accent = config.accent_color || defaultConfig.accent_color;
+    const font = config.font_family || defaultConfig.font_family;
+    const size = config.font_size || defaultConfig.font_size;
+
+    document.body.style.backgroundColor = bg;
+    document.body.style.color = txt;
+    document.body.style.fontFamily = `${font}, DM Sans, sans-serif`;
+    document.body.style.fontSize = size + 'px';
+
+    document.getElementById('dashboard-title').textContent = config.dashboard_title || defaultConfig.dashboard_title;
+
+    document.querySelectorAll('header').forEach(el => el.style.backgroundColor = surface + 'cc');
+    document.querySelectorAll('select, input[type="date"], input[type="text"]').forEach(el => {
+      el.style.backgroundColor = surface;
+      el.style.borderColor = txt + '30';
+    });
+    document.querySelectorAll('button').forEach(el => el.style.backgroundColor = primary);
+
+    const tableWrap = document.querySelector('.bg-slate-900\\/60');
+    if (tableWrap) { tableWrap.style.backgroundColor = surface + '99'; tableWrap.style.borderColor = txt + '15'; }
+  },
+  mapToCapabilities: (config) => ({
+    recolorables: [
+      { get: () => config.background_color || defaultConfig.background_color, set: v => { config.background_color = v; window.elementSdk.setConfig({background_color:v}); }},
+      { get: () => config.surface_color || defaultConfig.surface_color, set: v => { config.surface_color = v; window.elementSdk.setConfig({surface_color:v}); }},
+      { get: () => config.text_color || defaultConfig.text_color, set: v => { config.text_color = v; window.elementSdk.setConfig({text_color:v}); }},
+      { get: () => config.primary_action_color || defaultConfig.primary_action_color, set: v => { config.primary_action_color = v; window.elementSdk.setConfig({primary_action_color:v}); }},
+      { get: () => config.accent_color || defaultConfig.accent_color, set: v => { config.accent_color = v; window.elementSdk.setConfig({accent_color:v}); }},
+    ],
+    borderables: [],
+    fontEditable: { get: () => config.font_family || defaultConfig.font_family, set: v => { config.font_family = v; window.elementSdk.setConfig({font_family:v}); }},
+    fontSizeable: { get: () => config.font_size || defaultConfig.font_size, set: v => { config.font_size = v; window.elementSdk.setConfig({font_size:v}); }},
+  }),
+  mapToEditPanelValues: (config) => new Map([
+    ['dashboard_title', config.dashboard_title || defaultConfig.dashboard_title]
+  ])
+});
+
+// Restore persisted UI state before first render
+(function restoreState() {
+  // Date preset — picker state is restored by dpInit() in the date-picker script block
+  updateDateLabel();
+  // Delivery filter
+  const savedDelivery = localStorage.getItem('meta_delivery');
+  if (savedDelivery) {
+    const el = document.getElementById('delivery-filter');
+    if (el) el.value = savedDelivery;
+  }
+  // Level tab
+  const savedLevel = localStorage.getItem('meta_level');
+  if (savedLevel && ['campaign','adset','ad'].includes(savedLevel)) {
+    currentLevel = savedLevel;
+    ['campaign','adset','ad'].forEach(l => {
+      const tab = document.getElementById(`tab-${l}`);
+      if (tab) tab.classList.toggle('active-tab', l === savedLevel);
+    });
+  }
+  // View (table vs analytics)
+  const savedView = localStorage.getItem('meta_view');
+  if (savedView && ['table','analytics'].includes(savedView)) {
+    currentView = savedView;
+    document.getElementById('table-view').classList.toggle('hidden', savedView !== 'table');
+    document.getElementById('analytics-view').classList.toggle('hidden', savedView !== 'analytics');
+    document.getElementById('view-btn-table').classList.toggle('active-view-btn', savedView === 'table');
+    document.getElementById('view-btn-analytics').classList.toggle('active-view-btn', savedView === 'analytics');
+  }
+  // Comparison period
+  const savedCompare = localStorage.getItem('meta_compare');
+  if (savedCompare) {
+    comparisonPeriod = savedCompare;
+    const el = document.getElementById('compare-period');
+    if (el) el.value = savedCompare;
+  }
+  // Show date label
+  updateDateLabel();
+})();
+
+renderTable();
+lucide.createIcons();
+
+// Restore saved API connection on page load
+const _savedToken = localStorage.getItem('meta_api_token');
+if (_savedToken) {
+  apiToken = _savedToken; // Set in memory immediately — Apply works even if verify call fails
+  doConnect(_savedToken, true);
+}
+</script>
+
+<!-- ── Date Picker Modal ─────────────────────────────────────────────────── -->
+<style>
+/* Date Picker — dark theme matching dashboard */
+.dp-day { width:36px; height:32px; display:flex; align-items:center; justify-content:center; font-size:12px; cursor:pointer; position:relative; user-select:none; color:#cbd5e1; border-radius:0; transition:background .1s; }
+.dp-day:hover:not(.dp-start):not(.dp-end):not(.dp-empty) { background:#334155; border-radius:50%; color:#fff; }
+.dp-day.dp-in-range { background:rgba(59,130,246,.18); color:#93c5fd; border-radius:0; }
+.dp-day.dp-range-start-cap { border-radius:50% 0 0 50% !important; }
+.dp-day.dp-range-end-cap   { border-radius:0 50% 50% 0 !important; }
+.dp-day.dp-start { background:#3b82f6; color:#fff; border-radius:50%; z-index:2; font-weight:700; }
+.dp-day.dp-end   { background:#3b82f6; color:#fff; border-radius:50%; z-index:2; font-weight:700; }
+.dp-day.dp-start.dp-end { border-radius:50% !important; }
+.dp-day.dp-today:not(.dp-start):not(.dp-end) { font-weight:700; text-decoration:underline; text-underline-offset:2px; color:#60a5fa; }
+.dp-day.dp-empty { cursor:default; }
+.dp-preset-btn { display:flex; align-items:center; gap:10px; width:100%; padding:7px 16px; font-size:13px; color:#cbd5e1; background:none; border:none; cursor:pointer; text-align:left; line-height:1.4; font-family:inherit; }
+.dp-preset-btn:hover { background:#1e293b; color:#fff; }
+.dp-preset-btn.dp-preset-active { color:#fff; font-weight:600; }
+.dp-radio { width:15px; height:15px; border-radius:50%; border:2px solid #475569; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
+.dp-radio.dp-radio-on { border-color:#3b82f6; background:#3b82f6; }
+.dp-radio.dp-radio-on::after { content:''; display:block; width:5px; height:5px; border-radius:50%; background:#fff; }
+.dp-hdr { display:grid; grid-template-columns:repeat(7,36px); }
+.dp-hdr-cell { width:36px; height:22px; display:flex; align-items:center; justify-content:center; font-size:10px; font-weight:600; color:#64748b; letter-spacing:.04em; }
+.dp-grid { display:grid; grid-template-columns:repeat(7,36px); }
+.dp-cal-select { font-size:13px; font-weight:600; border:none; background:transparent; cursor:pointer; color:#e2e8f0; padding:2px 4px; outline:none; }
+.dp-cal-select option { background:#1e293b; color:#e2e8f0; }
+.dp-nav-btn { width:30px; height:30px; border:none; background:none; cursor:pointer; border-radius:50%; display:flex; align-items:center; justify-content:center; color:#94a3b8; font-size:20px; line-height:1; margin-top:26px; flex-shrink:0; transition:background .15s; }
+.dp-nav-btn:hover { background:#1e293b; color:#e2e8f0; }
+</style>
+
+<div id="date-picker-modal" class="hidden fixed inset-0 z-[200]" style="background:rgba(0,0,0,.6)" onclick="closeDatePickerIfOutside(event)">
+ <div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:#0f172a;border:1px solid #1e293b;border-radius:12px;box-shadow:0 24px 64px rgba(0,0,0,.6);display:flex;overflow:hidden;min-width:760px;max-width:95vw" onclick="event.stopPropagation()">
+
+  <!-- Left: Presets -->
+  <div style="width:210px;border-right:1px solid #1e293b;overflow-y:auto;padding:10px 0;flex-shrink:0;max-height:540px">
+   <div style="padding:8px 16px 4px;font-size:10px;font-weight:700;color:#475569;text-transform:uppercase;letter-spacing:.08em">Recently used</div>
+   <div id="dp-recently-used"></div>
+   <div style="border-top:1px solid #1e293b;margin:6px 0"></div>
+   <div id="dp-presets"></div>
+  </div>
+
+  <!-- Right: Calendars + Compare + Footer -->
+  <div style="display:flex;flex-direction:column;padding:20px 22px 16px;gap:14px;flex:1;min-width:0">
+
+   <!-- Calendars row -->
+   <div style="display:flex;align-items:flex-start">
+    <button class="dp-nav-btn" onclick="dpNavMonth(-1)">&#8249;</button>
+
+    <!-- Left calendar -->
+    <div style="flex:1;padding:0 6px">
+     <div style="display:flex;align-items:center;justify-content:center;gap:2px;margin-bottom:8px">
+      <select id="dp-month-l" onchange="dpSyncMonth()" class="dp-cal-select"></select>
+      <select id="dp-year-l"  onchange="dpSyncMonth()" class="dp-cal-select"></select>
+     </div>
+     <div class="dp-hdr" id="dp-hdr-l"></div>
+     <div class="dp-grid" id="dp-cal-l" onclick="dpGridClick(event)" onmouseover="dpGridHover(event)"></div>
+    </div>
+
+    <!-- Divider -->
+    <div style="width:1px;background:#1e293b;align-self:stretch;margin:0 4px"></div>
+
+    <!-- Right calendar -->
+    <div style="flex:1;padding:0 6px">
+     <div style="display:flex;align-items:center;justify-content:center;gap:2px;margin-bottom:8px">
+      <select id="dp-month-r" onchange="dpSyncMonthR()" class="dp-cal-select"></select>
+      <select id="dp-year-r"  onchange="dpSyncMonthR()" class="dp-cal-select"></select>
+     </div>
+     <div class="dp-hdr" id="dp-hdr-r"></div>
+     <div class="dp-grid" id="dp-cal-r" onclick="dpGridClick(event)" onmouseover="dpGridHover(event)"></div>
+    </div>
+
+    <button class="dp-nav-btn" onclick="dpNavMonth(1)">&#8250;</button>
+   </div>
+
+   <!-- Compare -->
+   <div style="border-top:1px solid #1e293b;padding-top:12px;display:flex;flex-direction:column;gap:10px">
+    <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;color:#cbd5e1;font-weight:500;user-select:none">
+     <input type="checkbox" id="dp-compare-check" onchange="dpToggleCompare()" style="width:15px;height:15px;accent-color:#3b82f6;cursor:pointer"> Compare
+    </label>
+    <div id="dp-compare-row" style="display:none;align-items:center;gap:10px;flex-wrap:wrap">
+     <select id="dp-compare-select" onchange="dpRenderCompareRange()" style="font-size:12px;border:1px solid #334155;border-radius:8px;padding:6px 10px;background:#1e293b;color:#e2e8f0;cursor:pointer;outline:none">
+      <option value="prev_period">Previous period</option>
+      <option value="DoD">Day over day</option>
+      <option value="WoW">Week over week</option>
+      <option value="MoM">Month over month</option>
+      <option value="YoY">Year over year</option>
+     </select>
+     <input id="dp-comp-start" type="text" readonly style="width:108px;font-size:12px;border:1px solid #334155;border-radius:8px;padding:6px 10px;color:#94a3b8;background:#1e293b;font-family:monospace">
+     <span style="color:#475569;font-size:13px">–</span>
+     <input id="dp-comp-end" type="text" readonly style="width:108px;font-size:12px;border:1px solid #334155;border-radius:8px;padding:6px 10px;color:#94a3b8;background:#1e293b;font-family:monospace">
+    </div>
+   </div>
+
+   <div style="font-size:11px;color:#475569">Dates are shown in Eastern Time</div>
+
+   <!-- Footer -->
+   <div style="display:flex;align-items:center;justify-content:flex-end;gap:10px;border-top:1px solid #1e293b;padding-top:14px">
+    <button onclick="closeDatePicker()" style="padding:7px 18px;border-radius:8px;border:1px solid #334155;background:transparent;font-size:13px;font-weight:600;color:#cbd5e1;cursor:pointer;transition:background .15s" onmouseover="this.style.background='#1e293b'" onmouseout="this.style.background='transparent'">Cancel</button>
+    <button onclick="applyDatePicker()" style="padding:7px 18px;border-radius:8px;border:none;background:#3b82f6;font-size:13px;font-weight:600;color:#fff;cursor:pointer;transition:background .15s" onmouseover="this.style.background='#2563eb'" onmouseout="this.style.background='#3b82f6'">Update</button>
+   </div>
+  </div>
+ </div>
+</div>
+
+<script>
+// ── Date Picker ──────────────────────────────────────────────────────────────
+const DP_PRESETS = [
+  { label:'Today',               key:'today' },
+  { label:'Yesterday',           key:'yesterday' },
+  { label:'Today and yesterday', key:'today_and_yesterday' },
+  { label:'Last 7 days',         key:'last_7d' },
+  { label:'Last 14 days',        key:'last_14d' },
+  { label:'Last 28 days',        key:'last_28d' },
+  { label:'Last 30 days',        key:'last_30d' },
+  { label:'This week',           key:'this_week' },
+  { label:'Last week',           key:'last_week' },
+  { label:'This month',          key:'this_month' },
+  { label:'Last month',          key:'last_month' },
+  { label:'Maximum',             key:'maximum' },
+];
+const DP_MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const DP_DAYS   = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+let _dpSince = null, _dpUntil = null;
+let _dpSelecting = false, _dpHover = null;
+let _dpLY, _dpLM; // left calendar year/month (0-based)
+let _dpActivePreset = 'last_30d';
+let _dpRecentlyUsed = JSON.parse(localStorage.getItem('dp_recently_used') || '[]');
+
+function _dpFmt(d) {
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+function _dpDisplay(s) {
+  if (!s) return '';
+  const [y,m,d] = s.split('-');
+  return new Date(+y,+m-1,+d).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
+}
+function _dpPresetRange(key) {
+  const t = new Date(), fmt = _dpFmt;
+  const sow = d => { const c=new Date(d); c.setDate(c.getDate()-c.getDay()); return c; };
+  switch(key){
+    case 'today': return {since:fmt(t),until:fmt(t)};
+    case 'yesterday': { const y=new Date(t); y.setDate(y.getDate()-1); return {since:fmt(y),until:fmt(y)}; }
+    case 'today_and_yesterday': { const y=new Date(t); y.setDate(y.getDate()-1); return {since:fmt(y),until:fmt(t)}; }
+    case 'last_7d':  { const s=new Date(t); s.setDate(s.getDate()-6);  return {since:fmt(s),until:fmt(t)}; }
+    case 'last_14d': { const s=new Date(t); s.setDate(s.getDate()-13); return {since:fmt(s),until:fmt(t)}; }
+    case 'last_28d': { const s=new Date(t); s.setDate(s.getDate()-27); return {since:fmt(s),until:fmt(t)}; }
+    case 'last_30d': { const s=new Date(t); s.setDate(s.getDate()-29); return {since:fmt(s),until:fmt(t)}; }
+    case 'this_week': return {since:fmt(sow(t)),until:fmt(t)};
+    case 'last_week': { const sw=sow(t); sw.setDate(sw.getDate()-7); const ew=new Date(sw); ew.setDate(ew.getDate()+6); return {since:fmt(sw),until:fmt(ew)}; }
+    case 'this_month': { const s=new Date(t.getFullYear(),t.getMonth(),1); return {since:fmt(s),until:fmt(t)}; }
+    case 'last_month': { const s=new Date(t.getFullYear(),t.getMonth()-1,1); const e=new Date(t.getFullYear(),t.getMonth(),0); return {since:fmt(s),until:fmt(e)}; }
+    case 'maximum': return {since:'2010-01-01',until:fmt(t)};
+    default: return null;
+  }
+}
+
+// Right calendar is always 1 month ahead of left
+function _dpRY() { return _dpLM===11 ? _dpLY+1 : _dpLY; }
+function _dpRM() { return _dpLM===11 ? 0 : _dpLM+1; }
+
+function openDatePicker() {
+  const base = _dpSince ? new Date(_dpSince+'T00:00:00') : new Date();
+  _dpLY = base.getFullYear(); _dpLM = base.getMonth();
+  _dpSelecting = false; _dpHover = null;
+
+  // Restore compare state
+  const storedCompare = document.getElementById('compare-period').value;
+  document.getElementById('dp-compare-check').checked = storedCompare !== 'none';
+  document.getElementById('dp-compare-select').value = storedCompare !== 'none' ? storedCompare : 'prev_period';
+  dpToggleCompare();
+
+  dpPopulatePresets();
+  dpPopulateSelects();
+  dpRenderBothCals();
+  dpRenderCompareRange();
+  document.getElementById('date-picker-modal').classList.remove('hidden');
+}
+function closeDatePicker() {
+  document.getElementById('date-picker-modal').classList.add('hidden');
+  _dpSelecting = false; _dpHover = null;
+}
+function closeDatePickerIfOutside(event) {
+  if (event.target === document.getElementById('date-picker-modal')) closeDatePicker();
+}
+
+function dpPresetRow(key, active) {
+  const p = DP_PRESETS.find(x=>x.key===key); if (!p) return '';
+  return `<button class="dp-preset-btn${active?' dp-preset-active':''}" onclick="dpSelectPreset('${key}')">
+    <span class="dp-radio${active?' dp-radio-on':''}"></span>${p.label}
+  </button>`;
+}
+function dpPopulatePresets() {
+  const ru = _dpRecentlyUsed.slice(0,3).filter(k => DP_PRESETS.find(p=>p.key===k));
+  document.getElementById('dp-recently-used').innerHTML = ru.map(k=>dpPresetRow(k, k===_dpActivePreset)).join('');
+  document.getElementById('dp-presets').innerHTML = DP_PRESETS.map(p=>dpPresetRow(p.key, p.key===_dpActivePreset)).join('');
+}
+function dpSelectPreset(key) {
+  _dpActivePreset = key;
+  const r = _dpPresetRange(key);
+  if (r) { _dpSince=r.since; _dpUntil=r.until; }
+  _dpSelecting=false; _dpHover=null;
+  const base=new Date(_dpSince+'T00:00:00'); _dpLY=base.getFullYear(); _dpLM=base.getMonth();
+  dpPopulatePresets(); dpPopulateSelects(); dpRenderBothCals(); dpRenderCompareRange();
+}
+
+function dpPopulateSelects() {
+  const curYear = new Date().getFullYear();
+  const years = Array.from({length:18},(_,i)=>curYear-14+i);
+  [['l',_dpLY,_dpLM],['r',_dpRY(),_dpRM()]].forEach(([s,yr,mo])=>{
+    document.getElementById(`dp-month-${s}`).innerHTML = DP_MONTHS.map((m,i)=>`<option value="${i}"${i===mo?' selected':''}>${m}</option>`).join('');
+    document.getElementById(`dp-year-${s}`).innerHTML  = years.map(y=>`<option value="${y}"${y===yr?' selected':''}>${y}</option>`).join('');
+  });
+}
+function dpSyncMonth() {
+  _dpLM=+document.getElementById('dp-month-l').value;
+  _dpLY=+document.getElementById('dp-year-l').value;
+  dpPopulateSelects(); dpRenderBothCals();
+}
+function dpSyncMonthR() {
+  // Right calendar changed — derive left as one month before
+  let rm=+document.getElementById('dp-month-r').value;
+  let ry=+document.getElementById('dp-year-r').value;
+  _dpLM=rm===0?11:rm-1; _dpLY=rm===0?ry-1:ry;
+  dpPopulateSelects(); dpRenderBothCals();
+}
+function dpNavMonth(dir) {
+  _dpLM+=dir;
+  if(_dpLM>11){_dpLM=0;_dpLY++;} else if(_dpLM<0){_dpLM=11;_dpLY--;}
+  dpPopulateSelects(); dpRenderBothCals();
+}
+function dpRenderBothCals() {
+  dpRenderCal('dp-hdr-l','dp-cal-l',_dpLY,_dpLM);
+  dpRenderCal('dp-hdr-r','dp-cal-r',_dpRY(),_dpRM());
+}
+function dpRenderCal(hdrId, calId, year, month) {
+  // Header
+  document.getElementById(hdrId).innerHTML = DP_DAYS.map(d=>`<div class="dp-hdr-cell">${d}</div>`).join('');
+
+  const today = _dpFmt(new Date());
+  const firstDay = new Date(year,month,1).getDay();
+  const dim = new Date(year,month+1,0).getDate();
+
+  // Determine effective range end (hover or confirmed)
+  const effEnd = (_dpSelecting && _dpHover)
+    ? (_dpHover >= _dpSince ? _dpHover : _dpSince)
+    : _dpUntil;
+  const effStart = (_dpSelecting && _dpHover && _dpHover < _dpSince) ? _dpHover : _dpSince;
+
+  let html = '<div class="dp-day dp-empty"></div>'.repeat(firstDay);
+  for (let d=1; d<=dim; d++) {
+    const ds=`${year}-${String(month+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+    const isStart = ds===effStart && effStart;
+    const isEnd   = ds===effEnd   && effEnd && !_dpSelecting;
+    const inRange = effStart && effEnd && ds>effStart && ds<effEnd && !_dpSelecting;
+    const isRangeStartCap = !isStart && effStart && ds===effStart; // same as isStart — handled
+    const isSingleDay = isStart && isEnd;
+
+    // Range caps: first/last in a row need half-rounded bg
+    const col = (firstDay + d - 1) % 7; // 0=Sun
+    const isFirstInRow = col===0;
+    const isLastInRow  = col===6;
+    const isLastDay    = d===dim;
+    const isFirstDay   = d===1;
+
+    let classes = 'dp-day';
+    if (isStart && isEnd) classes += ' dp-start dp-end';
+    else if (isStart)     classes += ' dp-start';
+    else if (isEnd)       classes += ' dp-end';
+    else if (inRange) {
+      classes += ' dp-in-range';
+      if (isFirstInRow || isFirstDay) classes += ' dp-range-start-cap';
+      if (isLastInRow  || isLastDay)  classes += ' dp-range-end-cap';
+    }
+    if (ds===today && !isStart && !isEnd) classes += ' dp-today';
+
+    html += `<div class="${classes}" data-ds="${ds}">${d}</div>`;
+  }
+  document.getElementById(calId).innerHTML = html;
+}
+
+function dpClickDay(ds) {
+  if (!_dpSelecting || !_dpSince) {
+    _dpSince=ds; _dpUntil=ds; _dpSelecting=true; _dpActivePreset='custom';
+  } else {
+    if (ds<_dpSince){_dpUntil=_dpSince;_dpSince=ds;} else _dpUntil=ds;
+    _dpSelecting=false; _dpHover=null;
+    dpPopulatePresets();
+  }
+  dpRenderBothCals(); dpRenderCompareRange();
+}
+// Event delegation handlers on the grid containers — avoids DOM replacement mid-click
+function dpGridClick(e) {
+  const el = e.target.closest('.dp-day');
+  const ds = el && el.dataset.ds;
+  if (ds) dpClickDay(ds);
+}
+function dpGridHover(e) {
+  if (!_dpSelecting) return;
+  const el = e.target.closest('.dp-day');
+  const ds = el && el.dataset.ds;
+  if (ds && ds !== _dpHover) { _dpHover = ds; dpRenderBothCals(); }
+}
+
+function dpToggleCompare() {
+  const on = document.getElementById('dp-compare-check').checked;
+  document.getElementById('dp-compare-row').style.display = on ? 'flex' : 'none';
+  if (on) dpRenderCompareRange();
+}
+function dpRenderCompareRange() {
+  if (!_dpSince||!_dpUntil) return;
+  const mode = document.getElementById('dp-compare-select').value;
+  const cr = getComparisonDateRange(_dpSince,_dpUntil,mode);
+  document.getElementById('dp-comp-start').value = cr ? _dpDisplay(cr.since) : '';
+  document.getElementById('dp-comp-end').value   = cr ? _dpDisplay(cr.until) : '';
+}
+
+function applyDatePicker() {
+  if (!_dpSince||!_dpUntil) { closeDatePicker(); return; }
+
+  // Sync hidden legacy elements
+  const presetEl = document.getElementById('date-preset');
+  presetEl.innerHTML = `<option value="${_dpActivePreset}" selected></option>`;
+  document.getElementById('date-start').value = _dpSince;
+  document.getElementById('date-end').value   = _dpUntil;
+
+  const compareOn   = document.getElementById('dp-compare-check').checked;
+  const compareMode = document.getElementById('dp-compare-select').value;
+  document.getElementById('compare-period').innerHTML = `<option value="${compareOn?compareMode:'none'}" selected></option>`;
+
+  // Trigger button label
+  const preset = DP_PRESETS.find(p=>p.key===_dpActivePreset);
+  const label = preset ? preset.label : `${_dpDisplay(_dpSince)} – ${_dpDisplay(_dpUntil)}`;
+  document.getElementById('date-picker-label').textContent = label;
+
+  // Track recently used
+  if (_dpActivePreset && _dpActivePreset!=='custom') {
+    _dpRecentlyUsed=[_dpActivePreset,..._dpRecentlyUsed.filter(x=>x!==_dpActivePreset)].slice(0,3);
+    localStorage.setItem('dp_recently_used',JSON.stringify(_dpRecentlyUsed));
+  }
+
+  comparisonPeriod = compareOn ? compareMode : 'none';
+  localStorage.setItem('meta_date_preset',_dpActivePreset);
+  localStorage.setItem('meta_compare',comparisonPeriod);
+
+  closeDatePicker();
+  updateDateLabel();
+  if (apiConnected) fetchMetaCampaigns().catch(err => showNotification(err.message, 'error'));
+}
+
+// Init on load
+(function dpInit(){
+  const savedPreset = localStorage.getItem('meta_date_preset') || 'last_30d';
+  _dpActivePreset = savedPreset;
+  const r = _dpPresetRange(savedPreset);
+  if (r) { _dpSince=r.since; _dpUntil=r.until; }
+  const preset = DP_PRESETS.find(p=>p.key===savedPreset);
+  if (preset) document.getElementById('date-picker-label').textContent = preset.label;
+})();
+</script>
+
+ <script>(function(){function c(){var b=a.contentDocument||a.contentWindow.document;if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'9e93a92c665ffed5',t:'MTc3NTY3NjM1Ny4wMDAwMDA='};var a=document.createElement('script');a.nonce='';a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script></body>
+</html>
