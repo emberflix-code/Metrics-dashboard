@@ -25,5 +25,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET ad_account_ids = $1 WHERE id = $2', [body.ad_account_ids, params.id]);
   }
 
+  if (body.show_account !== undefined) {
+    await query('UPDATE clients SET show_account = $1 WHERE id = $2', [!!body.show_account, params.id]);
+  }
+
   return NextResponse.json({ ok: true });
 }

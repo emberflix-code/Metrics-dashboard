@@ -12,6 +12,7 @@ interface Props {
   accountIds: string[]; // plain IDs without act_ prefix
   clientName: string;
   campaignFilter: string; // case-insensitive substring to filter campaign names
+  showAccount: boolean;  // admin toggle: show ad account column
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -32,6 +33,7 @@ let _searchMode = 'all';
 const _searchChips: string[] = [];
 let _isInitialized = false;
 let _campaignFilter = '';
+let _showAccount = false;
 
 const _charts: Record<string, any> = {};
 const _chartSort = { spend: 'desc', results: 'desc', cplEff: 'asc' };
@@ -306,6 +308,7 @@ function renderTable() {
   if (headRow) headRow.innerHTML=`
     <th class="w-8 px-3 py-3 sticky left-0 bg-slate-900/90 backdrop-blur-sm"><input type="checkbox" id="select-all" onchange="window._handleSelectAll(this.checked)" class="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-blue-500 cursor-pointer"></th>
     <th class="text-left px-4 py-3 sticky left-8 bg-slate-900/90 backdrop-blur-sm min-w-[200px] ${thB}" onclick="window._setSortCol('name')">${(ll as any)[_currentLevel]||'Campaign'}${arrow('name')}</th>
+    ${_showAccount ? `<th class="text-left px-4 py-3 ${thB}">Ad Account</th>` : ''}
     <th class="text-left px-4 py-3 ${thB}" onclick="window._setSortCol('status')">Delivery${arrow('status')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('reach')">Reach${arrow('reach')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('impressions')">Impressions${arrow('impressions')}</th>
@@ -333,6 +336,7 @@ function renderTable() {
     return `<tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors fade-up ${checked?'bg-blue-500/5':''}" style="animation-delay:${i*30}ms">
       <td class="w-8 px-3 py-3 sticky left-0 bg-inherit"><input type="checkbox" data-key="${rowKey}" onchange="window._handleCheckbox('${rowKey}')" ${checked?'checked':''} class="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-blue-500 cursor-pointer"></td>
       <td class="px-4 py-3 sticky left-8 bg-inherit"><div class="font-medium text-white leading-tight">${c.name}</div>${subLabel}</td>
+      ${_showAccount ? `<td class="px-4 py-3 text-xs text-slate-400 font-mono">${c.account||''}</td>` : ''}
       <td class="px-4 py-3">${deliveryBadge(c.status)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.reach)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.impressions)}</td>
@@ -352,6 +356,7 @@ function renderTable() {
   tfoot.innerHTML=`<tr class="bg-slate-800/40 border-t-2 border-blue-500/30 font-semibold">
     <td class="px-3 py-3 sticky left-0 bg-slate-900/90"></td>
     <td class="px-4 py-3 sticky left-8 bg-slate-900/90 backdrop-blur-sm text-blue-400 text-xs uppercase tracking-wider">Subtotal (${data.length} ${(lu as any)[_currentLevel]||'campaign'}s)</td>
+    ${_showAccount ? '<td class="px-4 py-3"></td>' : ''}
     <td class="px-4 py-3"></td>
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.reach)}</td>
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.impressions)}</td>
@@ -701,10 +706,11 @@ function downloadFile(content: string, filename: string, type: string) {
 }
 
 // ── Initialization ────────────────────────────────────────────────────────────
-function initDashboard(accountIds: string[], campaignFilter: string) {
+function initDashboard(accountIds: string[], campaignFilter: string, showAccount: boolean) {
   if (_isInitialized) return;
   _isInitialized = true;
   _campaignFilter = campaignFilter;
+  _showAccount = showAccount;
 
   // Populate account dropdown from server-provided IDs
   const select = document.getElementById('ad-account') as HTMLSelectElement;
@@ -769,12 +775,12 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount }: Props) {
   const [ready, setReady] = useState(0);
 
   useEffect(() => {
-    if (ready >= 2) initDashboard(accountIds, campaignFilter);
-  }, [ready, accountIds, campaignFilter]);
+    if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
+  }, [ready, accountIds, campaignFilter, showAccount]);
 
   const incReady = () => setReady(r => r + 1);
 
