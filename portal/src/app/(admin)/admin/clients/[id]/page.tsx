@@ -5,6 +5,7 @@ import { query } from '@/lib/db';
 import CampaignFilterForm from './CampaignFilterForm';
 import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
+import SheetConfigForm from './SheetConfigForm';
 
 interface ClientDetail {
   id: string;
@@ -14,6 +15,8 @@ interface ClientDetail {
   campaign_filter: string;
   ad_account_ids: string[];
   show_account: boolean;
+  sheet_id: string;
+  sheet_tab: string;
 }
 
 interface AgencyAccount {
@@ -31,7 +34,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!session || session.user.role !== 'admin') redirect('/login');
 
   const [client] = await query<ClientDetail>(`
-    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.created_at, u.email
+    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.created_at, u.email
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
@@ -82,6 +85,19 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           <h2 className="text-base font-semibold text-white mb-1">Dashboard Display</h2>
           <p className="text-sm text-slate-400 mb-5">Control what this client sees on their dashboard.</p>
           <ShowAccountToggle clientId={client.id} current={client.show_account ?? false} />
+        </div>
+
+        {/* Google Sheet config */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Google Sheet — Leads</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Connect a Google Sheet to show leads data on this client&apos;s dashboard.
+          </p>
+          <SheetConfigForm
+            clientId={client.id}
+            currentSheetId={client.sheet_id ?? ''}
+            currentSheetTab={client.sheet_tab ?? ''}
+          />
         </div>
 
         {/* Campaign filter */}

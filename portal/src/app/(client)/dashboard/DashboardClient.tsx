@@ -13,6 +13,7 @@ interface Props {
   clientName: string;
   campaignFilter: string; // case-insensitive substring to filter campaign names
   showAccount: boolean;  // admin toggle: show ad account column
+  hasSheet: boolean;     // whether a Google Sheet is configured for this client
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -768,8 +769,29 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, hasSheet }: Props) {
   const [ready, setReady] = useState(0);
+  const [leadsView, setLeadsView] = useState(false);
+  const [leadsLoading, setLeadsLoading] = useState(false);
+  const [leadsHeaders, setLeadsHeaders] = useState<string[]>([]);
+  const [leadsRows, setLeadsRows] = useState<Record<string, string>[]>([]);
+  const [leadsError, setLeadsError] = useState('');
+
+  async function loadLeads() {
+    setLeadsLoading(true);
+    setLeadsError('');
+    try {
+      const res = await fetch('/api/sheets/leads');
+      const json = await res.json();
+      if (json.error) throw new Error(json.error);
+      setLeadsHeaders(json.headers ?? []);
+      setLeadsRows(json.rows ?? []);
+    } catch (err: unknown) {
+      setLeadsError(err instanceof Error ? err.message : 'Failed to load sheet');
+    } finally {
+      setLeadsLoading(false);
+    }
+  }
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
@@ -927,6 +949,19 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
             {/* Level tabs + view toggle */}
             <div className="flex items-center gap-1 px-4 pt-3 pb-0 border-b border-slate-800">
+              {hasSheet && (
+                <button
+                  onClick={() => {
+                    setLeadsView(v => {
+                      if (!v) loadLeads();
+                      return !v;
+                    });
+                  }}
+                  className={`level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors${leadsView ? ' active-tab' : ''}`}
+                >
+                  Leads
+                </button>
+              )}
               {(['campaign','adset','ad'] as const).map(l => (
                 <button key={l} id={`tab-${l}`} onClick={() => {
                   if (l===_currentLevel) return;
@@ -950,8 +985,56 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
             </div>
 
+            {/* Leads view */}
+            {leadsView && (
+              <div className="p-5">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+                    <i data-lucide="table-2" className="w-4 h-4 text-emerald-400"></i> Leads from Google Sheet
+                  </h2>
+                  <button onClick={loadLeads} className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5">
+                    <i data-lucide="refresh-cw" className="w-3 h-3"></i> Refresh
+                  </button>
+                </div>
+                {leadsLoading && (
+                  <div className="text-center py-12 text-slate-500 text-sm">Loading sheet data…</div>
+                )}
+                {leadsError && (
+                  <div className="text-center py-12 text-red-400 text-sm">{leadsError}</div>
+                )}
+                {!leadsLoading && !leadsError && leadsRows.length === 0 && (
+                  <div className="text-center py-12 text-slate-500 text-sm">No rows found in sheet.</div>
+                )}
+                {!leadsLoading && !leadsError && leadsRows.length > 0 && (
+                  <div className="overflow-x-auto scrollbar-thin rounded-lg border border-slate-800">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-700 bg-slate-800/60">
+                          {leadsHeaders.map(h => (
+                            <th key={h} className="text-left px-3 py-2.5 font-semibold uppercase tracking-wider text-slate-400 whitespace-nowrap">{h}</th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {leadsRows.map((row, i) => (
+                          <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
+                            {leadsHeaders.map(h => (
+                              <td key={h} className="px-3 py-2.5 text-slate-300 whitespace-nowrap">{row[h]}</td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <div className="px-4 py-2 text-[10px] text-slate-500 border-t border-slate-800">
+                      {leadsRows.length} row{leadsRows.length !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
             {/* Table view */}
-            <div id="table-view">
+            <div id="table-view" className={leadsView ? 'hidden' : ''}>
               <div id="drilldown-banner" className="hidden items-center gap-2 px-4 py-2 bg-blue-500/10 border-b border-blue-500/20 text-xs text-blue-300"></div>
               <div className="overflow-x-auto scrollbar-thin">
                 <table className="w-full text-sm">

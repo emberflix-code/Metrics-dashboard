@@ -15,6 +15,8 @@ interface ClientRow {
   campaign_filter: string;
   ad_account_ids: string[];
   show_account: boolean;
+  sheet_id: string;
+  sheet_tab: string;
 }
 
 export default async function DashboardPage() {
@@ -45,7 +47,7 @@ export default async function DashboardPage() {
   void decrypt(agency.meta_token_enc);
 
   const [client] = await query<ClientRow>(
-    `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account
+    `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -64,6 +66,7 @@ export default async function DashboardPage() {
       clientName={client?.name ?? session.user.email ?? 'Client'}
       campaignFilter={client?.campaign_filter ?? ''}
       showAccount={client?.show_account ?? false}
+      hasSheet={!!(client?.sheet_id && client?.sheet_tab)}
     />
   );
 }
