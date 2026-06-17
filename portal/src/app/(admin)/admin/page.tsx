@@ -3,6 +3,7 @@ import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import { SignOutButton } from './SignOutButton';
+import { ChangePasswordButton } from '@/components/ChangePasswordButton';
 
 interface ClientRow {
   id: string;
@@ -63,6 +64,7 @@ export default async function AdminPage() {
             >
               + New Client
             </a>
+            <ChangePasswordButton />
             <SignOutButton />
           </div>
         </div>

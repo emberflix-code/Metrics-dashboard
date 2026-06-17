@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
+import bcrypt from 'bcryptjs';
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -39,6 +40,19 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (body.google_sheet_tab !== undefined) {
     await query('UPDATE clients SET google_sheet_tab = $1 WHERE id = $2', [String(body.google_sheet_tab).trim(), params.id]);
+  }
+
+  if (body.password !== undefined) {
+    const pw = String(body.password);
+    if (pw.length < 6) {
+      return NextResponse.json({ error: 'Password must be at least 6 characters.' }, { status: 400 });
+    }
+    const hash = await bcrypt.hash(pw, 12);
+    await query(
+      `UPDATE users SET password_hash = $1
+       WHERE id IN (SELECT user_id FROM client_users WHERE client_id = $2)`,
+      [hash, params.id]
+    );
   }
 
   return NextResponse.json({ ok: true });

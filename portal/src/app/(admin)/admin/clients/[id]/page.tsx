@@ -6,6 +6,7 @@ import CampaignFilterForm from './CampaignFilterForm';
 import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
 import SheetConfigForm from './SheetConfigForm';
+import ResetPasswordForm from './ResetPasswordForm';
 
 interface ClientDetail {
   id: string;
@@ -100,6 +101,15 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentSheetTab={client.sheet_tab ?? ''}
             currentGoogleSheetTab={client.google_sheet_tab ?? ''}
           />
+        </div>
+
+        {/* Reset password */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Reset Password</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Override this client&apos;s password. They&apos;ll need to sign in with the new password next time.
+          </p>
+          <ResetPasswordForm clientId={client.id} clientEmail={client.email} />
         </div>
 
         {/* Campaign filter */}

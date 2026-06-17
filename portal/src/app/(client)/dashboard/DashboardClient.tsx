@@ -4,6 +4,7 @@
 import { useEffect, useState } from 'react';
 import Script from 'next/script';
 import { signOut } from 'next-auth/react';
+import { ChangePasswordButton } from '@/components/ChangePasswordButton';
 
 declare const Chart: any;
 declare const lucide: { createIcons: () => void };
@@ -942,6 +943,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     <button onClick={() => { const data=getFiltered().map(calcMetrics); if(!data.length){showNotification('No data','error');return;} downloadFile(JSON.stringify(data,null,2),'meta-ads-'+new Date().toISOString().split('T')[0]+'.json','application/json'); showNotification('Downloaded JSON','success'); document.getElementById('export-menu')?.classList.add('hidden'); }} className="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 flex items-center gap-2"><i data-lucide="file-code" className="w-3.5 h-3.5"></i> Download JSON</button>
                   </div>
                 </div>
+                <ChangePasswordButton className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors" />
                 <button onClick={() => signOut({ callbackUrl: '/login' })} className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
                   <i data-lucide="log-out" className="w-3 h-3"></i><span>Sign out</span>
                 </button>
