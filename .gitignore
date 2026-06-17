@@ -9,3 +9,10 @@ portal/.env.local
 portal/.env*.local
 portal/tsconfig.tsbuildinfo
 *.log
+
+# Claude Code harness state
+.claude/scheduled_tasks.lock
+
+# Sensitive local data dumps (campaign data should not live in git)
+Copy of *.xlsx
+*.dump
