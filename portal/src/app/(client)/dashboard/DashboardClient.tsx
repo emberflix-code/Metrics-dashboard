@@ -51,10 +51,10 @@ const CHART_DEFAULTS = {
 };
 
 // ── Date Picker state ────────────────────────────────────────────────────────
+// Today is excluded everywhere — both Meta and Google Ads data are treated as
+// complete only after the day rolls over, so today-anchored ranges are blocked.
 const DP_PRESETS = [
-  { label: 'Today', key: 'today' },
   { label: 'Yesterday', key: 'yesterday' },
-  { label: 'Today and yesterday', key: 'today_and_yesterday' },
   { label: 'Last 7 days', key: 'last_7d' },
   { label: 'Last 14 days', key: 'last_14d' },
   { label: 'Last 28 days', key: 'last_28d' },
@@ -88,20 +88,21 @@ function _dpDisplay(s: string) {
 }
 function _dpPresetRange(key: string): { since: string; until: string } | null {
   const t = new Date();
+  // Yesterday-anchored end date: today is always excluded.
+  const tEnd = new Date(t); tEnd.setDate(tEnd.getDate()-1);
   const sow = (d: Date) => { const c=new Date(d); c.setDate(c.getDate()-c.getDay()); return c; };
   switch(key){
-    case 'today': return {since:_dpFmt(t),until:_dpFmt(t)};
-    case 'yesterday': { const y=new Date(t); y.setDate(y.getDate()-1); return {since:_dpFmt(y),until:_dpFmt(y)}; }
-    case 'today_and_yesterday': { const y=new Date(t); y.setDate(y.getDate()-1); return {since:_dpFmt(y),until:_dpFmt(t)}; }
-    case 'last_7d':  { const s=new Date(t); s.setDate(s.getDate()-6);  return {since:_dpFmt(s),until:_dpFmt(t)}; }
-    case 'last_14d': { const s=new Date(t); s.setDate(s.getDate()-13); return {since:_dpFmt(s),until:_dpFmt(t)}; }
-    case 'last_28d': { const s=new Date(t); s.setDate(s.getDate()-27); return {since:_dpFmt(s),until:_dpFmt(t)}; }
-    case 'last_30d': { const s=new Date(t); s.setDate(s.getDate()-29); return {since:_dpFmt(s),until:_dpFmt(t)}; }
-    case 'this_week': return {since:_dpFmt(sow(t)),until:_dpFmt(t)};
+    case 'yesterday': return {since:_dpFmt(tEnd),until:_dpFmt(tEnd)};
+    case 'last_7d':  { const s=new Date(tEnd); s.setDate(s.getDate()-6);  return {since:_dpFmt(s),until:_dpFmt(tEnd)}; }
+    case 'last_14d': { const s=new Date(tEnd); s.setDate(s.getDate()-13); return {since:_dpFmt(s),until:_dpFmt(tEnd)}; }
+    case 'last_28d': { const s=new Date(tEnd); s.setDate(s.getDate()-27); return {since:_dpFmt(s),until:_dpFmt(tEnd)}; }
+    case 'last_30d': { const s=new Date(tEnd); s.setDate(s.getDate()-29); return {since:_dpFmt(s),until:_dpFmt(tEnd)}; }
+    // Clamp to start-of-range when 'today' would invert the range (e.g. Sunday for this_week, 1st for this_month).
+    case 'this_week': { const s=sow(t); const u=tEnd<s?s:tEnd; return {since:_dpFmt(s),until:_dpFmt(u)}; }
     case 'last_week': { const sw=sow(t); sw.setDate(sw.getDate()-7); const ew=new Date(sw); ew.setDate(ew.getDate()+6); return {since:_dpFmt(sw),until:_dpFmt(ew)}; }
-    case 'this_month': { const s=new Date(t.getFullYear(),t.getMonth(),1); return {since:_dpFmt(s),until:_dpFmt(t)}; }
+    case 'this_month': { const s=new Date(t.getFullYear(),t.getMonth(),1); const u=tEnd<s?s:tEnd; return {since:_dpFmt(s),until:_dpFmt(u)}; }
     case 'last_month': { const s=new Date(t.getFullYear(),t.getMonth()-1,1); const e=new Date(t.getFullYear(),t.getMonth(),0); return {since:_dpFmt(s),until:_dpFmt(e)}; }
-    case 'maximum': { const s=new Date(t); s.setMonth(s.getMonth()-37); return {since:_dpFmt(s),until:_dpFmt(t)}; }
+    case 'maximum': { const s=new Date(t); s.setMonth(s.getMonth()-37); return {since:_dpFmt(s),until:_dpFmt(tEnd)}; }
     default: return null;
   }
 }
@@ -779,7 +780,10 @@ function dpRenderCal(hdrId: string, calId: string, year: number, month: number) 
       if (col===6||d===dim) classes+=' dp-range-end-cap';
     }
     if (ds===today&&!isStart&&!isEnd) classes+=' dp-today';
-    html+=`<div class="${classes}" data-ds="${ds}">${d}</div>`;
+    // Block today: omit data-ds so the click handler's `if(ds){...}` early-exits.
+    const disabled = ds===today;
+    if (disabled) classes+=' dp-disabled';
+    html+=`<div class="${classes}"${disabled?'':` data-ds="${ds}"`}>${d}</div>`;
   }
   const cEl=document.getElementById(calId); if (cEl) cEl.innerHTML=html;
 }
@@ -844,7 +848,9 @@ function initDashboard(accountIds: string[], campaignFilter: string, showAccount
 
   // Init date picker
   _dpRecentlyUsed = JSON.parse(localStorage.getItem('dp_recently_used')||'[]');
-  const savedPreset = localStorage.getItem('meta_date_preset')||'last_30d';
+  let savedPreset = localStorage.getItem('meta_date_preset')||'last_30d';
+  // Migrate stale presets that referenced today (since we no longer expose them).
+  if (savedPreset === 'today' || savedPreset === 'today_and_yesterday') savedPreset = 'last_30d';
   _dpActivePreset = savedPreset;
   const r = _dpPresetRange(savedPreset);
   if (r) { _dpSince=r.since; _dpUntil=r.until; }

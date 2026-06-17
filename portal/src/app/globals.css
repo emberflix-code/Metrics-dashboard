@@ -69,6 +69,8 @@ body { background: #020617; color: #e2e8f0; }
 .dp-day.dp-start.dp-end { border-radius:50% !important; }
 .dp-day.dp-today:not(.dp-start):not(.dp-end) { font-weight:700; text-decoration:underline; text-underline-offset:2px; color:#60a5fa; }
 .dp-day.dp-empty { cursor:default; }
+.dp-day.dp-disabled { cursor:not-allowed; color:#475569; text-decoration:line-through; }
+.dp-day.dp-disabled:hover { background:transparent; color:#475569; }
 .dp-preset-btn { display:flex; align-items:center; gap:10px; width:100%; padding:7px 16px; font-size:13px; color:#cbd5e1; background:none; border:none; cursor:pointer; text-align:left; line-height:1.4; font-family:inherit; }
 .dp-preset-btn:hover { background:#1e293b; color:#fff; }
 .dp-preset-btn.dp-preset-active { color:#fff; font-weight:600; }
