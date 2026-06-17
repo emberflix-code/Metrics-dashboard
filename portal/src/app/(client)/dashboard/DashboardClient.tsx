@@ -42,7 +42,7 @@ let _showAccount = false;
 let _platform: 'meta' | 'google' = 'meta';
 
 const _charts: Record<string, any> = {};
-const _chartSort = { spend: 'desc', results: 'desc', cplEff: 'asc' };
+const _chartSort = { results: 'desc', cplEff: 'asc' };
 
 const CHART_DEFAULTS = {
   color: '#94a3b8',
@@ -442,13 +442,7 @@ function renderAnalytics() {
     _charts.cplTrend = new Chart((document.getElementById('chart-cpl-trend') as HTMLCanvasElement)?.getContext('2d'),{type:'line',data:{labels:_trendData.map(d=>d.date.slice(5)),datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:CD.color,font:CD.font,boxWidth:10}},tooltip:{callbacks:{title:(items:any[])=>{const idx=items[0].dataIndex;const main=_trendData[idx]?.date;const comp=compTrendAligned[idx]?.date;return main?(_fmtDay(main)+(comp?'  ·  prev: '+_fmtDay(comp):'')):items[0].label;}}}},scales:{x:{ticks:{color:(ctx: any)=>{const d=_trendData[ctx.index]?.date;if(!d)return CD.color;const wd=new Date(d+'T12:00:00').getDay();return(wd===0||wd===6)?'#f87171':CD.color;},font:CD.font},grid:{color:(ctx: any)=>{const d=_trendData[ctx.index]?.date;if(!d)return CD.grid;const wd=new Date(d+'T12:00:00').getDay();return(wd===0||wd===6)?'rgba(248,113,113,0.18)':CD.grid;}}},y:{ticks:{color:'#a78bfa',font:CD.font,callback:(v:number)=>'$'+v.toFixed(2)},grid:{color:CD.grid}}}}});
   }
 
-  // 3. Top 8 by Spend
-  destroyChart('spend');
-  const spendSorted=[...data].sort((a,b)=>_chartSort.spend==='desc'?b.spent-a.spent:a.spent-b.spent).slice(0,8);
-  toggle('chart-spend-wrap','chart-spend-empty',spendSorted.length>0);
-  if (spendSorted.length) _charts.spend=new Chart((document.getElementById('chart-spend') as HTMLCanvasElement)?.getContext('2d'),{type:'bar',data:{labels:spendSorted.map((c:any)=>shortName(c.name)),datasets:[{label:'Spend ($)',data:spendSorted.map((c:any)=>c.spent),backgroundColor:'rgba(52,211,153,0.7)',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:CD.color,font:CD.font,callback:(v:number)=>'$'+v.toLocaleString()},grid:{color:CD.grid}},y:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}}}}});
-
-  // 4. Top 8 by Results
+  // 3. Top 8 by Results
   destroyChart('results');
   const resultsSorted=[...data].sort((a,b)=>_chartSort.results==='desc'?b.results-a.results:a.results-b.results).slice(0,8);
   toggle('chart-results-wrap','chart-results-empty',resultsSorted.length>0);
@@ -465,15 +459,6 @@ function renderAnalytics() {
   const scatterData=data.filter((c:any)=>c.results>0&&c.cpl>0);
   toggle('chart-scatter-wrap','chart-scatter-empty',scatterData.length>0);
   if (scatterData.length) { const mx=Math.max(...scatterData.map((c:any)=>c.spent)); _charts.scatter=new Chart((document.getElementById('chart-scatter') as HTMLCanvasElement)?.getContext('2d'),{type:'bubble',data:{datasets:[{label:'Campaigns',data:scatterData.map((c:any)=>({x:c.results,y:parseFloat(c.cpl.toFixed(2)),r:Math.max(4,Math.round((c.spent/mx)*20)),name:c.name})),backgroundColor:'rgba(167,139,250,0.55)',borderColor:'rgba(167,139,250,0.9)',borderWidth:1}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx:any)=>{const p=ctx.raw;return[`${shortName(p.name,30)}`,`Results: ${p.x}`,`CPL: $${p.y.toFixed(2)}`];}}}},scales:{x:{title:{display:true,text:'Results',color:CD.color,font:CD.font},ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}},y:{title:{display:true,text:'CPL ($)',color:CD.color,font:CD.font},ticks:{color:CD.color,font:CD.font,callback:(v:number)=>'$'+v.toFixed(2)},grid:{color:CD.grid}}}}}); }
-
-  // 7. Delivery mix
-  destroyChart('delivery');
-  const dc: Record<string,number>={};
-  data.forEach((c:any)=>{dc[c.status]=(dc[c.status]||0)+1;});
-  const dKeys=Object.keys(dc);
-  const DC={ACTIVE:'#34d399',PAUSED:'#94a3b8',IN_PROCESS:'#60a5fa',WITH_ISSUES:'#fbbf24',ARCHIVED:'#475569',UNKNOWN:'#334155'};
-  toggle('chart-delivery-wrap','chart-delivery-empty',dKeys.length>0);
-  if (dKeys.length) _charts.delivery=new Chart((document.getElementById('chart-delivery') as HTMLCanvasElement)?.getContext('2d'),{type:'doughnut',data:{labels:dKeys.map(k=>k.charAt(0)+k.slice(1).toLowerCase().replace(/_/g,' ')),datasets:[{data:dKeys.map(k=>dc[k]),backgroundColor:dKeys.map(k=>(DC as any)[k]||'#475569'),borderColor:'#0f172a',borderWidth:3,hoverOffset:6}]},options:{responsive:true,maintainAspectRatio:false,cutout:'68%',plugins:{legend:{position:'right',labels:{color:CD.color,font:CD.font,boxWidth:10,padding:12}}}}});
 
   lucide.createIcons();
 }
@@ -1154,26 +1139,13 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   <div id="chart-results-empty" className="hidden text-center text-slate-500 py-8 text-xs">No data</div>
                 </div>
               </div>
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="dollar-sign" className="w-3.5 h-3.5 text-emerald-400"></i> Top by Spend</h3>
-                    <div className="flex gap-1">
-                      <button className="sort-btn active-sort-btn" onClick={() => { _chartSort.spend='desc'; renderAnalytics(); }}>High → Low</button>
-                      <button className="sort-btn" onClick={() => { _chartSort.spend='asc'; renderAnalytics(); }}>Low → High</button>
-                    </div>
-                  </div>
-                  <div id="chart-spend-wrap" style={{position:'relative',height:240}}><canvas id="chart-spend"></canvas></div>
-                  <div id="chart-spend-empty" className="hidden text-center text-slate-500 py-8 text-xs">No data</div>
+              <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="receipt" className="w-3.5 h-3.5 text-violet-400"></i> Daily CPL Trend</h3>
+                  <span id="chart-cpl-trend-range" className="text-[10px] font-mono text-slate-500"></span>
                 </div>
-                <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="receipt" className="w-3.5 h-3.5 text-violet-400"></i> Daily CPL Trend</h3>
-                    <span id="chart-cpl-trend-range" className="text-[10px] font-mono text-slate-500"></span>
-                  </div>
-                  <div id="chart-cpl-trend-wrap" style={{position:'relative',height:240}}><canvas id="chart-cpl-trend"></canvas></div>
-                  <div id="chart-cpl-trend-empty" className="hidden text-center text-slate-500 py-8 text-xs">Select a multi-day date range to see CPL trend</div>
-                </div>
+                <div id="chart-cpl-trend-wrap" style={{position:'relative',height:240}}><canvas id="chart-cpl-trend"></canvas></div>
+                <div id="chart-cpl-trend-empty" className="hidden text-center text-slate-500 py-8 text-xs">Select a multi-day date range to see CPL trend</div>
               </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
@@ -1194,11 +1166,6 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   <div id="chart-scatter-wrap" style={{position:'relative',height:240}}><canvas id="chart-scatter"></canvas></div>
                   <div id="chart-scatter-empty" className="hidden text-center text-slate-500 py-8 text-xs">No lead data</div>
                 </div>
-              </div>
-              <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2 mb-3"><i data-lucide="pie-chart" className="w-3.5 h-3.5 text-blue-400"></i> Delivery Mix</h3>
-                <div id="chart-delivery-wrap" style={{position:'relative',height:180}}><canvas id="chart-delivery"></canvas></div>
-                <div id="chart-delivery-empty" className="hidden text-center text-slate-500 py-8 text-xs">No data</div>
               </div>
             </div>
           </div>
