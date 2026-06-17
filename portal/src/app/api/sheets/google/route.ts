@@ -42,12 +42,39 @@ function parseNum(raw: string): number {
   return Number.isFinite(n) ? n : 0;
 }
 
+/** Minimal CSV parser supporting quoted fields and embedded commas/newlines. */
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = '';
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { cell += '"'; i++; }
+        else inQuotes = false;
+      } else { cell += c; }
+      continue;
+    }
+    if (c === '"') { inQuotes = true; continue; }
+    if (c === ',') { row.push(cell); cell = ''; continue; }
+    if (c === '\r') continue;
+    if (c === '\n') { row.push(cell); rows.push(row); row = []; cell = ''; continue; }
+    cell += c;
+  }
+  if (cell.length > 0 || row.length > 0) { row.push(cell); rows.push(row); }
+  return rows;
+}
+
+// 60s in-memory cache keyed by sheet_id + tab name. Lets multiple loads in a
+// short window skip the upstream fetch.
+const TTL_MS = 60_000;
+const _csvCache = new Map<string, { expires: number; rows: GoogleRow[] }>();
+
 export async function GET() {
   const session = await getServerSession(authOptions);
   if (!session) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
-
-  const apiKey = process.env.GOOGLE_API_KEY;
-  if (!apiKey) return NextResponse.json({ error: 'GOOGLE_API_KEY not configured' }, { status: 500 });
 
   const [client] = await query<ClientConfig>(
     `SELECT c.sheet_id, c.google_sheet_tab
@@ -62,18 +89,28 @@ export async function GET() {
     return NextResponse.json({ rows: [] });
   }
 
-  const range = encodeURIComponent(client.google_sheet_tab);
-  const url = `https://sheets.googleapis.com/v4/spreadsheets/${client.sheet_id}/values/${range}?key=${apiKey}`;
+  const cacheKey = `${client.sheet_id}|${client.google_sheet_tab}`;
+  const hit = _csvCache.get(cacheKey);
+  if (hit && hit.expires > Date.now()) {
+    return NextResponse.json({ rows: hit.rows });
+  }
+
+  // Public-link CSV export — no GCP / API key required.
+  // gviz/tq?sheet=<tab name> picks the tab by name, no gid needed.
+  const url = `https://docs.google.com/spreadsheets/d/${client.sheet_id}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(client.google_sheet_tab)}`;
 
   try {
-    const res = await fetch(url);
-    const json = await res.json();
-    if (json.error) return NextResponse.json({ error: json.error.message }, { status: 502 });
+    const res = await fetch(url, { redirect: 'follow' });
+    if (!res.ok) return NextResponse.json({ error: `Sheet fetch failed: ${res.status}` }, { status: 502 });
+    const csv = await res.text();
+    // If the sheet's privacy changes from public, Google returns an HTML login page.
+    if (csv.trim().startsWith('<')) {
+      return NextResponse.json({ error: 'Sheet is not publicly viewable. Set sharing to "Anyone with the link".' }, { status: 502 });
+    }
 
-    const values: string[][] = json.values ?? [];
+    const values = parseCsv(csv);
     if (values.length < 2) return NextResponse.json({ rows: [] });
 
-    // Map header names to column indices so column order is robust.
     const headers = values[0].map(h => (h || '').trim().toLowerCase());
     const idx = (name: string) => headers.findIndex(h => h === name);
     const cCampaign = idx('campaign name');
@@ -103,6 +140,7 @@ export async function GET() {
       });
     }
 
+    _csvCache.set(cacheKey, { expires: Date.now() + TTL_MS, rows });
     return NextResponse.json({ rows });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Unknown error';
