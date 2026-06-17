@@ -688,7 +688,7 @@ async function loadGoogleSheetData(since: string, until: string) {
     if (cr) {
       _comparisonRange = cr;
       const compRows = allRows.filter(r => r.day >= cr.since && r.day <= cr.until);
-      let cTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0 };
+      const cTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0 };
       const cByDay: Record<string, any> = {};
       for (const r of compRows) {
         cTot.impressions += r.impressions;
