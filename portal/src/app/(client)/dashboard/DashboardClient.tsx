@@ -259,7 +259,7 @@ function renderCards(t: any, selCount=0) {
     return `<span class="${cls} font-mono">${up?'↑':'↓'}${Math.abs(pct).toFixed(1)}%</span>`;
   }
   const cards=[
-    {label:'Total Reach', value:fmt(t.reach),      icon:'users',               color:'blue',    delta:makeDelta(t.reach,_comparisonTotals?.reach)},
+    {label:'Link Clicks', value:fmt(t.linkClicks),  icon:'mouse-pointer-click', color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
     {label:'Impressions', value:fmt(t.impressions), icon:'eye',                 color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
     {label:'Amount Spent',value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
     {label:'Results',     value:fmt(t.results),     icon:'target',              color:'amber',   delta:makeDelta(t.results,_comparisonTotals?.results)},
