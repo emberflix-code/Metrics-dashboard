@@ -1,0 +1,1 @@
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS google_sheet_tab TEXT NOT NULL DEFAULT '';

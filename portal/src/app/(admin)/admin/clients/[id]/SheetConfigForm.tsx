@@ -6,11 +6,13 @@ interface Props {
   clientId: string;
   currentSheetId: string;
   currentSheetTab: string;
+  currentGoogleSheetTab: string;
 }
 
-export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab }: Props) {
+export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab, currentGoogleSheetTab }: Props) {
   const [sheetId, setSheetId] = useState(currentSheetId);
   const [sheetTab, setSheetTab] = useState(currentSheetTab);
+  const [googleSheetTab, setGoogleSheetTab] = useState(currentGoogleSheetTab);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -21,7 +23,11 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
     await fetch(`/api/admin/clients/${clientId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sheet_id: sheetId.trim(), sheet_tab: sheetTab.trim() }),
+      body: JSON.stringify({
+        sheet_id: sheetId.trim(),
+        sheet_tab: sheetTab.trim(),
+        google_sheet_tab: googleSheetTab.trim(),
+      }),
     });
     setSaving(false);
     setSaved(true);
@@ -49,8 +55,8 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
 
       <div>
         <label className="block text-xs font-medium text-slate-400 mb-1.5">
-          Tab Name
-          <span className="ml-1 text-slate-500 font-normal">(exact sheet tab name)</span>
+          Meta Tab Name
+          <span className="ml-1 text-slate-500 font-normal">(Facebook/Meta data)</span>
         </label>
         <input
           type="text"
@@ -59,6 +65,23 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
           placeholder="Sheet1"
           className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
         />
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">
+          Google Ads Tab Name
+          <span className="ml-1 text-slate-500 font-normal">(leave blank if no Google Ads dashboard)</span>
+        </label>
+        <input
+          type="text"
+          value={googleSheetTab}
+          onChange={e => setGoogleSheetTab(e.target.value)}
+          placeholder="Alloy Middleton, WI (Google)"
+          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
+        />
+        <p className="mt-1 text-xs text-slate-500">
+          When set, the client&apos;s dashboard shows a &quot;View Google Ads&quot; switch.
+        </p>
       </div>
 
       <button

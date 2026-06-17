@@ -15,4 +15,5 @@ portal/tsconfig.tsbuildinfo
 
 # Sensitive local data dumps (campaign data should not live in git)
 Copy of *.xlsx
+~$*.xlsx
 *.dump

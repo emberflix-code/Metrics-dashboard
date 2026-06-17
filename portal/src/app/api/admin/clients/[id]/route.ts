@@ -37,5 +37,9 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET sheet_tab = $1 WHERE id = $2', [String(body.sheet_tab).trim(), params.id]);
   }
 
+  if (body.google_sheet_tab !== undefined) {
+    await query('UPDATE clients SET google_sheet_tab = $1 WHERE id = $2', [String(body.google_sheet_tab).trim(), params.id]);
+  }
+
   return NextResponse.json({ ok: true });
 }

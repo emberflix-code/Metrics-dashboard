@@ -13,7 +13,10 @@ interface Props {
   clientName: string;
   campaignFilter: string; // case-insensitive substring to filter campaign names
   showAccount: boolean;  // admin toggle: show ad account column
-  hasSheet: boolean;     // whether a Google Sheet is configured for this client
+  platform?: 'meta' | 'google'; // data source — defaults to meta
+  hasGoogleAds?: boolean;       // is the Google Ads view available for this client?
+  metaUrl?: string;             // link target for "View Meta" switch (on /dashboard/google)
+  googleUrl?: string;           // link target for "View Google Ads" switch (on /dashboard)
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -34,6 +37,7 @@ let _searchMode = 'all';
 const _searchChips: string[] = [];
 let _isInitialized = false;
 let _showAccount = false;
+let _platform: 'meta' | 'google' = 'meta';
 
 const _charts: Record<string, any> = {};
 const _chartSort = { spend: 'desc', results: 'desc', cplEff: 'asc' };
@@ -476,6 +480,11 @@ async function fetchMetaCampaigns() {
     const {since,until} = getDateRange();
     const timeRange = JSON.stringify({since,until});
 
+    if (_platform === 'google') {
+      await loadGoogleSheetData(since, until);
+      return;
+    }
+
     const select = document.getElementById('ad-account') as HTMLSelectElement;
     const accountIds = selectedAccount==='all'
       ? Array.from(select.options).filter(o=>o.value!=='all').map(o=>o.value.replace(/^act_/i,''))
@@ -625,6 +634,96 @@ async function fetchMetaCampaigns() {
   }
 }
 
+// Google Ads data source — entire dashboard reads from a single sheet tab.
+async function loadGoogleSheetData(since: string, until: string) {
+  const res = await fetch('/api/sheets/google');
+  const json = await res.json();
+  if (json.error) throw new Error(json.error);
+  const allRows: { campaign: string; day: string; spend: number; leads: number; impressions: number; linkClicks: number }[] = json.rows || [];
+
+  // 1. Build per-campaign aggregates for the table + KPI cards.
+  const inRange = allRows.filter(r => r.day >= since && r.day <= until);
+  const byCampaign: Record<string, any> = {};
+  for (const r of inRange) {
+    if (!byCampaign[r.campaign]) {
+      byCampaign[r.campaign] = {
+        id: r.campaign, name: r.campaign, campaignId: r.campaign,
+        campaignName: r.campaign, adsetName: '', adName: '',
+        adsetId: '', account: 'google', status: 'ACTIVE',
+        reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0,
+      };
+    }
+    const c = byCampaign[r.campaign];
+    c.spent = Math.round((c.spent + r.spend) * 100) / 100;
+    c.results += r.leads;
+    c.impressions += r.impressions;
+    c.linkClicks += r.linkClicks;
+  }
+  const allMapped = Object.values(byCampaign);
+
+  _campaigns.splice(0, _campaigns.length, ...allMapped);
+
+  // 2. Build daily trend across all campaigns in range, seeded with zeros for missing days.
+  const byDay: Record<string, any> = {};
+  for (const r of inRange) {
+    if (!byDay[r.day]) byDay[r.day] = { date: r.day, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
+    const d = byDay[r.day];
+    d.spend = Math.round((d.spend + r.spend) * 100) / 100;
+    d.results += r.leads;
+    d.impressions += r.impressions;
+    d.linkClicks += r.linkClicks;
+  }
+  const cur = new Date(since + 'T00:00:00'); const end = new Date(until + 'T00:00:00');
+  while (cur <= end) {
+    const dt = `${cur.getFullYear()}-${String(cur.getMonth()+1).padStart(2,'0')}-${String(cur.getDate()).padStart(2,'0')}`;
+    if (!byDay[dt]) byDay[dt] = { date: dt, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
+    cur.setDate(cur.getDate() + 1);
+  }
+  _trendData = Object.values(byDay).sort((a:any, b:any) => a.date.localeCompare(b.date));
+
+  // 3. Comparison period (if any) — same shape, just on the prior date range.
+  _comparisonTotals = null; _comparisonTrendData = []; _comparisonRange = null;
+  if (_comparisonPeriod !== 'none') {
+    const cr = getComparisonDateRange(since, until, _comparisonPeriod);
+    if (cr) {
+      _comparisonRange = cr;
+      const compRows = allRows.filter(r => r.day >= cr.since && r.day <= cr.until);
+      let cTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0 };
+      const cByDay: Record<string, any> = {};
+      for (const r of compRows) {
+        cTot.impressions += r.impressions;
+        cTot.spent = Math.round((cTot.spent + r.spend) * 100) / 100;
+        cTot.linkClicks += r.linkClicks;
+        cTot.results += r.leads;
+        if (!cByDay[r.day]) cByDay[r.day] = { date: r.day, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
+        const d = cByDay[r.day];
+        d.spend = Math.round((d.spend + r.spend) * 100) / 100;
+        d.results += r.leads;
+        d.impressions += r.impressions;
+        d.linkClicks += r.linkClicks;
+      }
+      _comparisonTotals = cTot;
+      const cCur = new Date(cr.since + 'T00:00:00'); const cEnd = new Date(cr.until + 'T00:00:00');
+      while (cCur <= cEnd) {
+        const dt = `${cCur.getFullYear()}-${String(cCur.getMonth()+1).padStart(2,'0')}-${String(cCur.getDate()).padStart(2,'0')}`;
+        if (!cByDay[dt]) cByDay[dt] = { date: dt, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
+        cCur.setDate(cCur.getDate() + 1);
+      }
+      _comparisonTrendData = Object.values(cByDay).sort((a:any, b:any) => a.date.localeCompare(b.date));
+    }
+  }
+
+  renderTable();
+  if (_currentView === 'analytics') renderAnalytics();
+  showNotification(`Loaded ${allMapped.length} campaign${allMapped.length!==1?'s':''}`, 'success');
+  const statusEl = document.getElementById('data-status');
+  if (statusEl) {
+    const now = new Date().toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+    statusEl.textContent = `Updated ${now}`;
+    statusEl.className = 'text-xs text-slate-400';
+  }
+}
+
 // ── Date Picker ───────────────────────────────────────────────────────────────
 function dpPresetRow(key: string, active: boolean) {
   const p=DP_PRESETS.find(x=>x.key===key); if (!p) return '';
@@ -769,29 +868,9 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, hasSheet }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl }: Props) {
   const [ready, setReady] = useState(0);
-  const [leadsView, setLeadsView] = useState(false);
-  const [leadsLoading, setLeadsLoading] = useState(false);
-  const [leadsHeaders, setLeadsHeaders] = useState<string[]>([]);
-  const [leadsRows, setLeadsRows] = useState<Record<string, string>[]>([]);
-  const [leadsError, setLeadsError] = useState('');
-
-  async function loadLeads() {
-    setLeadsLoading(true);
-    setLeadsError('');
-    try {
-      const res = await fetch('/api/sheets/leads');
-      const json = await res.json();
-      if (json.error) throw new Error(json.error);
-      setLeadsHeaders(json.headers ?? []);
-      setLeadsRows(json.rows ?? []);
-    } catch (err: unknown) {
-      setLeadsError(err instanceof Error ? err.message : 'Failed to load sheet');
-    } finally {
-      setLeadsLoading(false);
-    }
-  }
+  _platform = platform;
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
@@ -821,6 +900,23 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 <span id="data-status">Connecting to Meta API...</span>
               </div>
               <div className="flex items-center gap-2">
+                {/* Platform switch — shown when this client has both Meta and Google Ads. */}
+                {hasGoogleAds && (
+                  <div className="flex items-center bg-slate-800/60 rounded-lg p-0.5 border border-slate-700">
+                    <a
+                      href={metaUrl || '/dashboard'}
+                      className={`text-xs px-3 py-1 rounded transition-colors ${platform === 'meta' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      Meta
+                    </a>
+                    <a
+                      href={googleUrl || '/dashboard/google'}
+                      className={`text-xs px-3 py-1 rounded transition-colors ${platform === 'google' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                    >
+                      Google Ads
+                    </a>
+                  </div>
+                )}
                 {/* Export */}
                 <div className="relative">
                   <button data-export-toggle onClick={() => document.getElementById('export-menu')?.classList.toggle('hidden')} className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
@@ -842,19 +938,21 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
         {/* Controls */}
         <div className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 pt-5 pb-3">
           <div className="flex flex-wrap gap-3 items-end">
-            {/* Account */}
-            <div className="flex flex-col gap-1.5 min-w-[200px]">
-              <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Ad Account</label>
-              <div className="flex flex-col gap-0.5">
-                <div className="relative">
-                  <select id="ad-account" onChange={() => { localStorage.setItem('meta_ad_account',(document.getElementById('ad-account') as HTMLSelectElement).value); renderTable(); }} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 pr-8 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 cursor-pointer">
-                    <option value="all">All Accounts</option>
-                  </select>
-                  <i data-lucide="chevron-down" className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none"></i>
+            {/* Account (Meta only — Google Ads pulls a single sheet tab, no account selector) */}
+            {platform === 'meta' && (
+              <div className="flex flex-col gap-1.5 min-w-[200px]">
+                <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Ad Account</label>
+                <div className="flex flex-col gap-0.5">
+                  <div className="relative">
+                    <select id="ad-account" onChange={() => { localStorage.setItem('meta_ad_account',(document.getElementById('ad-account') as HTMLSelectElement).value); renderTable(); }} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 pr-8 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 cursor-pointer">
+                      <option value="all">All Accounts</option>
+                    </select>
+                    <i data-lucide="chevron-down" className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none"></i>
+                  </div>
+                  <span className="h-4 block"></span>
                 </div>
-                <span className="h-4 block"></span>
               </div>
-            </div>
+            )}
             {/* Date Range */}
             <div className="flex flex-col gap-1.5">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Date Range</label>
@@ -877,7 +975,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
             </div>
             <span id="compare-range-label" className="hidden"></span>
-            {/* Delivery */}
+            {/* Delivery (Meta only — the Google Ads sheet has no delivery status) */}
+            {platform === 'meta' && (
             <div className="flex flex-col gap-1.5">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Delivery</label>
               <div className="flex flex-col gap-0.5">
@@ -895,6 +994,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 <span className="h-4 block"></span>
               </div>
             </div>
+            )}
             {/* Search */}
             <div className="flex flex-col gap-1.5 flex-1 min-w-[280px]">
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Search Campaigns</label>
@@ -949,20 +1049,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
           <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
             {/* Level tabs + view toggle */}
             <div className="flex items-center gap-1 px-4 pt-3 pb-0 border-b border-slate-800">
-              {hasSheet && (
-                <button
-                  onClick={() => {
-                    setLeadsView(v => {
-                      if (!v) loadLeads();
-                      return !v;
-                    });
-                  }}
-                  className={`level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors${leadsView ? ' active-tab' : ''}`}
-                >
-                  Leads
-                </button>
-              )}
-              {(['campaign','adset','ad'] as const).map(l => (
+              {platform === 'meta' && (['campaign','adset','ad'] as const).map(l => (
                 <button key={l} id={`tab-${l}`} onClick={() => {
                   if (l===_currentLevel) return;
                   const lo=['campaign','adset','ad']; const pi=lo.indexOf(_currentLevel); const ni=lo.indexOf(l);
@@ -976,6 +1063,12 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   {l.charAt(0).toUpperCase()+l.slice(1)}{l==='adset'?' Sets':l==='ad'?'s':'s'}
                 </button>
               ))}
+              {platform === 'google' && (
+                <div className="px-4 py-2 text-xs font-semibold text-slate-300">
+                  <i data-lucide="bar-chart-2" className="w-3.5 h-3.5 inline mr-1.5 align-text-bottom text-blue-400"></i>
+                  Google Ads
+                </div>
+              )}
               <div className="ml-auto flex items-center gap-2 pb-2">
                 <span id="selection-summary" className="text-xs text-slate-500 hidden"></span>
                 <div className="flex items-center gap-0.5 bg-slate-800/60 rounded-lg p-0.5">
@@ -985,56 +1078,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
             </div>
 
-            {/* Leads view */}
-            {leadsView && (
-              <div className="p-5">
-                <div className="flex items-center justify-between mb-4">
-                  <h2 className="text-sm font-semibold text-white flex items-center gap-2">
-                    <i data-lucide="table-2" className="w-4 h-4 text-emerald-400"></i> Leads from Google Sheet
-                  </h2>
-                  <button onClick={loadLeads} className="text-xs bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5">
-                    <i data-lucide="refresh-cw" className="w-3 h-3"></i> Refresh
-                  </button>
-                </div>
-                {leadsLoading && (
-                  <div className="text-center py-12 text-slate-500 text-sm">Loading sheet data…</div>
-                )}
-                {leadsError && (
-                  <div className="text-center py-12 text-red-400 text-sm">{leadsError}</div>
-                )}
-                {!leadsLoading && !leadsError && leadsRows.length === 0 && (
-                  <div className="text-center py-12 text-slate-500 text-sm">No rows found in sheet.</div>
-                )}
-                {!leadsLoading && !leadsError && leadsRows.length > 0 && (
-                  <div className="overflow-x-auto scrollbar-thin rounded-lg border border-slate-800">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-slate-700 bg-slate-800/60">
-                          {leadsHeaders.map(h => (
-                            <th key={h} className="text-left px-3 py-2.5 font-semibold uppercase tracking-wider text-slate-400 whitespace-nowrap">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {leadsRows.map((row, i) => (
-                          <tr key={i} className="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors">
-                            {leadsHeaders.map(h => (
-                              <td key={h} className="px-3 py-2.5 text-slate-300 whitespace-nowrap">{row[h]}</td>
-                            ))}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                    <div className="px-4 py-2 text-[10px] text-slate-500 border-t border-slate-800">
-                      {leadsRows.length} row{leadsRows.length !== 1 ? 's' : ''}
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-
             {/* Table view */}
-            <div id="table-view" className={leadsView ? 'hidden' : ''}>
+            <div id="table-view">
               <div id="drilldown-banner" className="hidden items-center gap-2 px-4 py-2 bg-blue-500/10 border-b border-blue-500/20 text-xs text-blue-300"></div>
               <div className="overflow-x-auto scrollbar-thin">
                 <table className="w-full text-sm">
