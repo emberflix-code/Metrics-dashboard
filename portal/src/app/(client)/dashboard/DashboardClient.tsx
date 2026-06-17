@@ -36,6 +36,7 @@ let _comparisonPeriod = 'none';
 let _searchMode = 'all';
 const _searchChips: string[] = [];
 let _isInitialized = false;
+let _hasLoadedOnce = false;
 let _showAccount = false;
 let _platform: 'meta' | 'google' = 'meta';
 
@@ -163,9 +164,16 @@ function showNotification(msg: string, type: 'success'|'error') {
   setTimeout(() => { el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(),300); }, 3000);
 }
 
-function showLoadingBar() { document.getElementById('loading-bar')?.classList.add('active'); }
+function showLoadingBar() {
+  document.getElementById('loading-bar')?.classList.add('active');
+  // Centered overlay only on the very first load — subsequent refreshes
+  // (date change, level switch) keep the thin top bar but don't blank the screen.
+  if (!_hasLoadedOnce) document.getElementById('loading-overlay')?.classList.remove('hidden');
+}
 function hideLoadingBar() {
   const bar = document.getElementById('loading-bar');
+  document.getElementById('loading-overlay')?.classList.add('hidden');
+  _hasLoadedOnce = true;
   if (!bar) return;
   bar.classList.remove('active');
   bar.style.opacity='1';
@@ -884,6 +892,13 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
       <Script src="https://cdn.jsdelivr.net/npm/lucide@0.263.0/dist/umd/lucide.min.js" strategy="afterInteractive" onLoad={incReady} />
 
       <div id="loading-bar"></div>
+      <div id="loading-overlay" className="hidden">
+        <div className="loading-overlay-inner">
+          <div className="loading-spinner"></div>
+          <div className="loading-text">Loading dashboard data…</div>
+          <div className="loading-subtext">Meta sometimes takes a moment.</div>
+        </div>
+      </div>
       <div id="app" className="w-full min-h-screen flex flex-col font-sans" style={{fontFamily:'DM Sans, sans-serif'}}>
 
         {/* Header */}
