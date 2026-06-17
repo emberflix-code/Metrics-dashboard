@@ -2,6 +2,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
+import { SignOutButton } from './SignOutButton';
 
 interface ClientRow {
   id: string;
@@ -62,6 +63,7 @@ export default async function AdminPage() {
             >
               + New Client
             </a>
+            <SignOutButton />
           </div>
         </div>
 
