@@ -1,6 +1,7 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 
 export function ChangePasswordButton({ className }: { className?: string }) {
   const [open, setOpen] = useState(false);
@@ -9,6 +10,8 @@ export function ChangePasswordButton({ className }: { className?: string }) {
   const [confirm, setConfirm] = useState('');
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [error, setError] = useState('');
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   function reset() {
     setCurrent(''); setNext(''); setConfirm(''); setStatus('idle'); setError('');
@@ -46,7 +49,7 @@ export function ChangePasswordButton({ className }: { className?: string }) {
         Change password
       </button>
 
-      {open && (
+      {open && mounted && createPortal(
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/70 backdrop-blur-sm p-4"
           onClick={() => { if (status !== 'saving') { setOpen(false); reset(); } }}
@@ -121,7 +124,8 @@ export function ChangePasswordButton({ className }: { className?: string }) {
               </div>
             </form>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </>
   );
