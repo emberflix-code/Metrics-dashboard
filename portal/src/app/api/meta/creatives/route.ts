@@ -1,0 +1,401 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { getClientConnection } from '@/lib/meta';
+
+// One row per ad's insights (raw from Meta).
+interface AdInsight {
+  ad_id: string;
+  ad_name?: string;
+  campaign_name?: string;
+  adset_name?: string;
+  effective_status?: string;
+  spend?: string;
+  impressions?: string;
+  inline_link_clicks?: string;
+  reach?: string;
+  actions?: { action_type: string; value: string }[];
+}
+
+// Creative metadata from /ads?fields=creative{...}
+interface AdCreative {
+  id?: string;                       // ad ID
+  effective_status?: string;
+  creative?: {
+    id?: string;
+    image_url?: string;
+    image_hash?: string;
+    thumbnail_url?: string;
+    video_id?: string;
+    body?: string;
+    title?: string;
+    object_story_spec?: {
+      page_id?: string;
+      link_data?: {
+        picture?: string;
+        message?: string;
+        name?: string;
+        child_attachments?: {
+          image_hash?: string;
+          picture?: string;
+          link?: string;
+          name?: string;
+          description?: string;
+        }[];
+      };
+      video_data?: {
+        image_url?: string;
+        video_id?: string;
+        title?: string;
+        message?: string;
+      };
+    };
+  };
+}
+
+interface CreativeRow {
+  assetKey: string;            // hash, video_id, or fallback creative_id
+  type: 'image' | 'video' | 'carousel-slide' | 'unknown';
+  thumbnail: string | null;
+  videoSource: string | null;  // playable video URL when type === 'video'
+  videoId: string | null;      // underlying video asset ID (for Open in Ads Manager links)
+  body: string | null;         // ad copy
+  title: string | null;        // headline
+  sampleAdName: string;
+  sampleAdId: string;
+  // Aggregate metrics
+  spend: number;
+  results: number;
+  impressions: number;
+  linkClicks: number;
+  reach: number;
+  // Derived for client (also reproducible there, but cheap to compute once)
+  ctr: number;
+  cpl: number;
+  // Per-ad breakdown (drawer)
+  ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+}
+
+function extractLeads(actions?: AdInsight['actions']): number {
+  if (!actions) return 0;
+  const m: Record<string, number> = {};
+  for (const a of actions) m[a.action_type] = parseInt(a.value || '0', 10);
+  const pixel = m['offsite_conversion.fb_pixel_lead'] || 0;
+  const onsite = m['onsite_conversion.lead_grouped'] || 0;
+  if (pixel > 0) return pixel;
+  if (onsite > 0) return onsite;
+  return m['lead'] || 0;
+}
+
+async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
+  const out: T[] = [];
+  const initial = url.toString();
+  let next: string | null = initial.includes('access_token=') ? initial : `${initial}&access_token=${token}`;
+  let safety = 25;
+  while (next && safety-- > 0) {
+    const res: Response = await fetch(next);
+    const json: { data?: T[]; error?: { message?: string }; paging?: { next?: string } } = await res.json();
+    if (json.error) throw new Error(json.error.message || 'Meta API error');
+    if (Array.isArray(json.data)) out.push(...json.data);
+    next = json.paging?.next || null;
+  }
+  return out;
+}
+
+export async function GET(req: NextRequest) {
+  try {
+    const { token, accountIds, campaignFilter } = await getClientConnection();
+    const sp = req.nextUrl.searchParams;
+
+    const accountId = sp.get('account_id')?.replace(/^act_/i, '');
+    if (!accountId) return NextResponse.json({ error: { message: 'Missing account_id' } }, { status: 400 });
+    if (!accountIds.includes(accountId)) return NextResponse.json({ error: { message: 'Account not authorized' } }, { status: 403 });
+
+    const timeRange = sp.get('time_range') || '{}';
+    const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
+
+    // 1) Insights at ad level — the metrics we need.
+    const insightsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
+    insightsUrl.searchParams.set('fields', 'ad_id,ad_name,campaign_name,adset_name,spend,impressions,inline_link_clicks,reach,actions');
+    insightsUrl.searchParams.set('level', 'ad');
+    insightsUrl.searchParams.set('time_range', timeRange);
+    insightsUrl.searchParams.set('limit', '500');
+    insightsUrl.searchParams.set('action_attribution_windows', attribution);
+    if (campaignFilter) {
+      insightsUrl.searchParams.set('filtering', JSON.stringify([
+        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
+      ]));
+    }
+
+    // 2) Ads + their creative metadata (one call thanks to field expansion).
+    const adsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
+    adsUrl.searchParams.set(
+      'fields',
+      'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}'
+    );
+    adsUrl.searchParams.set('limit', '200');
+    if (campaignFilter) {
+      adsUrl.searchParams.set('filtering', JSON.stringify([
+        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
+      ]));
+    }
+
+    const [insights, ads] = await Promise.all([
+      fetchAll<AdInsight>(insightsUrl, token),
+      fetchAll<AdCreative>(adsUrl, token),
+    ]);
+
+    // Index creative metadata by ad ID.
+    const creativeByAdId = new Map<string, AdCreative>();
+    for (const ad of ads) {
+      if (ad.id) creativeByAdId.set(ad.id, ad);
+    }
+
+    // For each insight row, derive the asset identity (or identities, if a carousel).
+    // Per the agreed scope: one row per slide for carousels.
+    interface PerSlide {
+      assetKey: string;
+      type: CreativeRow['type'];
+      thumbnail: string | null;
+      videoId: string | null;
+      body: string | null;
+      title: string | null;
+      adId: string;
+      adName: string;
+      campaignName: string;
+      status: string;
+      spend: number;
+      results: number;
+      impressions: number;
+      linkClicks: number;
+      reach: number;
+      // Weight when splitting metrics across N carousel slides (1 for non-carousels).
+      // 1 / slideCount so summed metrics stay consistent with the ad's true totals.
+      weight: number;
+    }
+    const perSlide: PerSlide[] = [];
+
+    for (const ins of insights) {
+      if (!ins.ad_id) continue;
+      const ad = creativeByAdId.get(ins.ad_id);
+      const creative = ad?.creative;
+      const spend = parseFloat(ins.spend || '0') || 0;
+      const impressions = parseInt(ins.impressions || '0', 10) || 0;
+      const linkClicks = parseInt(ins.inline_link_clicks || '0', 10) || 0;
+      const reach = parseInt(ins.reach || '0', 10) || 0;
+      const results = extractLeads(ins.actions);
+
+      const linkData = creative?.object_story_spec?.link_data;
+      const videoData = creative?.object_story_spec?.video_data;
+      const carouselSlides = linkData?.child_attachments;
+      // Common copy fields used by every CASE below — first non-empty wins.
+      const adBody = videoData?.message || linkData?.message || creative?.body || null;
+      const adTitle = videoData?.title || linkData?.name || creative?.title || null;
+
+      // CASE 1: carousel — emit one slide per child_attachment, splitting metrics evenly.
+      if (carouselSlides && carouselSlides.length > 0) {
+        const weight = 1 / carouselSlides.length;
+        for (let i = 0; i < carouselSlides.length; i++) {
+          const slide = carouselSlides[i];
+          const key = slide.image_hash || `${creative?.id || ins.ad_id}#slide${i}`;
+          perSlide.push({
+            assetKey: key,
+            type: 'carousel-slide',
+            thumbnail: slide.picture || null,
+            videoId: null,
+            body: slide.description || adBody,
+            title: slide.name || adTitle,
+            adId: ins.ad_id,
+            adName: ins.ad_name || ad?.id || '(unnamed)',
+            campaignName: ins.campaign_name || '',
+            status: ad?.effective_status || ins.effective_status || 'UNKNOWN',
+            spend: spend * weight,
+            results: results * weight,
+            impressions: impressions * weight,
+            linkClicks: linkClicks * weight,
+            reach: Math.round(reach * weight),
+            weight,
+          });
+        }
+        continue;
+      }
+
+      // CASE 2: video. Prefer the SOURCE asset id from object_story_spec.video_data — that's
+      // the underlying uploaded video. The top-level creative.video_id is a per-ad derivative,
+      // so using it splits ads that actually share the same source video into separate cards.
+      const sourceVideoId = videoData?.video_id || creative?.video_id;
+      if (sourceVideoId) {
+        const thumb = videoData?.image_url || creative?.thumbnail_url || creative?.image_url || null;
+        perSlide.push({
+          assetKey: `video:${sourceVideoId}`,
+          type: 'video',
+          thumbnail: thumb,
+          videoId: sourceVideoId,
+          body: adBody,
+          title: adTitle,
+          adId: ins.ad_id,
+          adName: ins.ad_name || '(unnamed)',
+          campaignName: ins.campaign_name || '',
+          status: ad?.effective_status || ins.effective_status || 'UNKNOWN',
+          spend, results, impressions, linkClicks, reach,
+          weight: 1,
+        });
+        continue;
+      }
+
+      // CASE 3: single image.
+      if (creative?.image_hash || creative?.image_url || linkData?.picture) {
+        const hash = creative?.image_hash;
+        const thumb = linkData?.picture || creative?.image_url || creative?.thumbnail_url || null;
+        const key = hash ? `image:${hash}` : `creative:${creative?.id || ins.ad_id}`;
+        perSlide.push({
+          assetKey: key,
+          type: 'image',
+          thumbnail: thumb,
+          videoId: null,
+          body: adBody,
+          title: adTitle,
+          adId: ins.ad_id,
+          adName: ins.ad_name || '(unnamed)',
+          campaignName: ins.campaign_name || '',
+          status: ad?.effective_status || ins.effective_status || 'UNKNOWN',
+          spend, results, impressions, linkClicks, reach,
+          weight: 1,
+        });
+        continue;
+      }
+
+      // CASE 4: thumbnail-only image (DCO output, or older creatives with neither image_hash
+      // nor video_id set). The thumbnail URL is signed and ephemeral, so strip the query
+      // string and use the path as the asset key — same image = same path.
+      if (creative?.thumbnail_url) {
+        let key = creative.thumbnail_url;
+        try { const u = new URL(creative.thumbnail_url); key = `thumb:${u.pathname}`; } catch { /* keep raw */ }
+        perSlide.push({
+          assetKey: key,
+          type: 'image',
+          thumbnail: creative.thumbnail_url,
+          videoId: null,
+          body: adBody,
+          title: adTitle,
+          adId: ins.ad_id,
+          adName: ins.ad_name || '(unnamed)',
+          campaignName: ins.campaign_name || '',
+          status: ad?.effective_status || ins.effective_status || 'UNKNOWN',
+          spend, results, impressions, linkClicks, reach,
+          weight: 1,
+        });
+        continue;
+      }
+
+      // CASE 5: truly unknown / DCO with nothing to render — group by creative_id last.
+      perSlide.push({
+        assetKey: `creative:${creative?.id || ins.ad_id}`,
+        type: 'unknown',
+        thumbnail: null,
+        videoId: null,
+        body: adBody,
+        title: adTitle,
+        adId: ins.ad_id,
+        adName: ins.ad_name || '(unnamed)',
+        campaignName: ins.campaign_name || '',
+        status: ad?.effective_status || ins.effective_status || 'UNKNOWN',
+        spend, results, impressions, linkClicks, reach,
+        weight: 1,
+      });
+    }
+
+    // Aggregate slides into CreativeRow.
+    const grouped = new Map<string, CreativeRow>();
+    for (const s of perSlide) {
+      let row = grouped.get(s.assetKey);
+      if (!row) {
+        row = {
+          assetKey: s.assetKey,
+          type: s.type,
+          thumbnail: s.thumbnail,
+          videoSource: null,
+          videoId: s.videoId,
+          body: s.body,
+          title: s.title,
+          sampleAdName: s.adName,
+          sampleAdId: s.adId,
+          spend: 0, results: 0, impressions: 0, linkClicks: 0, reach: 0,
+          ctr: 0, cpl: 0,
+          ads: [],
+        };
+        grouped.set(s.assetKey, row);
+      }
+      // Backfill thumbnail and copy if a later slide has them and the earlier didn't.
+      if (!row.thumbnail && s.thumbnail) row.thumbnail = s.thumbnail;
+      if (!row.videoId && s.videoId) row.videoId = s.videoId;
+      if (!row.body && s.body) row.body = s.body;
+      if (!row.title && s.title) row.title = s.title;
+      row.spend += s.spend;
+      row.results += s.results;
+      row.impressions += s.impressions;
+      row.linkClicks += s.linkClicks;
+      row.reach += s.reach;
+      // Avoid double-counting the same ad in `ads` when a carousel splits multiple slides:
+      // each slide is its own row, but its `ads` should still surface the parent ad once.
+      if (!row.ads.find(a => a.id === s.adId)) {
+        row.ads.push({
+          id: s.adId,
+          name: s.adName,
+          status: s.status,
+          spend: s.spend / (s.weight || 1),
+          results: s.results / (s.weight || 1),
+          impressions: s.impressions / (s.weight || 1),
+          linkClicks: s.linkClicks / (s.weight || 1),
+        });
+      }
+    }
+
+    // Derived metrics + rounding.
+    const rows = Array.from(grouped.values()).map(r => {
+      const ctr = r.impressions > 0 ? (r.linkClicks / r.impressions) * 100 : 0;
+      const cpl = r.results > 0 ? r.spend / r.results : 0;
+      return {
+        ...r,
+        spend: Math.round(r.spend * 100) / 100,
+        results: Math.round(r.results * 100) / 100,
+        impressions: Math.round(r.impressions),
+        linkClicks: Math.round(r.linkClicks),
+        reach: Math.round(r.reach),
+        ctr: Math.round(ctr * 100) / 100,
+        cpl: Math.round(cpl * 100) / 100,
+        ads: r.ads.map(a => ({
+          ...a,
+          spend: Math.round(a.spend * 100) / 100,
+          results: Math.round(a.results * 100) / 100,
+          impressions: Math.round(a.impressions),
+          linkClicks: Math.round(a.linkClicks),
+        })),
+      };
+    });
+
+    // Fetch playable video source URLs in parallel for each unique videoId.
+    // Meta returns a signed mp4 in `source`. We ignore failures silently (private videos,
+    // expired URLs) and just leave videoSource null — the modal will fall back to thumbnail.
+    const videoIds = Array.from(new Set(
+      rows.filter(r => r.type === 'video' && r.videoId).map(r => r.videoId as string)
+    ));
+    const videoSources = new Map<string, string>();
+    await Promise.all(videoIds.map(async vid => {
+      try {
+        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source&access_token=${token}`;
+        const res = await fetch(u);
+        const json = await res.json() as { source?: string };
+        if (json.source) videoSources.set(vid, json.source);
+      } catch { /* ignore — videoSource stays null */ }
+    }));
+    for (const r of rows) {
+      if (r.type === 'video' && r.videoId && videoSources.has(r.videoId)) {
+        r.videoSource = videoSources.get(r.videoId) as string;
+      }
+    }
+
+    return NextResponse.json({ data: rows });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : 'Internal error';
+    return NextResponse.json({ error: { message: msg } }, { status: 500 });
+  }
+}

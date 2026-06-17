@@ -41,6 +41,25 @@ let _hasLoadedOnce = false;
 let _showAccount = false;
 let _platform: 'meta' | 'google' = 'meta';
 
+// Creative breakdown state — one row per asset, populated by /api/meta/creatives
+interface CreativeRow {
+  assetKey: string;
+  type: 'image' | 'video' | 'carousel-slide' | 'unknown';
+  thumbnail: string | null;
+  videoSource: string | null;
+  videoId: string | null;
+  body: string | null;
+  title: string | null;
+  sampleAdName: string;
+  sampleAdId: string;
+  spend: number; results: number; impressions: number; linkClicks: number; reach: number;
+  ctr: number; cpl: number;
+  ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+}
+let _creatives: CreativeRow[] = [];
+let _creativesSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
+let _creativesLoading = false;
+
 const _charts: Record<string, any> = {};
 const _chartSort = { results: 'desc', cplEff: 'asc' };
 
@@ -463,6 +482,126 @@ function renderAnalytics() {
   lucide.createIcons();
 }
 
+// ── Creatives (asset-level breakdown) ─────────────────────────────────────────
+function _typeBadge(t: CreativeRow['type']) {
+  const m = {
+    image: { label: 'Image', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
+    video: { label: 'Video', color: 'bg-purple-500/10 text-purple-300 border-purple-500/20' },
+    'carousel-slide': { label: 'Carousel slide', color: 'bg-amber-500/10 text-amber-300 border-amber-500/20' },
+    unknown: { label: 'Unknown', color: 'bg-slate-500/10 text-slate-300 border-slate-500/20' },
+  } as const;
+  const e = m[t] || m.unknown;
+  return `<span class="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border ${e.color}">${e.label}</span>`;
+}
+
+function renderCreatives() {
+  const wrap = document.getElementById('creatives-grid');
+  if (!wrap) return;
+
+  if (_creativesLoading) {
+    wrap.innerHTML = Array.from({length:6}, () => `
+      <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
+        <div class="skeleton aspect-video w-full"></div>
+        <div class="p-3 space-y-2">
+          <div class="skeleton h-4 w-3/4"></div>
+          <div class="skeleton h-3 w-1/2"></div>
+        </div>
+      </div>`).join('');
+    return;
+  }
+
+  if (_creatives.length === 0) {
+    wrap.innerHTML = `<div class="col-span-full text-center py-16 text-slate-500 text-sm">No creatives found for this date range.</div>`;
+    return;
+  }
+
+  const sorted = [..._creatives].sort((a,b) => {
+    switch (_creativesSort) {
+      case 'spend':   return b.spend - a.spend;
+      case 'results': return b.results - a.results;
+      case 'cpl':     return (a.cpl || Infinity) - (b.cpl || Infinity);
+      case 'ctr':     return b.ctr - a.ctr;
+    }
+  });
+
+  wrap.innerHTML = sorted.map((c, i) => {
+    const thumb = c.thumbnail
+      ? `<img src="${c.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" class="w-full h-full object-cover" />`
+      : '';
+    const noThumbClass = c.thumbnail ? '' : ' no-thumb';
+    const cpl = c.results > 0 ? `$${c.cpl.toFixed(2)}` : '—';
+    const ctr = `${c.ctr.toFixed(2)}%`;
+    return `
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" onclick="window._openCreative('${c.assetKey.replace(/'/g,"\\'")}')">
+        <div class="relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
+          ${thumb}
+          <div class="absolute top-2 left-2">${_typeBadge(c.type)}</div>
+          ${c.ads.length > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${c.ads.length} ads</div>` : ''}
+        </div>
+        <div class="p-3 space-y-1.5">
+          <div class="text-xs font-semibold text-white truncate" title="${(c.sampleAdName || '').replace(/"/g,'&quot;')}">${c.sampleAdName || '(unnamed)'}</div>
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mt-1.5">
+            <div class="text-slate-500">Spend</div><div class="text-right font-mono text-slate-200">$${c.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+            <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${c.results}</div>
+            <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
+            <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+async function fetchCreatives() {
+  _creativesLoading = true;
+  renderCreatives();
+  try {
+    const {since,until} = getDateRange();
+    const timeRange = JSON.stringify({since,until});
+    const select = document.getElementById('ad-account') as HTMLSelectElement;
+    const selectedAccount = select?.value || 'all';
+    const accountIds = selectedAccount === 'all'
+      ? Array.from(select?.options || []).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i,''))
+      : [selectedAccount.replace(/^act_/i,'')];
+
+    const all: CreativeRow[] = [];
+    const results = await Promise.all(accountIds.map(async acc => {
+      const url = `/api/meta/creatives?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
+      const res = await fetch(url);
+      const json = await res.json();
+      if (json.error) throw new Error(json.error.message || 'Failed to fetch creatives');
+      return (json.data || []) as CreativeRow[];
+    }));
+    for (const arr of results) all.push(...arr);
+
+    // If the same assetKey shows up across accounts (rare but possible if assets are
+    // shared), merge them so we don't double-card. Group then sum.
+    const byKey = new Map<string, CreativeRow>();
+    for (const c of all) {
+      const existing = byKey.get(c.assetKey);
+      if (!existing) { byKey.set(c.assetKey, { ...c, ads: [...c.ads] }); continue; }
+      existing.spend += c.spend;
+      existing.results += c.results;
+      existing.impressions += c.impressions;
+      existing.linkClicks += c.linkClicks;
+      existing.reach += c.reach;
+      // De-dupe ads by ID.
+      for (const a of c.ads) if (!existing.ads.find(x => x.id === a.id)) existing.ads.push(a);
+      existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
+      existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+      if (!existing.thumbnail && c.thumbnail) existing.thumbnail = c.thumbnail;
+    }
+    _creatives = Array.from(byKey.values());
+  } catch (err) {
+    showNotification(err instanceof Error ? err.message : 'Failed to fetch creatives', 'error');
+    _creatives = [];
+  } finally {
+    _creativesLoading = false;
+    renderCreatives();
+  }
+}
+
 // ── fetchMetaCampaigns ────────────────────────────────────────────────────────
 async function fetchMetaCampaigns() {
   showLoadingBar();
@@ -865,6 +1004,117 @@ if (typeof window !== 'undefined') {
   (window as any)._handleSelectAll = (checked: boolean) => { const data=getFiltered(); if (checked) data.forEach(c=>_selectedRows.add(c.id||c.name)); else _selectedRows.clear(); renderTable(); };
   (window as any)._clearDrilldown = () => { _drilldownParentIds.clear(); _drilldownParentLevel=null; _selectedRows.clear(); renderTable(); };
   (window as any)._dpSelectPreset = (key: string) => { _dpActivePreset=key; const r=_dpPresetRange(key); if (r){_dpSince=r.since;_dpUntil=r.until;} _dpSelecting=false;_dpHover=null; const base=new Date(_dpSince!+'T00:00:00');_dpLY=base.getFullYear();_dpLM=base.getMonth(); dpPopulatePresets();dpPopulateSelects();dpRenderBothCals();dpRenderCompareRange(); };
+  // Stub: drawer / details to be added in phase 3.
+  (window as any)._openCreative = (assetKey: string) => {
+    const c = _creatives.find(x => x.assetKey === assetKey);
+    if (!c) return;
+    const modal = document.getElementById('creative-modal');
+    const body = document.getElementById('creative-modal-body');
+    if (!modal || !body) return;
+
+    const media = c.type === 'video' && c.videoSource
+      ? `<video src="${c.videoSource}" poster="${c.thumbnail || ''}" controls preload="metadata" playsinline class="w-full h-full object-contain bg-slate-950"></video>`
+      : c.thumbnail
+        ? `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="w-full h-full object-contain bg-slate-950" />`
+        : `<div class="w-full h-full flex items-center justify-center text-slate-500 text-sm">No preview available</div>`;
+
+    const statusBadge = (s: string) => {
+      const colors: Record<string,string> = { ACTIVE:'#34d399', PAUSED:'#94a3b8', CAMPAIGN_PAUSED:'#94a3b8', ADSET_PAUSED:'#94a3b8', WITH_ISSUES:'#fbbf24', IN_PROCESS:'#60a5fa', ARCHIVED:'#475569' };
+      const dot = colors[s] || '#475569';
+      return `<span style="color:${dot}">●</span> <span class="text-slate-300">${s.toLowerCase().replace(/_/g,' ')}</span>`;
+    };
+
+    const adsSorted = [...c.ads].sort((a,b) => b.spend - a.spend);
+
+    body.innerHTML = `
+      <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+        <div class="md:col-span-2">
+          <div class="relative aspect-square bg-slate-950 rounded-lg overflow-hidden border border-slate-800">${media}</div>
+          ${c.title || c.body ? `
+            <div class="mt-3 space-y-1.5">
+              ${c.title ? `<div class="text-sm font-semibold text-white">${c.title}</div>` : ''}
+              ${c.body ? `<div class="text-xs text-slate-400 whitespace-pre-wrap">${c.body}</div>` : ''}
+            </div>
+          ` : ''}
+        </div>
+        <div class="md:col-span-3 space-y-3">
+          <div>
+            <div class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">Aggregate performance</div>
+            <div class="grid grid-cols-4 gap-2 text-center">
+              <div class="bg-slate-800/40 border border-slate-800 rounded-lg p-2">
+                <div class="text-[10px] text-slate-500 uppercase tracking-wider">Spend</div>
+                <div class="text-sm font-mono font-semibold text-emerald-300">$${c.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+              </div>
+              <div class="bg-slate-800/40 border border-slate-800 rounded-lg p-2">
+                <div class="text-[10px] text-slate-500 uppercase tracking-wider">Leads</div>
+                <div class="text-sm font-mono font-semibold text-amber-300">${c.results}</div>
+              </div>
+              <div class="bg-slate-800/40 border border-slate-800 rounded-lg p-2">
+                <div class="text-[10px] text-slate-500 uppercase tracking-wider">CPL</div>
+                <div class="text-sm font-mono font-semibold text-violet-300">${c.results > 0 ? '$'+c.cpl.toFixed(2) : '—'}</div>
+              </div>
+              <div class="bg-slate-800/40 border border-slate-800 rounded-lg p-2">
+                <div class="text-[10px] text-slate-500 uppercase tracking-wider">CTR</div>
+                <div class="text-sm font-mono font-semibold text-rose-300">${c.ctr.toFixed(2)}%</div>
+              </div>
+            </div>
+          </div>
+          <div>
+            <div class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">${c.ads.length} ad${c.ads.length!==1?'s':''} using this creative</div>
+            <div class="border border-slate-800 rounded-lg overflow-hidden">
+              <div class="overflow-x-auto max-h-80 overflow-y-auto">
+                <table class="w-full text-xs">
+                  <thead class="bg-slate-800/60 sticky top-0">
+                    <tr>
+                      <th class="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Ad</th>
+                      <th class="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Status</th>
+                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Spend</th>
+                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Leads</th>
+                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">CPL</th>
+                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">CTR</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    ${adsSorted.map(a => {
+                      const cpl = a.results > 0 ? '$'+(a.spend/a.results).toFixed(2) : '—';
+                      const ctr = a.impressions > 0 ? ((a.linkClicks/a.impressions)*100).toFixed(2)+'%' : '0.00%';
+                      return `<tr class="border-t border-slate-800/50 hover:bg-slate-800/30">
+                        <td class="px-3 py-2 text-slate-200 truncate max-w-[200px]" title="${a.name.replace(/"/g,'&quot;')}">${a.name}</td>
+                        <td class="px-3 py-2">${statusBadge(a.status)}</td>
+                        <td class="px-3 py-2 text-right font-mono text-emerald-300">$${a.spend.toFixed(2)}</td>
+                        <td class="px-3 py-2 text-right font-mono text-amber-300">${a.results}</td>
+                        <td class="px-3 py-2 text-right font-mono text-violet-300">${cpl}</td>
+                        <td class="px-3 py-2 text-right font-mono text-rose-300">${ctr}</td>
+                      </tr>`;
+                    }).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    `;
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  };
+
+  (window as any)._closeCreative = () => {
+    const modal = document.getElementById('creative-modal');
+    if (!modal) return;
+    // Pause any playing video so it doesn't keep going in the background.
+    modal.querySelectorAll('video').forEach(v => { try { (v as HTMLVideoElement).pause(); } catch {} });
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+  // Esc closes the creative modal whenever it's open.
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('creative-modal');
+      if (modal && !modal.classList.contains('hidden')) (window as any)._closeCreative();
+    }
+  });
 }
 
 // ── React component ───────────────────────────────────────────────────────────
@@ -1060,6 +1310,11 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               {platform === 'meta' && (['campaign','adset','ad'] as const).map(l => (
                 <button key={l} id={`tab-${l}`} onClick={() => {
                   if (l===_currentLevel) return;
+                  // Leaving the creatives view, hide it.
+                  document.getElementById('creatives-view')?.classList.add('hidden');
+                  document.getElementById('table-view')?.classList.remove('hidden');
+                  document.getElementById('analytics-view')?.classList.toggle('hidden', _currentView !== 'analytics');
+                  document.getElementById('tab-creatives')?.classList.remove('active-tab');
                   const lo=['campaign','adset','ad']; const pi=lo.indexOf(_currentLevel); const ni=lo.indexOf(l);
                   if (ni>pi&&_selectedRows.size>0){_drilldownParentIds=new Set(_selectedRows);_drilldownParentLevel=_currentLevel;}
                   else {_drilldownParentIds.clear();_drilldownParentLevel=null;}
@@ -1071,6 +1326,19 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   {l.charAt(0).toUpperCase()+l.slice(1)}{l==='adset'?' Sets':l==='ad'?'s':'s'}
                 </button>
               ))}
+              {platform === 'meta' && (
+                <button id="tab-creatives" onClick={() => {
+                  // Hide other views, show creatives.
+                  document.getElementById('table-view')?.classList.add('hidden');
+                  document.getElementById('analytics-view')?.classList.add('hidden');
+                  document.getElementById('creatives-view')?.classList.remove('hidden');
+                  ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
+                  document.getElementById('tab-creatives')?.classList.add('active-tab');
+                  fetchCreatives();
+                }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
+                  Creatives
+                </button>
+              )}
               {platform === 'google' && (
                 <div className="px-4 py-2 text-xs font-semibold text-slate-300">
                   <i data-lucide="bar-chart-2" className="w-3.5 h-3.5 inline mr-1.5 align-text-bottom text-blue-400"></i>
@@ -1168,12 +1436,47 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 </div>
               </div>
             </div>
+
+            {/* Creatives view (asset-level breakdown) */}
+            <div id="creatives-view" className="hidden p-5">
+              <div className="flex items-center justify-between mb-4">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <i data-lucide="image" className="w-3.5 h-3.5 text-blue-400"></i> Creative Asset Performance
+                </h3>
+                <div className="flex items-center gap-1">
+                  <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
+                  {([
+                    ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
+                  ] as const).map(([k,label]) => (
+                    <button key={k} data-cre-sort={k} onClick={() => {
+                      _creativesSort = k;
+                      document.querySelectorAll('[data-cre-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.creSort === k));
+                      renderCreatives();
+                    }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
+                  ))}
+                </div>
+              </div>
+              <div id="creatives-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+            </div>
           </div>
         </div>
 
         <footer className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-4 text-center text-[11px] text-slate-600 border-t border-slate-800/50">
           Live data from Meta Marketing API. All times in account timezone.
         </footer>
+      </div>
+
+      {/* Creative Detail Modal */}
+      <div id="creative-modal" className="hidden fixed inset-0 z-[210]" style={{background:'rgba(0,0,0,.7)',backdropFilter:'blur(4px)'}} onClick={(e)=>{ if(e.target===e.currentTarget) (window as any)._closeCreative?.(); }} onKeyDown={(e)=>{ if(e.key==='Escape') (window as any)._closeCreative?.(); }}>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-[95vw] max-w-[1100px] max-h-[92vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <i data-lucide="image" className="w-4 h-4 text-blue-400"></i> Creative detail
+            </h3>
+            <button onClick={()=>(window as any)._closeCreative?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+          </div>
+          <div id="creative-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
+        </div>
       </div>
 
       {/* Date Picker Modal */}
