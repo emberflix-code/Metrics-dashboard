@@ -91,6 +91,36 @@ const CHART_DEFAULTS = {
 // ── Date Picker state ────────────────────────────────────────────────────────
 // Today is excluded everywhere — both Meta and Google Ads data are treated as
 // complete only after the day rolls over, so today-anchored ranges are blocked.
+
+// IANA timezone (e.g. "America/Chicago") for the active ad account. Set once
+// per dashboard load via /api/meta/account-info. Defaults to the browser's
+// local timezone before that fetch resolves so the picker still works on
+// first paint. When the account's day differs from the browser's day (e.g.
+// PHT browser viewing a US Central account), this is critical for "today"
+// blocks and preset ranges to line up with what Meta reports.
+let _accountTimezone: string | null = null;
+
+// Returns a Date whose getFullYear/getMonth/getDate represent the current
+// wall-clock day in the ad account's timezone (or browser local if unknown).
+// The Date object itself encodes that day at midnight LOCAL time — we treat
+// it as a "calendar day" handle, not a true instant.
+function _dpNow(): Date {
+  if (!_accountTimezone) return new Date();
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: _accountTimezone,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(new Date());
+    const y = Number(parts.find(p => p.type === 'year')?.value);
+    const m = Number(parts.find(p => p.type === 'month')?.value);
+    const d = Number(parts.find(p => p.type === 'day')?.value);
+    if (!y || !m || !d) return new Date();
+    return new Date(y, m - 1, d);
+  } catch {
+    return new Date();
+  }
+}
+
 const DP_PRESETS = [
   { label: 'Yesterday', key: 'yesterday' },
   { label: 'Last 7 days', key: 'last_7d' },
@@ -125,7 +155,7 @@ function _dpDisplay(s: string) {
   return new Date(+y,+m-1,+d).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'});
 }
 function _dpPresetRange(key: string): { since: string; until: string } | null {
-  const t = new Date();
+  const t = _dpNow();
   // Yesterday-anchored end date: today is always excluded.
   const tEnd = new Date(t); tEnd.setDate(tEnd.getDate()-1);
   const sow = (d: Date) => { const c=new Date(d); c.setDate(c.getDate()-c.getDay()); return c; };
@@ -529,6 +559,7 @@ function renderDcoAssets() {
         </div>
       </div>`).join('');
     if (header) header.textContent = '';
+    document.getElementById('dco-assets-totals')?.classList.add('hidden');
     return;
   }
 
@@ -539,6 +570,7 @@ function renderDcoAssets() {
         : 'No DCO assets to show. (Account has no per-asset metrics for this range.)'}
     </div>`;
     if (header) header.textContent = '';
+    document.getElementById('dco-assets-totals')?.classList.add('hidden');
     return;
   }
 
@@ -560,6 +592,33 @@ function renderDcoAssets() {
   }
 
   const all: AssetBreakdownRow[] = [...images, ...videos];
+  // Totals card. We sum spend, leads, impressions, link clicks across every
+  // visible asset, then derive CTR / CPL from the sums (NOT averaged from
+  // per-card CTRs — that would be wrong).
+  const totalsEl = document.getElementById('dco-assets-totals');
+  const totalsGrid = document.getElementById('dco-assets-totals-grid');
+  if (totalsEl && totalsGrid) {
+    if (all.length === 0) {
+      totalsEl.classList.add('hidden');
+    } else {
+      let sumSpend = 0, sumLeads = 0, sumImpr = 0, sumClicks = 0;
+      for (const r of all) {
+        sumSpend += r.spend;
+        sumLeads += r.results;
+        sumImpr += r.impressions;
+        sumClicks += r.linkClicks;
+      }
+      const totalCtr = sumImpr > 0 ? (sumClicks / sumImpr) * 100 : 0;
+      const totalCpl = sumLeads > 0 ? sumSpend / sumLeads : 0;
+      totalsGrid.innerHTML = `
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">Spend</div><div class="text-sm font-mono font-semibold text-emerald-300">$${sumSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">Leads</div><div class="text-sm font-mono font-semibold text-amber-300">${sumLeads}</div></div>
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">CPL</div><div class="text-sm font-mono font-semibold text-violet-300">${sumLeads > 0 ? '$'+totalCpl.toFixed(2) : '—'}</div></div>
+        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">CTR</div><div class="text-sm font-mono font-semibold text-rose-300">${totalCtr.toFixed(2)}%</div></div>
+      `;
+      totalsEl.classList.remove('hidden');
+    }
+  }
   if (all.length === 0) {
     wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets match the current search filter.</div>`;
     return;
@@ -974,7 +1033,7 @@ function dpPopulatePresets() {
   const pEl=document.getElementById('dp-presets'); if (pEl) pEl.innerHTML=DP_PRESETS.map(p=>dpPresetRow(p.key,p.key===_dpActivePreset)).join('');
 }
 function dpPopulateSelects() {
-  const curYear=new Date().getFullYear();
+  const curYear=_dpNow().getFullYear();
   const years=Array.from({length:18},(_,i)=>curYear-14+i);
   [['l',_dpLY,_dpLM],['r',_dpRY(),_dpRM()]].forEach(([s,yr,mo])=>{
     const mEl=document.getElementById(`dp-month-${s}`); if (mEl) mEl.innerHTML=DP_MONTHS.map((m,i)=>`<option value="${i}"${i===mo?' selected':''}>${m}</option>`).join('');
@@ -987,7 +1046,7 @@ function dpRenderBothCals() {
 }
 function dpRenderCal(hdrId: string, calId: string, year: number, month: number) {
   const hEl=document.getElementById(hdrId); if (hEl) hEl.innerHTML=DP_DAYS.map(d=>`<div class="dp-hdr-cell">${d}</div>`).join('');
-  const today=_dpFmt(new Date());
+  const today=_dpFmt(_dpNow());
   const firstDay=new Date(year,month,1).getDay();
   const dim=new Date(year,month+1,0).getDate();
   const effEnd=(_dpSelecting&&_dpHover)?(_dpHover>=_dpSince!?_dpHover:_dpSince!):_dpUntil!;
@@ -1054,6 +1113,29 @@ function initDashboard(accountIds: string[], campaignFilter: string, showAccount
       accountIds.map(id => `<option value="act_${id}">act_${id}</option>`).join('');
     const saved = localStorage.getItem('meta_ad_account');
     if (saved && Array.from(select.options).some(o => o.value === saved)) select.value = saved;
+  }
+
+  // Resolve the ad account's timezone (e.g. America/Chicago for Middleton, WI)
+  // and switch the date picker over to it. Until this resolves, the picker
+  // uses the browser's local timezone, which is fine as a fallback. Fires once
+  // per dashboard load.
+  if (accountIds[0]) {
+    fetch(`/api/meta/account-info?account_id=${encodeURIComponent(accountIds[0])}`)
+      .then(r => r.json())
+      .then(j => {
+        console.log('[CLIENT TZ DEBUG] account-info response:', j);
+        if (j?.timezone_name) {
+          _accountTimezone = j.timezone_name;
+          console.log('[CLIENT TZ DEBUG] _accountTimezone set to:', _accountTimezone, '_dpNow():', _dpNow().toString());
+          // Re-paint the picker so today/this_month reflect the new tz.
+          dpPopulatePresets();
+          dpRenderBothCals();
+          updateDateLabel();
+        } else {
+          console.log('[CLIENT TZ DEBUG] no timezone_name in response, falling back to browser local');
+        }
+      })
+      .catch((e) => { console.log('[CLIENT TZ DEBUG] account-info fetch error:', e); });
   }
 
   // Restore UI state
@@ -1340,7 +1422,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Date Range</label>
               <div className="flex flex-col gap-0.5">
                 <button id="date-picker-btn" onClick={() => {
-                  const base=_dpSince?new Date(_dpSince+'T00:00:00'):new Date();
+                  const base=_dpSince?new Date(_dpSince+'T00:00:00'):_dpNow();
                   _dpLY=base.getFullYear();_dpLM=base.getMonth();_dpSelecting=false;_dpHover=null;
                   const stored=localStorage.getItem('meta_compare')||'none';
                   const cc=document.getElementById('dp-compare-check') as HTMLInputElement; if(cc) cc.checked=stored!=='none';
@@ -1583,7 +1665,14 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <p className="text-[11px] text-slate-500 mt-1 mb-1">
                 Performance of each individual image and video used inside dynamic ads (where Meta automatically rotates assets). Totals are summed across every ad that used the asset.
               </p>
-              <div id="dco-assets-meta" className="text-[11px] text-slate-500 mb-4"></div>
+              <div id="dco-assets-meta" className="text-[11px] text-slate-500 mb-3"></div>
+              <div id="dco-assets-totals" className="hidden mb-4 bg-slate-900/40 border border-slate-800 rounded-xl p-3">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all visible assets</div>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2" id="dco-assets-totals-grid"></div>
+                <div className="text-[10px] text-slate-500 italic leading-relaxed">
+                  Note: totals may differ slightly (typically 1&ndash;3%) from the ad-level KPI cards above. Meta excludes a few placements&mdash;Reels, in-stream video, and some catalog ads&mdash;from per-asset breakdowns, so their spend appears in the ad totals but not here. For Dynamic Creative ads, Meta redistributes spend across the assets it rotated, so summing every asset can also slightly exceed the ad total.
+                </div>
+              </div>
               <div id="dco-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
             </div>
           </div>

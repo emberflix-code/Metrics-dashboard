@@ -278,19 +278,23 @@ export async function GET(req: NextRequest) {
       } catch { /* thumbnails stay as whatever spec gave us */ }
     }
 
+
     // 5) Fetch video source URLs in parallel for every unique video asset so the
     //    modal can play them. Ignore failures silently — videoSource stays null.
     const videoIds = Array.from(videoAgg.keys());
     await Promise.all(videoIds.map(async vid => {
       try {
-        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source&access_token=${token}`;
+        // Get source (mp4) + picture (poster) in one call. picture is populated
+        // even when the video is used as a static (non-DCO) asset, which is
+        // why some rows lack thumbnails after the asset_feed_spec pass.
+        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source,picture&access_token=${token}`;
         const res = await fetch(u);
-        const json = await res.json() as { source?: string };
-        if (json.source) {
-          const row = videoAgg.get(vid);
-          if (row) row.videoSource = json.source;
-        }
-      } catch { /* leave null */ }
+        const json = await res.json() as { source?: string; picture?: string };
+        const row = videoAgg.get(vid);
+        if (!row) return;
+        if (json.source) row.videoSource = json.source;
+        if (!row.thumbnail && json.picture) row.thumbnail = json.picture;
+      } catch { /* leave nulls */ }
     }));
 
     // 6) Materialize, round, derive CTR/CPL, drop the internal Set/Map, materialize per-ad rows.
