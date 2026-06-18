@@ -56,9 +56,32 @@ interface CreativeRow {
   ctr: number; cpl: number;
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
 }
+interface AssetBreakdownRow {
+  assetKey: string;
+  type: 'image' | 'video';
+  thumbnail: string | null;
+  videoSource: string | null;
+  videoId: string | null;
+  body: string | null;
+  title: string | null;
+  name: string | null;
+  spend: number; results: number; impressions: number; linkClicks: number;
+  ctr: number; cpl: number;
+  adCount: number;
+  adIds: string[];
+  ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+}
 let _creatives: CreativeRow[] = [];
 let _creativesSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
 let _creativesLoading = false;
+
+// DCO asset breakdown — second section on the Creatives tab.
+let _dcoAssets: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsTotal: number; adsWithSpec: number; reason?: string } | null = null;
+let _dcoSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
+let _dcoLoading = false;
+// Ad IDs that match the current search/campaign filter — used to scope DCO grid.
+// null = unfiltered (no search active); Set = only show DCO rows touching these ads.
+let _dcoVisibleAdIds: Set<string> | null = null;
 
 const _charts: Record<string, any> = {};
 const _chartSort = { results: 'desc', cplEff: 'asc' };
@@ -602,6 +625,200 @@ async function fetchCreatives() {
   }
 }
 
+// ── DCO Assets section (second block on Creatives tab) ────────────────────────
+function renderDcoAssets() {
+  const wrap = document.getElementById('dco-assets-grid');
+  const header = document.getElementById('dco-assets-meta');
+  if (!wrap) return;
+
+  if (_dcoLoading) {
+    wrap.innerHTML = Array.from({length:4}, () => `
+      <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
+        <div class="skeleton aspect-video w-full"></div>
+        <div class="p-3 space-y-2">
+          <div class="skeleton h-4 w-3/4"></div>
+          <div class="skeleton h-3 w-1/2"></div>
+        </div>
+      </div>`).join('');
+    if (header) header.textContent = '';
+    return;
+  }
+
+  if (!_dcoAssets || (_dcoAssets.images.length === 0 && _dcoAssets.videos.length === 0)) {
+    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">
+      ${_dcoAssets?.reason === 'no_asset_feed_spec'
+        ? 'No Dynamic Creative ads found in this date range.'
+        : 'No DCO assets to show. (Account has no per-asset metrics for this range.)'}
+    </div>`;
+    if (header) header.textContent = '';
+    return;
+  }
+
+  let images = _dcoAssets.images;
+  let videos = _dcoAssets.videos;
+  // Apply search/campaign filter from the rest of the dashboard: only show assets
+  // whose adIds intersect with the currently-visible ads.
+  if (_dcoVisibleAdIds) {
+    const visible = _dcoVisibleAdIds;
+    const keep = (r: AssetBreakdownRow) => r.adIds.some(id => visible.has(id));
+    images = images.filter(keep);
+    videos = videos.filter(keep);
+  }
+
+  if (header) {
+    const total = images.length + videos.length;
+    const adsCount = _dcoVisibleAdIds ? _dcoVisibleAdIds.size : _dcoAssets.adsTotal;
+    header.textContent = `${total} distinct asset${total !== 1 ? 's' : ''} across ${adsCount} ad${adsCount !== 1 ? 's' : ''}`;
+  }
+
+  const all: AssetBreakdownRow[] = [...images, ...videos];
+  if (all.length === 0) {
+    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets match the current search filter.</div>`;
+    return;
+  }
+  const sorted = [...all].sort((a, b) => {
+    switch (_dcoSort) {
+      case 'spend':   return b.spend - a.spend;
+      case 'results': return b.results - a.results;
+      case 'cpl':     return (a.cpl || Infinity) - (b.cpl || Infinity);
+      case 'ctr':     return b.ctr - a.ctr;
+    }
+  });
+
+  wrap.innerHTML = sorted.map((r, i) => {
+    const thumb = r.thumbnail
+      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" class="w-full h-full object-cover" />`
+      : '';
+    const noThumbClass = r.thumbnail ? '' : ' no-thumb';
+    const cpl = r.results > 0 ? `$${r.cpl.toFixed(2)}` : '—';
+    const ctr = `${r.ctr.toFixed(2)}%`;
+    const name = r.name || (r.type === 'video' ? 'Video asset' : 'Image asset');
+    return `
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
+        <div class="relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
+          ${thumb}
+          <div class="absolute top-2 left-2">${_typeBadge(r.type)}</div>
+          ${r.adCount > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${r.adCount} ads</div>` : ''}
+        </div>
+        <div class="p-3 space-y-1.5">
+          <div class="text-xs font-semibold text-white truncate" title="${(name || '').replace(/"/g,'&quot;')}">${name}</div>
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mt-1.5">
+            <div class="text-slate-500">Spend</div><div class="text-right font-mono text-slate-200">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+            <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
+            <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
+            <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+          </div>
+        </div>
+      </div>`;
+  }).join('');
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+async function fetchDcoAssets() {
+  _dcoLoading = true;
+  _dcoAssets = null;
+  _dcoVisibleAdIds = null;
+  renderDcoAssets();
+  try {
+    const {since,until} = getDateRange();
+    const timeRange = JSON.stringify({since,until});
+    const select = document.getElementById('ad-account') as HTMLSelectElement;
+    const selectedAccount = select?.value || 'all';
+    const accountIds = selectedAccount === 'all'
+      ? Array.from(select?.options || []).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i,''))
+      : [selectedAccount.replace(/^act_/i,'')];
+
+    // In parallel: (a) the breakdown rows for each account, (b) the ad-id list
+    // for each campaign visible in _campaigns after search filtering. We combine
+    // both into a Set used by renderDcoAssets to scope the grid.
+    const visibleCampaignIds = Array.from(new Set(
+      _campaigns
+        .filter(c => _matchesSearch(c.name))
+        .map(c => (_currentLevel === 'campaign' ? c.id : c.campaignId))
+        .filter(Boolean)
+    )) as string[];
+    const visibleAdIdsPromise: Promise<Set<string> | null> = (async () => {
+      if (visibleCampaignIds.length === 0) return null;
+      try {
+        const merged = new Set<string>();
+        await Promise.all(accountIds.map(async acc => {
+          const filtering = JSON.stringify([{ field: 'campaign.id', operator: 'IN', value: visibleCampaignIds }]);
+          const u = `/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=ad_id&level=ad&time_range=${encodeURIComponent(timeRange)}&limit=500&filtering=${encodeURIComponent(filtering)}`;
+          let next: string | null = u;
+          let safety = 25;
+          while (next && safety-- > 0) {
+            const r = await fetch(next.startsWith('/api/') ? next : `/api/meta/next-page?url=${encodeURIComponent(next)}`);
+            const j = await r.json() as { data?: { ad_id?: string }[]; paging?: { next?: string }; error?: { message?: string } };
+            if (j.error) break;
+            for (const row of j.data || []) if (row.ad_id) merged.add(row.ad_id);
+            next = j.paging?.next || null;
+          }
+        }));
+        return merged;
+      } catch {
+        return null;
+      }
+    })();
+
+    const responses = await Promise.all(accountIds.map(async acc => {
+      const url = `/api/meta/asset-breakdown?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
+      try {
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json.error) return null;
+        return json as { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsWithSpec: number; adsTotal: number; reason?: string };
+      } catch {
+        return null;
+      }
+    }));
+
+    // Merge across accounts. Same asset key may not appear cross-account but we
+    // handle it defensively.
+    const imageMap = new Map<string, AssetBreakdownRow>();
+    const videoMap = new Map<string, AssetBreakdownRow>();
+    let adsTotal = 0, adsWithSpec = 0;
+    let allReason: string | undefined;
+    for (const r of responses) {
+      if (!r) continue;
+      adsTotal += r.adsTotal || 0;
+      adsWithSpec += r.adsWithSpec || 0;
+      if (r.reason && !allReason) allReason = r.reason;
+      const mergeInto = (map: Map<string, AssetBreakdownRow>, rows: AssetBreakdownRow[]) => {
+        for (const a of rows) {
+          const existing = map.get(a.assetKey);
+          if (!existing) { map.set(a.assetKey, { ...a }); continue; }
+          existing.spend += a.spend;
+          existing.results += a.results;
+          existing.impressions += a.impressions;
+          existing.linkClicks += a.linkClicks;
+          existing.adCount += a.adCount;
+          existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
+          existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+          if (!existing.thumbnail && a.thumbnail) existing.thumbnail = a.thumbnail;
+        }
+      };
+      mergeInto(imageMap, r.images || []);
+      mergeInto(videoMap, r.videos || []);
+    }
+    _dcoAssets = {
+      images: Array.from(imageMap.values()),
+      videos: Array.from(videoMap.values()),
+      adsTotal,
+      adsWithSpec,
+      reason: allReason,
+    };
+    // Resolve the visible-ad-ids promise (it ran in parallel with the breakdown
+    // fetch). null means no campaigns visible (no search restriction).
+    _dcoVisibleAdIds = await visibleAdIdsPromise;
+  } catch {
+    _dcoAssets = { images: [], videos: [], adsTotal: 0, adsWithSpec: 0 };
+  } finally {
+    _dcoLoading = false;
+    renderDcoAssets();
+  }
+}
+
 // ── fetchMetaCampaigns ────────────────────────────────────────────────────────
 async function fetchMetaCampaigns() {
   showLoadingBar();
@@ -1004,28 +1221,21 @@ if (typeof window !== 'undefined') {
   (window as any)._handleSelectAll = (checked: boolean) => { const data=getFiltered(); if (checked) data.forEach(c=>_selectedRows.add(c.id||c.name)); else _selectedRows.clear(); renderTable(); };
   (window as any)._clearDrilldown = () => { _drilldownParentIds.clear(); _drilldownParentLevel=null; _selectedRows.clear(); renderTable(); };
   (window as any)._dpSelectPreset = (key: string) => { _dpActivePreset=key; const r=_dpPresetRange(key); if (r){_dpSince=r.since;_dpUntil=r.until;} _dpSelecting=false;_dpHover=null; const base=new Date(_dpSince!+'T00:00:00');_dpLY=base.getFullYear();_dpLM=base.getMonth(); dpPopulatePresets();dpPopulateSelects();dpRenderBothCals();dpRenderCompareRange(); };
-  // Stub: drawer / details to be added in phase 3.
-  (window as any)._openCreative = (assetKey: string) => {
-    const c = _creatives.find(x => x.assetKey === assetKey);
-    if (!c) return;
-    const modal = document.getElementById('creative-modal');
-    const body = document.getElementById('creative-modal-body');
-    if (!modal || !body) return;
 
+  const _renderModalAdsTab = (c: CreativeRow): void => {
+    const body = document.getElementById('creative-modal-body');
+    if (!body) return;
     const media = c.type === 'video' && c.videoSource
       ? `<video src="${c.videoSource}" poster="${c.thumbnail || ''}" controls preload="metadata" playsinline class="w-full h-full object-contain bg-slate-950"></video>`
       : c.thumbnail
         ? `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="w-full h-full object-contain bg-slate-950" />`
         : `<div class="w-full h-full flex items-center justify-center text-slate-500 text-sm">No preview available</div>`;
-
     const statusBadge = (s: string) => {
       const colors: Record<string,string> = { ACTIVE:'#34d399', PAUSED:'#94a3b8', CAMPAIGN_PAUSED:'#94a3b8', ADSET_PAUSED:'#94a3b8', WITH_ISSUES:'#fbbf24', IN_PROCESS:'#60a5fa', ARCHIVED:'#475569' };
       const dot = colors[s] || '#475569';
       return `<span style="color:${dot}">●</span> <span class="text-slate-300">${s.toLowerCase().replace(/_/g,' ')}</span>`;
     };
-
     const adsSorted = [...c.ads].sort((a,b) => b.spend - a.spend);
-
     body.innerHTML = `
       <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
         <div class="md:col-span-2">
@@ -1095,7 +1305,43 @@ if (typeof window !== 'undefined') {
         </div>
       </div>
     `;
+  }
 
+
+  (window as any)._openCreative = (assetKey: string) => {
+    const c = _creatives.find(x => x.assetKey === assetKey);
+    if (!c) return;
+    const modal = document.getElementById('creative-modal');
+    if (!modal) return;
+    _renderModalAdsTab(c);
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  };
+
+  // Same modal, opened from a bottom-section asset card. We convert the
+  // AssetBreakdownRow shape into a CreativeRow shape so the existing render
+  // function doesn't need branching.
+  (window as any)._openAsset = (assetKey: string) => {
+    if (!_dcoAssets) return;
+    const a = [..._dcoAssets.images, ..._dcoAssets.videos].find(x => x.assetKey === assetKey);
+    if (!a) return;
+    const asCreative: CreativeRow = {
+      assetKey: a.assetKey,
+      type: a.type,
+      thumbnail: a.thumbnail,
+      videoSource: a.videoSource,
+      videoId: a.videoId,
+      body: a.body,
+      title: a.title,
+      sampleAdName: a.name || (a.type === 'video' ? 'Video asset' : 'Image asset'),
+      sampleAdId: a.ads[0]?.id || '',
+      spend: a.spend, results: a.results, impressions: a.impressions, linkClicks: a.linkClicks, reach: 0,
+      ctr: a.ctr, cpl: a.cpl,
+      ads: a.ads,
+    };
+    const modal = document.getElementById('creative-modal');
+    if (!modal) return;
+    _renderModalAdsTab(asCreative);
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
   };
@@ -1334,7 +1580,9 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('creatives-view')?.classList.remove('hidden');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives')?.classList.add('active-tab');
-                  fetchCreatives();
+                  // Run parent-creatives fetch first so _campaigns is populated
+                  // before fetchDcoAssets computes visibleCampaignIds.
+                  fetchCreatives().then(() => fetchDcoAssets());
                 }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
                   Creatives
                 </button>
@@ -1456,7 +1704,36 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   ))}
                 </div>
               </div>
+              <p className="text-[11px] text-slate-500 -mt-3 mb-4">
+                One card per ad creative. Ads that share the same image or video are grouped together.
+              </p>
               <div id="creatives-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+
+              {/* Per-asset breakdown — each individual image/video Meta is rotating inside dynamic ads */}
+              <div className="mt-8 pt-6 border-t border-slate-800">
+                <div className="flex items-center justify-between mb-1">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                    <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Asset Performance — every image &amp; video
+                  </h3>
+                  <div className="flex items-center gap-1">
+                    <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
+                    {([
+                      ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
+                    ] as const).map(([k,label]) => (
+                      <button key={k} data-dco-sort={k} onClick={() => {
+                        _dcoSort = k;
+                        document.querySelectorAll('[data-dco-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.dcoSort === k));
+                        renderDcoAssets();
+                      }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
+                    ))}
+                  </div>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1 mb-1">
+                  Performance of each individual image and video used inside dynamic ads (where Meta automatically rotates assets). Totals are summed across every ad that used the asset.
+                </p>
+                <div id="dco-assets-meta" className="text-[11px] text-slate-500 mb-4"></div>
+                <div id="dco-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+              </div>
             </div>
           </div>
         </div>

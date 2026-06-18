@@ -85,6 +85,17 @@ function extractLeads(actions?: AdInsight['actions']): number {
   return m['lead'] || 0;
 }
 
+/**
+ * Pass-through. We tried to enlarge Meta's 64x64 stp-encoded thumbnails
+ * by modifying the `stp` param (delete or bump pNxN), but the CDN's
+ * `_nc_tpa` signature validation rejects any change, so the modified
+ * URL 403s. Left as a no-op until we find a Meta endpoint that returns
+ * a higher-res URL natively.
+ */
+function unscaleMetaImage(url: string | null | undefined): string | null {
+  return url ?? null;
+}
+
 async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
   const out: T[] = [];
   const initial = url.toString();
@@ -199,7 +210,7 @@ export async function GET(req: NextRequest) {
           perSlide.push({
             assetKey: key,
             type: 'carousel-slide',
-            thumbnail: slide.picture || null,
+            thumbnail: unscaleMetaImage(slide.picture),
             videoId: null,
             body: slide.description || adBody,
             title: slide.name || adTitle,
@@ -223,7 +234,7 @@ export async function GET(req: NextRequest) {
       // so using it splits ads that actually share the same source video into separate cards.
       const sourceVideoId = videoData?.video_id || creative?.video_id;
       if (sourceVideoId) {
-        const thumb = videoData?.image_url || creative?.thumbnail_url || creative?.image_url || null;
+        const thumb = unscaleMetaImage(videoData?.image_url || creative?.thumbnail_url || creative?.image_url);
         perSlide.push({
           assetKey: `video:${sourceVideoId}`,
           type: 'video',
@@ -244,7 +255,7 @@ export async function GET(req: NextRequest) {
       // CASE 3: single image.
       if (creative?.image_hash || creative?.image_url || linkData?.picture) {
         const hash = creative?.image_hash;
-        const thumb = linkData?.picture || creative?.image_url || creative?.thumbnail_url || null;
+        const thumb = unscaleMetaImage(linkData?.picture || creative?.image_url || creative?.thumbnail_url);
         const key = hash ? `image:${hash}` : `creative:${creative?.id || ins.ad_id}`;
         perSlide.push({
           assetKey: key,
@@ -272,7 +283,7 @@ export async function GET(req: NextRequest) {
         perSlide.push({
           assetKey: key,
           type: 'image',
-          thumbnail: creative.thumbnail_url,
+          thumbnail: unscaleMetaImage(creative.thumbnail_url),
           videoId: null,
           body: adBody,
           title: adTitle,
@@ -371,6 +382,75 @@ export async function GET(req: NextRequest) {
         })),
       };
     });
+
+    // Fetch sharper image URLs for any asset grouped by image_hash. Meta's /adimages
+    // endpoint returns `url` (full-res, permanent) for each hash in one batched call per
+    // account. This replaces the blurry 64x64 thumbnail we get from /ads?fields=creative.
+    const imageHashes = Array.from(new Set(
+      rows
+        .filter(r => r.assetKey.startsWith('image:'))
+        .map(r => r.assetKey.slice('image:'.length))
+        .filter(h => /^[a-f0-9]{20,}$/i.test(h)) // sanity: Meta hashes are long hex
+    ));
+    // For creatives where Meta didn't return image_hash (DCO/Advantage+ ads use asset_feed_spec
+    // instead of a single image_hash on the parent creative), fetch the spec to extract the
+    // actual hashes. We then assign those rows an `image:<hash>` key so the batch adimages
+    // lookup below can fetch full-resolution URLs for them.
+    const thumbOnlyRows = rows.filter(r => r.assetKey.startsWith('thumb:'));
+    if (thumbOnlyRows.length > 0) {
+      // Find the originating creative_id for each thumb-only row by walking the ads list.
+      // Multiple ads can share a row, but they all point at the same thumbnail/creative family.
+      const creativeIdsByRowKey = new Map<string, string>();
+      for (const r of thumbOnlyRows) {
+        const adId = r.sampleAdId;
+        const ad = creativeByAdId.get(adId);
+        if (ad?.creative?.id) creativeIdsByRowKey.set(r.assetKey, ad.creative.id);
+      }
+      const uniqueCreativeIds = Array.from(new Set(creativeIdsByRowKey.values()));
+      await Promise.all(uniqueCreativeIds.map(async cid => {
+        try {
+          const u = `https://graph.facebook.com/v22.0/${cid}?fields=asset_feed_spec&access_token=${token}`;
+          const res = await fetch(u);
+          const json = await res.json() as { asset_feed_spec?: { images?: { hash?: string }[] } };
+          const firstHash = json.asset_feed_spec?.images?.[0]?.hash;
+          if (firstHash && /^[a-f0-9]{20,}$/i.test(firstHash)) {
+            // Promote every row pointing at this creative to use the hash key.
+            creativeIdsByRowKey.forEach((mappedCid, rowKey) => {
+              if (mappedCid !== cid) return;
+              const row = rows.find(r => r.assetKey === rowKey);
+              if (row) {
+                row.assetKey = `image:${firstHash}`;
+                imageHashes.push(firstHash);
+              }
+            });
+          }
+        } catch { /* leave row as thumb: */ }
+      }));
+    }
+
+    if (imageHashes.length > 0) {
+      try {
+        const u = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/adimages`);
+        u.searchParams.set('hashes', JSON.stringify(Array.from(new Set(imageHashes))));
+        u.searchParams.set('fields', 'hash,url,permalink_url');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as { data?: { hash?: string; url?: string; permalink_url?: string }[] };
+        const hashToUrl = new Map<string, string>();
+        for (const img of json.data || []) {
+          if (img.hash && (img.url || img.permalink_url)) {
+            hashToUrl.set(img.hash, (img.url || img.permalink_url) as string);
+          }
+        }
+        for (const r of rows) {
+          if (r.assetKey.startsWith('image:')) {
+            const hash = r.assetKey.slice('image:'.length);
+            const better = hashToUrl.get(hash);
+            if (better) r.thumbnail = better;
+          }
+        }
+      } catch { /* ignore — thumbnails stay at the blurry version */ }
+    }
 
     // Fetch playable video source URLs in parallel for each unique videoId.
     // Meta returns a signed mp4 in `source`. We ignore failures silently (private videos,
