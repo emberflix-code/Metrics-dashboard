@@ -7,12 +7,12 @@ const nextConfig = {
       {
         source: '/(.*)',
         headers: [
-          // Remove Next.js's default X-Frame-Options: SAMEORIGIN
+          // Remove X-Frame-Options entirely so any domain can embed this app
           { key: 'X-Frame-Options', value: '' },
-          // Allow GoHighLevel to embed this app in an iframe
+          // Allow any origin to iframe this app (open for testing)
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors 'self' https://*.gohighlevel.com https://*.leadconnectorhq.com https://*.msgsndr.com",
+            value: "frame-ancestors *",
           },
         ],
       },
