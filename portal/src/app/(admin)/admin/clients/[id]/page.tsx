@@ -7,12 +7,14 @@ import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
 import SheetConfigForm from './SheetConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
+import AutoLoginLink from './AutoLoginLink';
 
 interface ClientDetail {
   id: string;
   name: string;
   email: string;
   created_at: string;
+  auto_login_token: string | null;
   campaign_filter: string;
   ad_account_ids: string[];
   show_account: boolean;
@@ -36,7 +38,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!session || session.user.role !== 'admin') redirect('/login');
 
   const [client] = await query<ClientDetail>(`
-    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.created_at, u.email
+    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
@@ -101,6 +103,15 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentSheetTab={client.sheet_tab ?? ''}
             currentGoogleSheetTab={client.google_sheet_tab ?? ''}
           />
+        </div>
+
+        {/* Auto-login link for GHL embed */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Auto-Login Link</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Use this URL as the iframe src in GoHighLevel. The client lands directly on their dashboard — no password needed.
+          </p>
+          <AutoLoginLink clientId={client.id} initialToken={client.auto_login_token} />
         </div>
 
         {/* Reset password */}

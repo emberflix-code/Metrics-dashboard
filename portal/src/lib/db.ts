@@ -16,6 +16,9 @@ function createPool() {
 export const pool = globalThis._pgPool ?? createPool();
 if (process.env.NODE_ENV !== 'production') globalThis._pgPool = pool;
 
+// Add auto_login_token column if it doesn't exist yet
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_login_token TEXT UNIQUE`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]
