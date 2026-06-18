@@ -71,11 +71,7 @@ interface AssetBreakdownRow {
   adIds: string[];
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
 }
-let _creatives: CreativeRow[] = [];
-let _creativesSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
-let _creativesLoading = false;
-
-// DCO asset breakdown — second section on the Creatives tab.
+// DCO asset breakdown — the only section on the Creatives tab.
 let _dcoAssets: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsTotal: number; adsWithSpec: number; reason?: string } | null = null;
 let _dcoSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
 let _dcoLoading = false;
@@ -515,114 +511,6 @@ function _typeBadge(t: CreativeRow['type']) {
   } as const;
   const e = m[t] || m.unknown;
   return `<span class="text-[10px] font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded border ${e.color}">${e.label}</span>`;
-}
-
-function renderCreatives() {
-  const wrap = document.getElementById('creatives-grid');
-  if (!wrap) return;
-
-  if (_creativesLoading) {
-    wrap.innerHTML = Array.from({length:6}, () => `
-      <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
-        <div class="skeleton aspect-video w-full"></div>
-        <div class="p-3 space-y-2">
-          <div class="skeleton h-4 w-3/4"></div>
-          <div class="skeleton h-3 w-1/2"></div>
-        </div>
-      </div>`).join('');
-    return;
-  }
-
-  if (_creatives.length === 0) {
-    wrap.innerHTML = `<div class="col-span-full text-center py-16 text-slate-500 text-sm">No creatives found for this date range.</div>`;
-    return;
-  }
-
-  const sorted = [..._creatives].sort((a,b) => {
-    switch (_creativesSort) {
-      case 'spend':   return b.spend - a.spend;
-      case 'results': return b.results - a.results;
-      case 'cpl':     return (a.cpl || Infinity) - (b.cpl || Infinity);
-      case 'ctr':     return b.ctr - a.ctr;
-    }
-  });
-
-  wrap.innerHTML = sorted.map((c, i) => {
-    const thumb = c.thumbnail
-      ? `<img src="${c.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" class="w-full h-full object-cover" />`
-      : '';
-    const noThumbClass = c.thumbnail ? '' : ' no-thumb';
-    const cpl = c.results > 0 ? `$${c.cpl.toFixed(2)}` : '—';
-    const ctr = `${c.ctr.toFixed(2)}%`;
-    return `
-      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" onclick="window._openCreative('${c.assetKey.replace(/'/g,"\\'")}')">
-        <div class="relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
-          ${thumb}
-          <div class="absolute top-2 left-2">${_typeBadge(c.type)}</div>
-          ${c.ads.length > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${c.ads.length} ads</div>` : ''}
-        </div>
-        <div class="p-3 space-y-1.5">
-          <div class="text-xs font-semibold text-white truncate" title="${(c.sampleAdName || '').replace(/"/g,'&quot;')}">${c.sampleAdName || '(unnamed)'}</div>
-          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mt-1.5">
-            <div class="text-slate-500">Spend</div><div class="text-right font-mono text-slate-200">$${c.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-            <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${c.results}</div>
-            <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
-            <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
-
-  if (typeof lucide !== 'undefined') lucide.createIcons();
-}
-
-async function fetchCreatives() {
-  _creativesLoading = true;
-  renderCreatives();
-  try {
-    const {since,until} = getDateRange();
-    const timeRange = JSON.stringify({since,until});
-    const select = document.getElementById('ad-account') as HTMLSelectElement;
-    const selectedAccount = select?.value || 'all';
-    const accountIds = selectedAccount === 'all'
-      ? Array.from(select?.options || []).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i,''))
-      : [selectedAccount.replace(/^act_/i,'')];
-
-    const all: CreativeRow[] = [];
-    const results = await Promise.all(accountIds.map(async acc => {
-      const url = `/api/meta/creatives?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json.error) throw new Error(json.error.message || 'Failed to fetch creatives');
-      return (json.data || []) as CreativeRow[];
-    }));
-    for (const arr of results) all.push(...arr);
-
-    // If the same assetKey shows up across accounts (rare but possible if assets are
-    // shared), merge them so we don't double-card. Group then sum.
-    const byKey = new Map<string, CreativeRow>();
-    for (const c of all) {
-      const existing = byKey.get(c.assetKey);
-      if (!existing) { byKey.set(c.assetKey, { ...c, ads: [...c.ads] }); continue; }
-      existing.spend += c.spend;
-      existing.results += c.results;
-      existing.impressions += c.impressions;
-      existing.linkClicks += c.linkClicks;
-      existing.reach += c.reach;
-      // De-dupe ads by ID.
-      for (const a of c.ads) if (!existing.ads.find(x => x.id === a.id)) existing.ads.push(a);
-      existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
-      existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
-      if (!existing.thumbnail && c.thumbnail) existing.thumbnail = c.thumbnail;
-    }
-    _creatives = Array.from(byKey.values());
-  } catch (err) {
-    showNotification(err instanceof Error ? err.message : 'Failed to fetch creatives', 'error');
-    _creatives = [];
-  } finally {
-    _creativesLoading = false;
-    renderCreatives();
-  }
 }
 
 // ── DCO Assets section (second block on Creatives tab) ────────────────────────
@@ -1308,18 +1196,8 @@ if (typeof window !== 'undefined') {
   }
 
 
-  (window as any)._openCreative = (assetKey: string) => {
-    const c = _creatives.find(x => x.assetKey === assetKey);
-    if (!c) return;
-    const modal = document.getElementById('creative-modal');
-    if (!modal) return;
-    _renderModalAdsTab(c);
-    modal.classList.remove('hidden');
-    document.body.style.overflow = 'hidden';
-  };
-
-  // Same modal, opened from a bottom-section asset card. We convert the
-  // AssetBreakdownRow shape into a CreativeRow shape so the existing render
+  // Opens the modal for a card in the asset grid. Converts the AssetBreakdownRow
+  // shape into a CreativeRow shape so the existing modal render code doesn't branch.
   // function doesn't need branching.
   (window as any)._openAsset = (assetKey: string) => {
     if (!_dcoAssets) return;
@@ -1580,9 +1458,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('creatives-view')?.classList.remove('hidden');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives')?.classList.add('active-tab');
-                  // Run parent-creatives fetch first so _campaigns is populated
-                  // before fetchDcoAssets computes visibleCampaignIds.
-                  fetchCreatives().then(() => fetchDcoAssets());
+                  fetchDcoAssets();
                 }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
                   Creatives
                 </button>
@@ -1685,55 +1561,30 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
             </div>
 
-            {/* Creatives view (asset-level breakdown) */}
+            {/* Creatives view — per-asset breakdown */}
             <div id="creatives-view" className="hidden p-5">
-              <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center justify-between mb-1">
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                  <i data-lucide="image" className="w-3.5 h-3.5 text-blue-400"></i> Creative Asset Performance
+                  <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Asset Performance — every image &amp; video
                 </h3>
                 <div className="flex items-center gap-1">
                   <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
                   {([
                     ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
                   ] as const).map(([k,label]) => (
-                    <button key={k} data-cre-sort={k} onClick={() => {
-                      _creativesSort = k;
-                      document.querySelectorAll('[data-cre-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.creSort === k));
-                      renderCreatives();
+                    <button key={k} data-dco-sort={k} onClick={() => {
+                      _dcoSort = k;
+                      document.querySelectorAll('[data-dco-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.dcoSort === k));
+                      renderDcoAssets();
                     }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
                   ))}
                 </div>
               </div>
-              <p className="text-[11px] text-slate-500 -mt-3 mb-4">
-                One card per ad creative. Ads that share the same image or video are grouped together.
+              <p className="text-[11px] text-slate-500 mt-1 mb-1">
+                Performance of each individual image and video used inside dynamic ads (where Meta automatically rotates assets). Totals are summed across every ad that used the asset.
               </p>
-              <div id="creatives-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
-
-              {/* Per-asset breakdown — each individual image/video Meta is rotating inside dynamic ads */}
-              <div className="mt-8 pt-6 border-t border-slate-800">
-                <div className="flex items-center justify-between mb-1">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Asset Performance — every image &amp; video
-                  </h3>
-                  <div className="flex items-center gap-1">
-                    <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
-                    {([
-                      ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
-                    ] as const).map(([k,label]) => (
-                      <button key={k} data-dco-sort={k} onClick={() => {
-                        _dcoSort = k;
-                        document.querySelectorAll('[data-dco-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.dcoSort === k));
-                        renderDcoAssets();
-                      }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
-                    ))}
-                  </div>
-                </div>
-                <p className="text-[11px] text-slate-500 mt-1 mb-1">
-                  Performance of each individual image and video used inside dynamic ads (where Meta automatically rotates assets). Totals are summed across every ad that used the asset.
-                </p>
-                <div id="dco-assets-meta" className="text-[11px] text-slate-500 mb-4"></div>
-                <div id="dco-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
-              </div>
+              <div id="dco-assets-meta" className="text-[11px] text-slate-500 mb-4"></div>
+              <div id="dco-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
             </div>
           </div>
         </div>
