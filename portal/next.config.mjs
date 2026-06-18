@@ -7,12 +7,12 @@ const nextConfig = {
       {
         source: '/(.*)',
         headers: [
-          // Remove X-Frame-Options entirely so any domain can embed this app
+          // Remove X-Frame-Options so GHL can embed this app
           { key: 'X-Frame-Options', value: '' },
-          // Allow any origin to iframe this app (open for testing)
+          // Restrict embedding to GHL domains only
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors *",
+            value: "frame-ancestors 'self' https://*.gohighlevel.com https://*.leadconnectorhq.com https://*.msgsndr.com",
           },
         ],
       },
