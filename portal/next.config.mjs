@@ -9,10 +9,10 @@ const nextConfig = {
         headers: [
           // Remove X-Frame-Options so GHL can embed this app
           { key: 'X-Frame-Options', value: '' },
-          // Restrict embedding to GHL domains only
+          // Open to all for diagnosis — will restrict once working domain is confirmed
           {
             key: 'Content-Security-Policy',
-            value: "frame-ancestors 'self' https://*.gohighlevel.com https://*.leadconnectorhq.com https://*.msgsndr.com",
+            value: "frame-ancestors *",
           },
         ],
       },
