@@ -639,7 +639,6 @@ function renderDcoAssets() {
     const noThumbClass = r.thumbnail ? '' : ' no-thumb';
     const cpl = r.results > 0 ? `$${r.cpl.toFixed(2)}` : '—';
     const ctr = `${r.ctr.toFixed(2)}%`;
-    const name = r.name || (r.type === 'video' ? 'Video asset' : 'Image asset');
     return `
       <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
@@ -647,9 +646,8 @@ function renderDcoAssets() {
           <div class="absolute top-2 left-2">${_typeBadge(r.type)}</div>
           ${r.adCount > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${r.adCount} ads</div>` : ''}
         </div>
-        <div class="p-3 space-y-1.5">
-          <div class="text-xs font-semibold text-white truncate" title="${(name || '').replace(/"/g,'&quot;')}">${name}</div>
-          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mt-1.5">
+        <div class="p-3">
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
             <div class="text-slate-500">Spend</div><div class="text-right font-mono text-slate-200">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
             <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
             <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
