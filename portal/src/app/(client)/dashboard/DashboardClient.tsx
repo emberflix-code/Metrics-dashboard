@@ -79,8 +79,9 @@ let _dcoLoading = false;
 // When false (default), assets flagged hidden by the API (no thumbnail + sub-$1
 // spend) are filtered out. The owner toggle in the Creatives header flips this.
 let _dcoShowHidden = false;
-// When true, show only assets with at least one result (lead).
-let _dcoOnlyWithResults = false;
+// When true, show only assets with at least one result (lead). On by default
+// because most users care about what's converting, not what's just spending.
+let _dcoOnlyWithResults = true;
 // Ad IDs that match the current search/campaign filter — used to scope DCO grid.
 // null = unfiltered (no search active); Set = only show DCO rows touching these ads.
 let _dcoVisibleAdIds: Set<string> | null = null;
@@ -1671,7 +1672,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   ))}
                   <button
                     id="dco-only-results-btn"
-                    className="sort-btn ml-2"
+                    className="sort-btn active-sort-btn ml-2"
                     onClick={(e) => {
                       _dcoOnlyWithResults = !_dcoOnlyWithResults;
                       (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _dcoOnlyWithResults);
