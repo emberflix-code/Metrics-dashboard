@@ -453,24 +453,44 @@ export async function GET(req: NextRequest) {
     }
 
     // Fetch playable video source URLs in parallel for each unique videoId.
-    // Meta returns a signed mp4 in `source`. We ignore failures silently (private videos,
-    // expired URLs) and just leave videoSource null — the modal will fall back to thumbnail.
+    // Meta returns a signed mp4 in `source`. The bare /<vid> endpoint fails
+    // with GraphMethodException (code 100, subcode 33) when the video lives in
+    // a different ad account than our token — fall back to the account-scoped
+    // advideos endpoint, which resolves cross-account references in many cases.
+    type VideoFields = {
+      source?: string;
+      picture?: string;
+      error?: { code?: number; error_subcode?: number };
+    };
+    const fetchVideoFields = async (path: string): Promise<VideoFields> => {
+      try {
+        const u = `https://graph.facebook.com/v22.0/${path}?fields=source,picture&access_token=${token}`;
+        const res = await fetch(u);
+        return await res.json() as VideoFields;
+      } catch { return {}; }
+    };
     const videoIds = Array.from(new Set(
       rows.filter(r => r.type === 'video' && r.videoId).map(r => r.videoId as string)
     ));
     const videoSources = new Map<string, string>();
+    const videoPosters = new Map<string, string>();
     await Promise.all(videoIds.map(async vid => {
-      try {
-        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source&access_token=${token}`;
-        const res = await fetch(u);
-        const json = await res.json() as { source?: string };
-        if (json.source) videoSources.set(vid, json.source);
-      } catch { /* ignore — videoSource stays null */ }
+      const first = await fetchVideoFields(vid);
+      if (first.source) videoSources.set(vid, first.source);
+      if (first.picture) videoPosters.set(vid, first.picture);
+      // If the bare lookup failed auth or returned no source, try the
+      // account-scoped advideos endpoint.
+      const failedAuth = first.error?.code === 100 && first.error?.error_subcode === 33;
+      if (!first.source && (failedAuth || !first.picture)) {
+        const second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);
+        if (!videoSources.has(vid) && second.source) videoSources.set(vid, second.source);
+        if (!videoPosters.has(vid) && second.picture) videoPosters.set(vid, second.picture);
+      }
     }));
     for (const r of rows) {
-      if (r.type === 'video' && r.videoId && videoSources.has(r.videoId)) {
-        r.videoSource = videoSources.get(r.videoId) as string;
-      }
+      if (r.type !== 'video' || !r.videoId) continue;
+      if (videoSources.has(r.videoId)) r.videoSource = videoSources.get(r.videoId) as string;
+      if (!r.thumbnail && videoPosters.has(r.videoId)) r.thumbnail = videoPosters.get(r.videoId) as string;
     }
 
     return NextResponse.json({ data: rows });
