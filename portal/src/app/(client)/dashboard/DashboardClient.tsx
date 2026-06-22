@@ -80,7 +80,7 @@ let _dcoLoading = false;
 let _dcoVisibleAdIds: Set<string> | null = null;
 
 const _charts: Record<string, any> = {};
-const _chartSort = { results: 'desc', cplEff: 'asc' };
+const _chartSort = { cplEff: 'asc' };
 
 const CHART_DEFAULTS = {
   color: '#94a3b8',
@@ -509,12 +509,6 @@ function renderAnalytics() {
     if (hasCompCpl) ds.push({label:'CPL (prev)',data:compCpl,borderColor:'rgba(167,139,250,0.35)',backgroundColor:'transparent',tension:0.35,pointRadius:2,fill:false,borderDash:[5,4],spanGaps:true});
     _charts.cplTrend = new Chart((document.getElementById('chart-cpl-trend') as HTMLCanvasElement)?.getContext('2d'),{type:'line',data:{labels:_trendData.map(d=>d.date.slice(5)),datasets:ds},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},plugins:{legend:{labels:{color:CD.color,font:CD.font,boxWidth:10}},tooltip:{callbacks:{title:(items:any[])=>{const idx=items[0].dataIndex;const main=_trendData[idx]?.date;const comp=compTrendAligned[idx]?.date;return main?(_fmtDay(main)+(comp?'  ·  prev: '+_fmtDay(comp):'')):items[0].label;}}}},scales:{x:{ticks:{color:(ctx: any)=>{const d=_trendData[ctx.index]?.date;if(!d)return CD.color;const wd=new Date(d+'T12:00:00').getDay();return(wd===0||wd===6)?'#f87171':CD.color;},font:CD.font},grid:{color:(ctx: any)=>{const d=_trendData[ctx.index]?.date;if(!d)return CD.grid;const wd=new Date(d+'T12:00:00').getDay();return(wd===0||wd===6)?'rgba(248,113,113,0.18)':CD.grid;}}},y:{ticks:{color:'#a78bfa',font:CD.font,callback:(v:number)=>'$'+v.toFixed(2)},grid:{color:CD.grid}}}}});
   }
-
-  // 3. Top 8 by Results
-  destroyChart('results');
-  const resultsSorted=[...data].sort((a,b)=>_chartSort.results==='desc'?b.results-a.results:a.results-b.results).slice(0,8);
-  toggle('chart-results-wrap','chart-results-empty',resultsSorted.length>0);
-  if (resultsSorted.length) _charts.results=new Chart((document.getElementById('chart-results') as HTMLCanvasElement)?.getContext('2d'),{type:'bar',data:{labels:resultsSorted.map((c:any)=>shortName(c.name)),datasets:[{label:'Results',data:resultsSorted.map((c:any)=>c.results),backgroundColor:'rgba(245,158,11,0.7)',borderRadius:4}]},options:{indexAxis:'y',responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}},y:{ticks:{color:CD.color,font:CD.font},grid:{color:CD.grid}}}}});
 
   // 5. CPL by Campaign
   destroyChart('cpl');
@@ -1590,26 +1584,13 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
 
             {/* Analytics view */}
             <div id="analytics-view" className="hidden p-5 space-y-4">
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="trending-up" className="w-3.5 h-3.5 text-emerald-400"></i> Daily Spend &amp; Results</h3>
-                    <span id="chart-trend-range" className="text-[10px] font-mono text-slate-500"></span>
-                  </div>
-                  <div id="chart-trend-wrap" style={{position:'relative',height:180}}><canvas id="chart-trend"></canvas></div>
-                  <div id="chart-trend-empty" className="hidden text-center text-slate-500 py-8 text-xs">Select a multi-day date range to see daily trends</div>
+              <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="trending-up" className="w-3.5 h-3.5 text-emerald-400"></i> Daily Spend &amp; Results</h3>
+                  <span id="chart-trend-range" className="text-[10px] font-mono text-slate-500"></span>
                 </div>
-                <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
-                  <div className="flex items-center justify-between mb-3">
-                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2"><i data-lucide="target" className="w-3.5 h-3.5 text-amber-400"></i> Top by Results</h3>
-                    <div className="flex gap-1">
-                      <button className="sort-btn active-sort-btn" onClick={() => { _chartSort.results='desc'; document.querySelectorAll('[data-sort-results]').forEach((b,i)=>b.classList.toggle('active-sort-btn',i===0)); renderAnalytics(); }} data-sort-results="desc">High → Low</button>
-                      <button className="sort-btn" onClick={() => { _chartSort.results='asc'; document.querySelectorAll('[data-sort-results]').forEach((b,i)=>b.classList.toggle('active-sort-btn',i===1)); renderAnalytics(); }} data-sort-results="asc">Low → High</button>
-                    </div>
-                  </div>
-                  <div id="chart-results-wrap" style={{position:'relative',height:180}}><canvas id="chart-results"></canvas></div>
-                  <div id="chart-results-empty" className="hidden text-center text-slate-500 py-8 text-xs">No data</div>
-                </div>
+                <div id="chart-trend-wrap" style={{position:'relative',height:180}}><canvas id="chart-trend"></canvas></div>
+                <div id="chart-trend-empty" className="hidden text-center text-slate-500 py-8 text-xs">Select a multi-day date range to see daily trends</div>
               </div>
               <div className="bg-slate-900/40 border border-slate-800 rounded-xl p-4">
                 <div className="flex items-center justify-between mb-3">
