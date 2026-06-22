@@ -371,9 +371,15 @@ export async function GET(req: NextRequest) {
       return out;
     };
 
+    // Hide noise: assets with no thumbnail AND under $1 spend. These are
+    // typically videos owned by a different ad account (Meta returns
+    // GraphMethodException on lookup) that delivered only a few cents of
+    // residual spend — not worth a "NO PREVIEW" placeholder in the grid.
+    const isMeaningful = (a: AssetSummary) => a.thumbnail !== null || a.spend >= 1;
+
     const payload = {
-      images: finalize(imageAgg.values()),
-      videos: finalize(videoAgg.values()),
+      images: finalize(imageAgg.values()).filter(isMeaningful),
+      videos: finalize(videoAgg.values()).filter(isMeaningful),
       adsWithSpec: hasFeedSpec.size,
       adsTotal: accountWide ? discoveredAdIds.length : adIds.length,
     };
