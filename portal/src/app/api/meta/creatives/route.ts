@@ -460,14 +460,16 @@ export async function GET(req: NextRequest) {
     type VideoFields = {
       source?: string;
       picture?: string;
-      error?: { code?: number; error_subcode?: number };
+      permalink_url?: string;
+      status?: { video_status?: string };
+      error?: { code?: number; error_subcode?: number; message?: string };
     };
     const fetchVideoFields = async (path: string): Promise<VideoFields> => {
       try {
-        const u = `https://graph.facebook.com/v22.0/${path}?fields=source,picture&access_token=${token}`;
+        const u = `https://graph.facebook.com/v22.0/${path}?fields=source,picture,permalink_url,status&access_token=${token}`;
         const res = await fetch(u);
         return await res.json() as VideoFields;
-      } catch { return {}; }
+      } catch (e) { return { error: { message: e instanceof Error ? e.message : String(e) } }; }
     };
     const videoIds = Array.from(new Set(
       rows.filter(r => r.type === 'video' && r.videoId).map(r => r.videoId as string)
@@ -481,10 +483,21 @@ export async function GET(req: NextRequest) {
       // If the bare lookup failed auth or returned no source, try the
       // account-scoped advideos endpoint.
       const failedAuth = first.error?.code === 100 && first.error?.error_subcode === 33;
+      let second: VideoFields | null = null;
       if (!first.source && (failedAuth || !first.picture)) {
-        const second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);
+        second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);
         if (!videoSources.has(vid) && second.source) videoSources.set(vid, second.source);
         if (!videoPosters.has(vid) && second.picture) videoPosters.set(vid, second.picture);
+      }
+      // Diagnostic: log every video that ended up with no playable source.
+      if (!videoSources.has(vid)) {
+        console.log('[STATIC-VIDEO-NOSRC]', vid, {
+          firstSource: !!first.source, firstPicture: !!first.picture,
+          firstStatus: first.status?.video_status, firstError: first.error,
+          secondTried: !!second,
+          secondSource: !!second?.source, secondPicture: !!second?.picture,
+          secondError: second?.error,
+        });
       }
     }));
     for (const r of rows) {
