@@ -278,6 +278,19 @@ export async function GET(req: NextRequest) {
       // nor video_id set). The thumbnail URL is signed and ephemeral, so strip the query
       // string and use the path as the asset key — same image = same path.
       if (creative?.thumbnail_url) {
+        // Diagnostic: surface what fields the creative actually carried, so we
+        // can tell apart "genuinely an image" vs "a video ad missing video_id".
+        console.log('[CREATIVE-CASE4]', ins.ad_id, ins.ad_name, {
+          creativeId: creative.id,
+          hasImageHash: !!creative.image_hash,
+          hasImageUrl: !!creative.image_url,
+          hasThumbnailUrl: !!creative.thumbnail_url,
+          hasVideoId: !!creative.video_id,
+          ossLinkData: !!linkData,
+          ossVideoData: !!videoData,
+          ossVideoDataVideoId: videoData?.video_id,
+          ossLinkDataPicture: !!linkData?.picture,
+        });
         let key = creative.thumbnail_url;
         try { const u = new URL(creative.thumbnail_url); key = `thumb:${u.pathname}`; } catch { /* keep raw */ }
         perSlide.push({
