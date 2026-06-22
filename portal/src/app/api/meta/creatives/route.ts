@@ -474,12 +474,36 @@ export async function GET(req: NextRequest) {
     ));
     const videoSources = new Map<string, string>();
     const videoPosters = new Map<string, string>();
+    // Batch the per-video lookups via ?ids= to keep request count low for
+    // accounts with many videos. ceil(N/50) calls instead of N.
+    const VIDEO_IDS_CHUNK = 50;
+    const firstResults = new Map<string, VideoFields>();
+    for (let i = 0; i < videoIds.length; i += VIDEO_IDS_CHUNK) {
+      const chunk = videoIds.slice(i, i + VIDEO_IDS_CHUNK);
+      try {
+        const u = new URL('https://graph.facebook.com/v22.0/');
+        u.searchParams.set('ids', chunk.join(','));
+        u.searchParams.set('fields', 'source,picture');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as Record<string, VideoFields> & { error?: { code?: number; error_subcode?: number } };
+        if (json.error) {
+          for (const vid of chunk) firstResults.set(vid, { error: json.error });
+          continue;
+        }
+        for (const vid of chunk) {
+          if (json[vid]) firstResults.set(vid, json[vid]);
+        }
+      } catch {
+        for (const vid of chunk) firstResults.set(vid, {});
+      }
+    }
     await Promise.all(videoIds.map(async vid => {
-      const first = await fetchVideoFields(vid);
+      const first = firstResults.get(vid) || {};
       if (first.source) videoSources.set(vid, first.source);
       if (first.picture) videoPosters.set(vid, first.picture);
       // If the bare lookup failed auth or returned no source, try the
-      // account-scoped advideos endpoint.
+      // account-scoped advideos endpoint (can't be batched the same way).
       const failedAuth = first.error?.code === 100 && first.error?.error_subcode === 33;
       if (!first.source && (failedAuth || !first.picture)) {
         const second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);

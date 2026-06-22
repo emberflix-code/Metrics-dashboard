@@ -71,9 +71,11 @@ function extractLeads(actions?: BreakdownRow['actions']): number {
   return m['lead'] || 0;
 }
 
-// 30-minute in-memory cache keyed by (account_id, time_range, sorted ad_ids).
+// In-memory cache keyed by (account_id, time_range, sorted ad_ids).
 // Asset feed specs barely change; insights for a closed window are immutable.
-const CACHE_TTL_MS = 30 * 60_000;
+// Bumped to 2h to reduce Meta API call volume — we burned through the per-user
+// rate limit (code 17) with the old 30min cache + per-ad creative fetches.
+const CACHE_TTL_MS = 2 * 60 * 60_000;
 interface CacheEntry { expires: number; payload: unknown }
 const _cache = new Map<string, CacheEntry>();
 
@@ -159,26 +161,48 @@ export async function GET(req: NextRequest) {
       ...videoRows.map(r => r.ad_id).filter((id): id is string => !!id),
     ]));
     // Fetch the creative (asset_feed_spec + name + status + ad-level thumb fallbacks)
-    // for each ad in one shot. The ad-level thumbnail_url / object_story_spec.*.image_url
-    // are useful fallbacks when the underlying video object is cross-account-blocked.
+    // for every discovered ad. Use Meta's `?ids=<comma>` batch syntax so N ads
+    // resolve in ceil(N/50) requests instead of N — critical for rate limits
+    // when the dashboard is viewed in "All accounts" mode across 20+ accounts.
     interface AdCreativeFallback { thumbnail_url?: string; image_url?: string; videoDataImageUrl?: string; linkDataPicture?: string }
-    const specs = await Promise.all(discoveredAdIds.map(async adId => {
+    interface SpecEntry { adId: string; spec: AssetFeedSpec; meta: AdMeta; fallback: AdCreativeFallback }
+    const IDS_CHUNK = 50;
+    const specs: SpecEntry[] = [];
+    for (let i = 0; i < discoveredAdIds.length; i += IDS_CHUNK) {
+      const chunk = discoveredAdIds.slice(i, i + IDS_CHUNK);
       try {
-        const u = `https://graph.facebook.com/v22.0/${adId}?fields=id,name,effective_status,creative{id,asset_feed_spec,thumbnail_url,image_url,object_story_spec}&access_token=${token}`;
-        const res = await fetch(u);
-        const json = await res.json() as AdCreativeResp & AdMeta;
-        const c = json.creative || {};
-        const fallback: AdCreativeFallback = {
-          thumbnail_url: c.thumbnail_url,
-          image_url: c.image_url,
-          videoDataImageUrl: c.object_story_spec?.video_data?.image_url,
-          linkDataPicture: c.object_story_spec?.link_data?.picture,
-        };
-        return { adId, spec: c.asset_feed_spec || {}, meta: { id: json.id, name: json.name, effective_status: json.effective_status }, fallback };
+        const u = new URL('https://graph.facebook.com/v22.0/');
+        u.searchParams.set('ids', chunk.join(','));
+        u.searchParams.set('fields', 'id,name,effective_status,creative{id,asset_feed_spec,thumbnail_url,image_url,object_story_spec}');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as Record<string, AdCreativeResp & AdMeta> & { error?: unknown };
+        if (json.error) {
+          // Whole batch failed — fall back to empty entries so the dashboard
+          // still renders breakdown rows without ad-level enrichments.
+          for (const adId of chunk) specs.push({ adId, spec: {}, meta: {}, fallback: {} });
+          continue;
+        }
+        for (const adId of chunk) {
+          const entry = json[adId];
+          const c = entry?.creative || {};
+          const fallback: AdCreativeFallback = {
+            thumbnail_url: c.thumbnail_url,
+            image_url: c.image_url,
+            videoDataImageUrl: c.object_story_spec?.video_data?.image_url,
+            linkDataPicture: c.object_story_spec?.link_data?.picture,
+          };
+          specs.push({
+            adId,
+            spec: c.asset_feed_spec || {},
+            meta: { id: entry?.id, name: entry?.name, effective_status: entry?.effective_status },
+            fallback,
+          });
+        }
       } catch {
-        return { adId, spec: {} as AssetFeedSpec, meta: {} as AdMeta, fallback: {} as AdCreativeFallback };
+        for (const adId of chunk) specs.push({ adId, spec: {}, meta: {}, fallback: {} });
       }
-    }));
+    }
     const imageMeta = new Map<string, { url?: string; name?: string }>();
     const videoMeta = new Map<string, { thumbnail_url?: string; name?: string }>();
     const adMetaMap = new Map<string, AdMeta>();
@@ -349,20 +373,45 @@ export async function GET(req: NextRequest) {
       }
       return got;
     };
+    // Batch video lookups via ?ids= — same rate-limit benefit as the ad batch above.
     const videoIds = Array.from(videoAgg.keys());
+    const videoResults = new Map<string, VideoFields>();
+    for (let i = 0; i < videoIds.length; i += IDS_CHUNK) {
+      const chunk = videoIds.slice(i, i + IDS_CHUNK);
+      try {
+        const u = new URL('https://graph.facebook.com/v22.0/');
+        u.searchParams.set('ids', chunk.join(','));
+        u.searchParams.set('fields', 'source,picture,thumbnails{uri,is_preferred}');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as Record<string, VideoFields> & { error?: { code?: number; error_subcode?: number } };
+        if (json.error) {
+          // If the WHOLE batch fails auth (e.g. one bad id poisoned it), Meta's
+          // batch endpoint typically returns 200 with per-id errors instead, so
+          // this top-level error path is rare. Synthesize the same shape so the
+          // single-id retry loop below kicks in for every video in this chunk.
+          for (const vid of chunk) videoResults.set(vid, { error: json.error });
+          continue;
+        }
+        for (const vid of chunk) {
+          if (json[vid]) videoResults.set(vid, json[vid]);
+        }
+      } catch {
+        for (const vid of chunk) videoResults.set(vid, {});
+      }
+    }
+
+    // Apply batch results + walk per-video fallback chain (advideos endpoint
+    // for cross-account, then ad-level creative thumbnails).
     await Promise.all(videoIds.map(async vid => {
       const row = videoAgg.get(vid);
       if (!row) return;
-      const first = await fetchVideoFields(vid);
+      const first = videoResults.get(vid) || {};
       applyToRow(row, first);
-      // Fallback chain:
-      // 1) Account-scoped advideos endpoint — resolves some cross-account refs.
-      // 2) Ad-level creative thumbnails — every contributing ad in this account
-      //    has a creative object we CAN read, and Meta caches a static
-      //    thumbnail/image_url against it even when the video object itself is
-      //    blocked (cross-account, code 100 / subcode 33).
       const failedAuth = first.error?.code === 100 && first.error?.error_subcode === 33;
       if (!row.thumbnail && (failedAuth || !first.source)) {
+        // advideos is account-scoped so it can't be batched the same way.
+        // Only invoked when the first lookup actually failed auth — rare path.
         const second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);
         applyToRow(row, second);
       }
