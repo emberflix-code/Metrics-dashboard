@@ -71,19 +71,29 @@ export const authOptions: NextAuthOptions = {
   session: { strategy: 'jwt' },
   secret: process.env.NEXTAUTH_SECRET,
 
-  // All cookies must be SameSite=None; Secure for login to work inside cross-origin iframes (GHL)
-  cookies: {
-    sessionToken: {
-      name: `__Secure-next-auth.session-token`,
-      options: { httpOnly: true, sameSite: 'none', path: '/', secure: true },
-    },
-    callbackUrl: {
-      name: `__Secure-next-auth.callback-url`,
-      options: { httpOnly: true, sameSite: 'none', path: '/', secure: true },
-    },
-    csrfToken: {
-      name: `__Host-next-auth.csrf-token`,
-      options: { httpOnly: true, sameSite: 'none', path: '/', secure: true },
-    },
-  },
+  // Prod (HTTPS): cookies must be SameSite=None; Secure for GHL iframe embed.
+  // Dev (HTTP localhost): browsers reject Secure cookies on plain HTTP, so the
+  // session cookie set on /login never comes back to /admin and middleware
+  // rebounces to login. Fall back to non-Secure/SameSite=lax when not on HTTPS.
+  cookies: (() => {
+    const isProd = (process.env.NEXTAUTH_URL || '').startsWith('https://');
+    const secure = isProd;
+    const sameSite: 'none' | 'lax' = isProd ? 'none' : 'lax';
+    const prefix = isProd ? '__Secure-' : '';
+    const csrfPrefix = isProd ? '__Host-' : '';
+    return {
+      sessionToken: {
+        name: `${prefix}next-auth.session-token`,
+        options: { httpOnly: true, sameSite, path: '/', secure },
+      },
+      callbackUrl: {
+        name: `${prefix}next-auth.callback-url`,
+        options: { httpOnly: true, sameSite, path: '/', secure },
+      },
+      csrfToken: {
+        name: `${csrfPrefix}next-auth.csrf-token`,
+        options: { httpOnly: true, sameSite, path: '/', secure },
+      },
+    };
+  })(),
 };

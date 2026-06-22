@@ -384,6 +384,10 @@ export async function GET(req: NextRequest) {
       videos: finalize(videoAgg.values()),
       adsWithSpec: hasFeedSpec.size,
       adsTotal: accountWide ? discoveredAdIds.length : adIds.length,
+      // Ad IDs that have asset_feed_spec — used by the client to subtract
+      // these from the /api/meta/creatives response to derive the
+      // "Static Ads" view (ads without DCO).
+      dcoAdIds: Array.from(hasFeedSpec),
     };
 
     _cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, payload });
