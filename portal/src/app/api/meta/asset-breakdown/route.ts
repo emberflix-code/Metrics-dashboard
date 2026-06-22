@@ -9,7 +9,16 @@ interface AssetFeedSpec {
 }
 
 interface AdCreativeResp {
-  creative?: { id?: string; asset_feed_spec?: AssetFeedSpec };
+  creative?: {
+    id?: string;
+    asset_feed_spec?: AssetFeedSpec;
+    thumbnail_url?: string;
+    image_url?: string;
+    object_story_spec?: {
+      video_data?: { image_url?: string; video_id?: string };
+      link_data?: { picture?: string };
+    };
+  };
 }
 
 interface BreakdownRow {
@@ -149,26 +158,38 @@ export async function GET(req: NextRequest) {
       ...imageRows.map(r => r.ad_id).filter((id): id is string => !!id),
       ...videoRows.map(r => r.ad_id).filter((id): id is string => !!id),
     ]));
-    // Fetch the creative (asset_feed_spec + name + status) for each ad in one shot.
+    // Fetch the creative (asset_feed_spec + name + status + ad-level thumb fallbacks)
+    // for each ad in one shot. The ad-level thumbnail_url / object_story_spec.*.image_url
+    // are useful fallbacks when the underlying video object is cross-account-blocked.
+    interface AdCreativeFallback { thumbnail_url?: string; image_url?: string; videoDataImageUrl?: string; linkDataPicture?: string }
     const specs = await Promise.all(discoveredAdIds.map(async adId => {
       try {
-        const u = `https://graph.facebook.com/v22.0/${adId}?fields=id,name,effective_status,creative{id,asset_feed_spec}&access_token=${token}`;
+        const u = `https://graph.facebook.com/v22.0/${adId}?fields=id,name,effective_status,creative{id,asset_feed_spec,thumbnail_url,image_url,object_story_spec}&access_token=${token}`;
         const res = await fetch(u);
         const json = await res.json() as AdCreativeResp & AdMeta;
-        return { adId, spec: json.creative?.asset_feed_spec || {}, meta: { id: json.id, name: json.name, effective_status: json.effective_status } };
+        const c = json.creative || {};
+        const fallback: AdCreativeFallback = {
+          thumbnail_url: c.thumbnail_url,
+          image_url: c.image_url,
+          videoDataImageUrl: c.object_story_spec?.video_data?.image_url,
+          linkDataPicture: c.object_story_spec?.link_data?.picture,
+        };
+        return { adId, spec: c.asset_feed_spec || {}, meta: { id: json.id, name: json.name, effective_status: json.effective_status }, fallback };
       } catch {
-        return { adId, spec: {} as AssetFeedSpec, meta: {} as AdMeta };
+        return { adId, spec: {} as AssetFeedSpec, meta: {} as AdMeta, fallback: {} as AdCreativeFallback };
       }
     }));
     const imageMeta = new Map<string, { url?: string; name?: string }>();
     const videoMeta = new Map<string, { thumbnail_url?: string; name?: string }>();
     const adMetaMap = new Map<string, AdMeta>();
+    const adFallbackMap = new Map<string, AdCreativeFallback>();
     // Pick the first non-empty body/title we see in any spec — used as the asset's copy.
     let firstBody: string | null = null;
     let firstTitle: string | null = null;
     const hasFeedSpec = new Set<string>();
-    for (const { adId, spec, meta } of specs) {
+    for (const { adId, spec, meta, fallback } of specs) {
       adMetaMap.set(adId, meta);
+      adFallbackMap.set(adId, fallback);
       if ((spec.images?.length || 0) + (spec.videos?.length || 0) > 0) hasFeedSpec.add(adId);
       for (const img of spec.images || []) {
         if (img.hash && !imageMeta.has(img.hash)) imageMeta.set(img.hash, { url: img.url });
@@ -281,6 +302,19 @@ export async function GET(req: NextRequest) {
       } catch { /* thumbnails stay as whatever spec gave us */ }
     }
 
+    // Final fallback for any image row still without a thumbnail: walk the ads
+    // that reference it and pick the first usable creative-level image url.
+    for (const row of Array.from(imageAgg.values())) {
+      if (row.thumbnail) continue;
+      for (const adId of Array.from(row._adIdSet)) {
+        const fb = adFallbackMap.get(adId);
+        if (!fb) continue;
+        const candidate = fb.image_url || fb.linkDataPicture || fb.thumbnail_url;
+        if (candidate) { row.thumbnail = candidate; break; }
+      }
+    }
+
+
 
     // 5) Fetch video source URLs in parallel for every unique video asset so the
     //    modal can play them. Ignore failures silently — videoSource stays null.
@@ -321,12 +355,24 @@ export async function GET(req: NextRequest) {
       if (!row) return;
       const first = await fetchVideoFields(vid);
       applyToRow(row, first);
-      // Fallback to account-scoped advideos endpoint when the bare lookup
-      // failed with GraphMethodException OR returned nothing usable.
+      // Fallback chain:
+      // 1) Account-scoped advideos endpoint — resolves some cross-account refs.
+      // 2) Ad-level creative thumbnails — every contributing ad in this account
+      //    has a creative object we CAN read, and Meta caches a static
+      //    thumbnail/image_url against it even when the video object itself is
+      //    blocked (cross-account, code 100 / subcode 33).
       const failedAuth = first.error?.code === 100 && first.error?.error_subcode === 33;
       if (!row.thumbnail && (failedAuth || !first.source)) {
         const second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);
         applyToRow(row, second);
+      }
+      if (!row.thumbnail) {
+        for (const adId of Array.from(row._adIdSet)) {
+          const fb = adFallbackMap.get(adId);
+          if (!fb) continue;
+          const candidate = fb.videoDataImageUrl || fb.thumbnail_url || fb.linkDataPicture || fb.image_url;
+          if (candidate) { row.thumbnail = candidate; break; }
+        }
       }
     }));
 
