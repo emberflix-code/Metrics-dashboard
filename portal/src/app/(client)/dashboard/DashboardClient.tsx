@@ -82,6 +82,11 @@ let _dcoShowHidden = false;
 // When true, show only assets with at least one result (lead). On by default
 // because most users care about what's converting, not what's just spending.
 let _dcoOnlyWithResults = true;
+// The lead/result count from the top KPI card — populated by renderCards so
+// the Creatives tab can compare against the per-asset totals and surface a
+// mismatch note when the delta is meaningful (e.g. cross-account placements
+// excluded by Meta, or DCO redistribution math).
+let _kpiResultsTotal: number | null = null;
 // Static-ads (non-DCO) state. Populated by fetchStaticAssets() once the DCO
 // fetch has run and we know which ad IDs are DCO so we can subtract them.
 let _staticAssets: CreativeRow[] | null = null;
@@ -337,6 +342,7 @@ function getSelectedTotals(data: any[]) {
 
 // ── renderCards ───────────────────────────────────────────────────────────────
 function renderCards(t: any, selCount=0) {
+  _kpiResultsTotal = typeof t.results === 'number' ? t.results : null;
   const ctr  = t.impressions>0 ? (t.linkClicks/t.impressions)*100 : 0;
   const cpl  = t.results>0     ? t.spent/t.results : 0;
   let compCtr=0, compCpl=0;
@@ -356,7 +362,7 @@ function renderCards(t: any, selCount=0) {
     {label:'Link Clicks', value:fmt(t.linkClicks),  icon:'mouse-pointer-click', color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
     {label:'Impressions', value:fmt(t.impressions), icon:'eye',                 color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
     {label:'Amount Spent',value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
-    {label:'Results',     value:fmt(t.results),     icon:'target',              color:'amber',   delta:makeDelta(t.results,_comparisonTotals?.results)},
+    {label:(_platform==='google'?'Leads':'Results'), value:fmt(t.results), icon:'target', color:'amber', delta:makeDelta(t.results,_comparisonTotals?.results)},
     {label:'CTR',         value:fmtPct(ctr),        icon:'mouse-pointer-click', color:'rose',    delta:makeDelta(ctr,compCtr)},
     {label:'CPL',         value:fmtUsd(cpl),        icon:'receipt',             color:'violet',  delta:makeDelta(cpl,compCpl,true)},
   ];
@@ -661,6 +667,34 @@ function renderDcoAssets() {
       totalsEl.classList.remove('hidden');
     }
   }
+
+  // Mismatch banner — only shown when the top KPI's lead count differs from
+  // the per-asset sum by >=5%. Most common cause: client uses Google Sheet for
+  // canonical leads, and Meta's per-asset totals diverge from the sheet truth.
+  const banner = document.getElementById('dco-leads-mismatch');
+  if (banner) {
+    let sumLeadsForCompare = 0;
+    for (const r of totalsAll) sumLeadsForCompare += r.results;
+    const kpi = _kpiResultsTotal;
+    if (kpi !== null && kpi > 0 && sumLeadsForCompare > 0) {
+      const delta = Math.abs(kpi - sumLeadsForCompare);
+      const pct = (delta / Math.max(kpi, sumLeadsForCompare)) * 100;
+      if (pct >= 5) {
+        const source = _platform === 'google' ? 'your Google Sheet' : "Meta's ad-level totals";
+        banner.innerHTML = `
+          <i data-lucide="info" class="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
+          <div class="text-[11px] text-amber-200/90 leading-relaxed">
+            <span class="font-semibold">Heads up:</span> the top KPI card shows <span class="font-mono">${kpi}</span> leads (from ${source}), but the per-asset breakdown below sums to <span class="font-mono">${sumLeadsForCompare}</span> — a ${pct.toFixed(0)}% gap. This usually happens when leads are tracked outside Meta (e.g. via a sheet) and Meta&apos;s per-asset attribution captures a subset of conversions. The KPI card is the source of truth for total leads; the breakdown shows how Meta attributed the ones it could see.
+          </div>`;
+        banner.classList.remove('hidden');
+      } else {
+        banner.classList.add('hidden');
+      }
+    } else {
+      banner.classList.add('hidden');
+    }
+  }
+
   if (all.length === 0) {
     wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets match the current search filter.</div>`;
     return;
@@ -1284,8 +1318,11 @@ function dpRenderCal(hdrId: string, calId: string, year: number, month: number) 
       if (col===6||d===dim) classes+=' dp-range-end-cap';
     }
     if (ds===today&&!isStart&&!isEnd) classes+=' dp-today';
-    // Block today: omit data-ds so the click handler's `if(ds){...}` early-exits.
-    const disabled = ds===today;
+    // Block today AND future dates: in-progress data is unreliable and future
+    // data doesn't exist. YYYY-MM-DD strings sort lexicographically, so >=
+    // works for chronological comparison. Omit data-ds so the click handler's
+    // `if(ds){...}` early-exits.
+    const disabled = ds>=today;
     if (disabled) classes+=' dp-disabled';
     html+=`<div class="${classes}"${disabled?'':` data-ds="${ds}"`}>${d}</div>`;
   }
@@ -1955,6 +1992,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     </span>
                   </span>
                 </div>
+                <div id="dco-leads-mismatch" className="hidden mb-3 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2"></div>
                 <div id="dco-assets-totals" className="hidden mb-4 bg-slate-900/40 border border-slate-800 rounded-xl p-3">
                   <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all assets in this date range</div>
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2" id="dco-assets-totals-grid"></div>
