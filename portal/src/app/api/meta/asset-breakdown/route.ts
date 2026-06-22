@@ -284,16 +284,27 @@ export async function GET(req: NextRequest) {
     const videoIds = Array.from(videoAgg.keys());
     await Promise.all(videoIds.map(async vid => {
       try {
-        // Get source (mp4) + picture (poster) in one call. picture is populated
-        // even when the video is used as a static (non-DCO) asset, which is
-        // why some rows lack thumbnails after the asset_feed_spec pass.
-        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source,picture&access_token=${token}`;
+        // Get source (mp4) + picture (poster) + thumbnails edge in one batch.
+        // picture is the auto-poster Meta picks; thumbnails edge has every
+        // auto-generated frame and is usually populated even when picture
+        // is empty (e.g. very new uploads, or videos with no impressions yet).
+        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source,picture,thumbnails{uri,is_preferred}&access_token=${token}`;
         const res = await fetch(u);
-        const json = await res.json() as { source?: string; picture?: string };
+        const json = await res.json() as {
+          source?: string;
+          picture?: string;
+          thumbnails?: { data?: { uri?: string; is_preferred?: boolean }[] };
+        };
         const row = videoAgg.get(vid);
         if (!row) return;
         if (json.source) row.videoSource = json.source;
         if (!row.thumbnail && json.picture) row.thumbnail = json.picture;
+        if (!row.thumbnail) {
+          const thumbs = json.thumbnails?.data || [];
+          const preferred = thumbs.find(t => t.is_preferred && t.uri)?.uri;
+          const any = thumbs.find(t => t.uri)?.uri;
+          if (preferred || any) row.thumbnail = preferred || any || null;
+        }
       } catch { /* leave nulls */ }
     }));
 
