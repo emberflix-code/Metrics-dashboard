@@ -281,47 +281,49 @@ export async function GET(req: NextRequest) {
 
     // 5) Fetch video source URLs in parallel for every unique video asset so the
     //    modal can play them. Ignore failures silently — videoSource stays null.
+    //    Some videos return GraphMethodException (code 100, subcode 33) on the
+    //    bare /<video_id> endpoint because they were uploaded to a different
+    //    ad account / Page than the one our token is scoped for. The
+    //    account-scoped advideos endpoint sometimes resolves them.
+    type VideoFields = {
+      source?: string;
+      picture?: string;
+      thumbnails?: { data?: { uri?: string; is_preferred?: boolean }[] };
+      error?: { message?: string; code?: number; error_subcode?: number };
+    };
+    const fetchVideoFields = async (path: string): Promise<VideoFields> => {
+      try {
+        const u = `https://graph.facebook.com/v22.0/${path}?fields=source,picture,thumbnails{uri,is_preferred}&access_token=${token}`;
+        const res = await fetch(u);
+        return await res.json() as VideoFields;
+      } catch {
+        return {};
+      }
+    };
+    const applyToRow = (row: AggBucket, json: VideoFields): boolean => {
+      let got = false;
+      if (!row.videoSource && json.source) { row.videoSource = json.source; got = true; }
+      if (!row.thumbnail && json.picture) { row.thumbnail = json.picture; got = true; }
+      if (!row.thumbnail) {
+        const thumbs = json.thumbnails?.data || [];
+        const preferred = thumbs.find(t => t.is_preferred && t.uri)?.uri;
+        const any = thumbs.find(t => t.uri)?.uri;
+        if (preferred || any) { row.thumbnail = preferred || any || null; got = true; }
+      }
+      return got;
+    };
     const videoIds = Array.from(videoAgg.keys());
     await Promise.all(videoIds.map(async vid => {
-      try {
-        // Get source (mp4) + picture (poster) + thumbnails edge in one batch.
-        // picture is the auto-poster Meta picks; thumbnails edge has every
-        // auto-generated frame and is usually populated even when picture
-        // is empty (e.g. very new uploads, or videos with no impressions yet).
-        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source,picture,thumbnails{uri,is_preferred},status,created_time&access_token=${token}`;
-        const res = await fetch(u);
-        const json = await res.json() as {
-          source?: string;
-          picture?: string;
-          thumbnails?: { data?: { uri?: string; is_preferred?: boolean }[] };
-          status?: { video_status?: string; processing_progress?: number };
-          created_time?: string;
-          error?: { message?: string; code?: number; type?: string };
-        };
-        const row = videoAgg.get(vid);
-        if (!row) return;
-        if (json.source) row.videoSource = json.source;
-        if (!row.thumbnail && json.picture) row.thumbnail = json.picture;
-        if (!row.thumbnail) {
-          const thumbs = json.thumbnails?.data || [];
-          const preferred = thumbs.find(t => t.is_preferred && t.uri)?.uri;
-          const any = thumbs.find(t => t.uri)?.uri;
-          if (preferred || any) row.thumbnail = preferred || any || null;
-        }
-        // One-time diagnostic: only log the videos that ended up with no
-        // thumbnail at all, so we can see exactly what Meta returned.
-        if (!row.thumbnail) {
-          console.log('[VIDEO-NOPREVIEW]', vid, 'spend:', row.spend.toFixed(2), {
-            hasSource: !!json.source,
-            hasPicture: !!json.picture,
-            thumbCount: json.thumbnails?.data?.length ?? 0,
-            status: json.status,
-            created: json.created_time,
-            error: json.error,
-          });
-        }
-      } catch (e) {
-        console.log('[VIDEO-NOPREVIEW-EXC]', vid, e instanceof Error ? e.message : String(e));
+      const row = videoAgg.get(vid);
+      if (!row) return;
+      const first = await fetchVideoFields(vid);
+      applyToRow(row, first);
+      // Fallback to account-scoped advideos endpoint when the bare lookup
+      // failed with GraphMethodException OR returned nothing usable.
+      const failedAuth = first.error?.code === 100 && first.error?.error_subcode === 33;
+      if (!row.thumbnail && (failedAuth || !first.source)) {
+        const second = await fetchVideoFields(`act_${accountId}/advideos/${vid}`);
+        applyToRow(row, second);
       }
     }));
 
