@@ -18,6 +18,7 @@ interface Props {
   hasGoogleAds?: boolean;       // is the Google Ads view available for this client?
   metaUrl?: string;             // link target for "View Meta" switch (on /dashboard/google)
   googleUrl?: string;           // link target for "View Google Ads" switch (on /dashboard)
+  useSheetForLeads?: boolean;   // when true, Meta dashboard KPI reads leads from sheet_tab
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -40,6 +41,14 @@ let _isInitialized = false;
 let _hasLoadedOnce = false;
 let _showAccount = false;
 let _platform: 'meta' | 'google' = 'meta';
+// When true (set from server config), the Meta dashboard's "Leads" KPI total
+// is sourced from the client's sheet_tab via /api/sheets/meta instead of
+// Meta's pixel actions. Per-row data stays Meta-attributed.
+let _useSheetForLeads = false;
+// Day-summed leads from the sheet, keyed by YYYY-MM-DD. Populated by
+// fetchMetaCampaigns when _useSheetForLeads is on. Used to override t.results
+// and trend data for the current date range.
+let _sheetLeadsByDay: Record<string, number> | null = null;
 
 // Creative breakdown state — one row per asset, populated by /api/meta/creatives
 interface CreativeRow {
@@ -342,6 +351,19 @@ function getSelectedTotals(data: any[]) {
 
 // ── renderCards ───────────────────────────────────────────────────────────────
 function renderCards(t: any, selCount=0) {
+  // Sheet override: when the admin has enabled use_sheet_for_leads for this
+  // client AND we have a fetched lead-by-day map, replace the Meta-attributed
+  // results with the sum of sheet leads inside the current date range.
+  if (_platform === 'meta' && _useSheetForLeads && _sheetLeadsByDay) {
+    try {
+      const { since, until } = getDateRange();
+      let sheetSum = 0;
+      for (const [day, leads] of Object.entries(_sheetLeadsByDay)) {
+        if (day >= since && day <= until) sheetSum += leads;
+      }
+      t = { ...t, results: sheetSum };
+    } catch { /* keep Meta value on any error */ }
+  }
   _kpiResultsTotal = typeof t.results === 'number' ? t.results : null;
   const ctr  = t.impressions>0 ? (t.linkClicks/t.impressions)*100 : 0;
   const cpl  = t.results>0     ? t.spent/t.results : 0;
@@ -362,7 +384,7 @@ function renderCards(t: any, selCount=0) {
     {label:'Link Clicks', value:fmt(t.linkClicks),  icon:'mouse-pointer-click', color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
     {label:'Impressions', value:fmt(t.impressions), icon:'eye',                 color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
     {label:'Amount Spent',value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
-    {label:(_platform==='google'?'Leads':'Results'), value:fmt(t.results), icon:'target', color:'amber', delta:makeDelta(t.results,_comparisonTotals?.results)},
+    {label:((_platform==='google'||(_useSheetForLeads&&_sheetLeadsByDay))?'Leads':'Results'), value:fmt(t.results), icon:'target', color:'amber', delta:makeDelta(t.results,_comparisonTotals?.results)},
     {label:'CTR',         value:fmtPct(ctr),        icon:'mouse-pointer-click', color:'rose',    delta:makeDelta(ctr,compCtr)},
     {label:'CPL',         value:fmtUsd(cpl),        icon:'receipt',             color:'violet',  delta:makeDelta(cpl,compCpl,true)},
   ];
@@ -1016,12 +1038,36 @@ function renderStaticAssets() {
   if (typeof lucide !== 'undefined') lucide.createIcons();
 }
 
+// Kick off a sheet fetch for this Meta client when use_sheet_for_leads is on.
+// Cached in _sheetLeadsByDay (keyed by YYYY-MM-DD) and read by renderCards.
+// Reused across reloads — only the first call hits the network because the
+// route also caches the CSV for 60s.
+async function fetchSheetLeadsForMeta(): Promise<void> {
+  if (!_useSheetForLeads) { _sheetLeadsByDay = null; return; }
+  try {
+    const res = await fetch('/api/sheets/meta');
+    const json = await res.json() as { rows?: { day: string; leads: number }[]; enabled?: boolean; error?: string };
+    if (!json.enabled || !json.rows) { _sheetLeadsByDay = null; return; }
+    const byDay: Record<string, number> = {};
+    for (const r of json.rows) {
+      byDay[r.day] = (byDay[r.day] || 0) + (r.leads || 0);
+    }
+    _sheetLeadsByDay = byDay;
+  } catch {
+    _sheetLeadsByDay = null;
+  }
+}
+
 // ── fetchMetaCampaigns ────────────────────────────────────────────────────────
 async function fetchMetaCampaigns() {
   showLoadingBar();
   showTableSkeleton();
   const cards = document.getElementById('cards-grid');
   if (cards) { cards.style.opacity='0.4'; cards.style.transition='opacity 0.2s'; }
+
+  // Fire the sheet fetch in the background — it's independent of Meta insights
+  // and renderCards will read whatever is in _sheetLeadsByDay when it runs.
+  const sheetPromise = fetchSheetLeadsForMeta();
 
   try {
     const selectedAccount = (document.getElementById('ad-account') as HTMLSelectElement)?.value || 'all';
@@ -1120,6 +1166,17 @@ async function fetchMetaCampaigns() {
       }
     } catch {}
 
+    // Sheet override for the trend chart's daily-results series. We swap each
+    // day's results value with the sheet's lead count for that day, leaving
+    // spend / impressions / link clicks (which the sheet doesn't authoritatively
+    // own for Meta) untouched. CPL trend will derive correctly because it
+    // computes spend/results from these same rows.
+    if (_useSheetForLeads && _sheetLeadsByDay) {
+      for (const row of _trendData) {
+        row.results = _sheetLeadsByDay[row.date] || 0;
+      }
+    }
+
     // Comparison
     _comparisonTotals=null; _comparisonTrendData=[]; _comparisonRange=null;
     if (_comparisonPeriod!=='none') {
@@ -1159,6 +1216,24 @@ async function fetchMetaCampaigns() {
             _comparisonTrendData=Object.values(cByDate).sort((a:any,b:any)=>a.date.localeCompare(b.date));
           }
         } catch {}
+      }
+    }
+
+    // Make sure the sheet leads (if enabled) are loaded before the first KPI
+    // render so the override takes effect on the initial paint, not a flash.
+    await sheetPromise;
+
+    // If the sheet override is on, also rewrite the comparison series so
+    // delta arrows and the comparison trend reflect sheet leads, not Meta's.
+    if (_useSheetForLeads && _sheetLeadsByDay && _comparisonRange) {
+      const { since: cSince, until: cUntil } = _comparisonRange;
+      let cSum = 0;
+      for (const [day, leads] of Object.entries(_sheetLeadsByDay)) {
+        if (day >= cSince && day <= cUntil) cSum += leads;
+      }
+      if (_comparisonTotals) _comparisonTotals.results = cSum;
+      for (const row of _comparisonTrendData) {
+        row.results = _sheetLeadsByDay[row.date] || 0;
       }
     }
 
@@ -1610,9 +1685,10 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
+  _useSheetForLeads = useSheetForLeads;
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);

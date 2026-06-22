@@ -42,6 +42,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET google_sheet_tab = $1 WHERE id = $2', [String(body.google_sheet_tab).trim(), params.id]);
   }
 
+  if (body.use_sheet_for_leads !== undefined) {
+    await query('UPDATE clients SET use_sheet_for_leads = $1 WHERE id = $2', [!!body.use_sheet_for_leads, params.id]);
+  }
+
   if (body.password !== undefined) {
     const pw = String(body.password);
     if (pw.length < 6) {

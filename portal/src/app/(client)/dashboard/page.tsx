@@ -18,6 +18,7 @@ interface ClientRow {
   sheet_id: string;
   sheet_tab: string;
   google_sheet_tab: string;
+  use_sheet_for_leads: boolean;
 }
 
 export default async function DashboardPage() {
@@ -48,7 +49,7 @@ export default async function DashboardPage() {
   void decrypt(agency.meta_token_enc);
 
   const [client] = await query<ClientRow>(
-    `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab
+    `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -70,6 +71,7 @@ export default async function DashboardPage() {
       platform="meta"
       hasGoogleAds={!!client?.google_sheet_tab}
       googleUrl="/dashboard/google"
+      useSheetForLeads={client?.use_sheet_for_leads ?? false}
     />
   );
 }

@@ -18,6 +18,10 @@ if (process.env.NODE_ENV !== 'production') globalThis._pgPool = pool;
 
 // Add auto_login_token column if it doesn't exist yet
 pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_login_token TEXT UNIQUE`).catch(() => {});
+// Per-client gate: when true, the Meta dashboard reads the lead KPI from
+// the configured sheet_tab instead of Meta's pixel events. Defaults off so
+// the rollout is opt-in per client.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS use_sheet_for_leads BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
 export async function query<T = Record<string, unknown>>(
   sql: string,

@@ -7,12 +7,14 @@ interface Props {
   currentSheetId: string;
   currentSheetTab: string;
   currentGoogleSheetTab: string;
+  currentUseSheetForLeads: boolean;
 }
 
-export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab, currentGoogleSheetTab }: Props) {
+export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab, currentGoogleSheetTab, currentUseSheetForLeads }: Props) {
   const [sheetId, setSheetId] = useState(currentSheetId);
   const [sheetTab, setSheetTab] = useState(currentSheetTab);
   const [googleSheetTab, setGoogleSheetTab] = useState(currentGoogleSheetTab);
+  const [useSheetForLeads, setUseSheetForLeads] = useState(currentUseSheetForLeads);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -27,6 +29,7 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
         sheet_id: sheetId.trim(),
         sheet_tab: sheetTab.trim(),
         google_sheet_tab: googleSheetTab.trim(),
+        use_sheet_for_leads: useSheetForLeads,
       }),
     });
     setSaving(false);
@@ -65,6 +68,22 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
           placeholder="Sheet1"
           className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
         />
+      </div>
+
+      <div className="flex items-start gap-3 p-3 bg-slate-800/50 border border-slate-700/60 rounded-lg">
+        <input
+          id="use-sheet-for-leads"
+          type="checkbox"
+          checked={useSheetForLeads}
+          onChange={e => setUseSheetForLeads(e.target.checked)}
+          className="mt-0.5 w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
+        />
+        <label htmlFor="use-sheet-for-leads" className="text-xs text-slate-300 leading-relaxed cursor-pointer">
+          <span className="font-medium block">Use sheet as the source of truth for leads (Meta dashboard)</span>
+          <span className="text-slate-500 mt-0.5 block">
+            When enabled, the &ldquo;Leads&rdquo; KPI on the Meta dashboard reads the daily lead total from the Meta tab above (column: <span className="font-mono text-slate-400">Leads</span>) instead of Meta&apos;s pixel events. Per-asset and per-campaign breakdowns continue to use Meta&apos;s attribution.
+          </span>
+        </label>
       </div>
 
       <div>

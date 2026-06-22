@@ -21,6 +21,7 @@ interface ClientDetail {
   sheet_id: string;
   sheet_tab: string;
   google_sheet_tab: string;
+  use_sheet_for_leads: boolean;
 }
 
 interface AgencyAccount {
@@ -38,7 +39,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!session || session.user.role !== 'admin') redirect('/login');
 
   const [client] = await query<ClientDetail>(`
-    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.created_at, u.email, u.auto_login_token
+    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads, c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
@@ -102,6 +103,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentSheetId={client.sheet_id ?? ''}
             currentSheetTab={client.sheet_tab ?? ''}
             currentGoogleSheetTab={client.google_sheet_tab ?? ''}
+            currentUseSheetForLeads={client.use_sheet_for_leads ?? false}
           />
         </div>
 
