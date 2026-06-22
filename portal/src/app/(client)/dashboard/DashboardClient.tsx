@@ -70,11 +70,15 @@ interface AssetBreakdownRow {
   adCount: number;
   adIds: string[];
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+  hidden: boolean;
 }
 // DCO asset breakdown — the only section on the Creatives tab.
 let _dcoAssets: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsTotal: number; adsWithSpec: number; reason?: string } | null = null;
 let _dcoSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
 let _dcoLoading = false;
+// When false (default), assets flagged hidden by the API (no thumbnail + sub-$1
+// spend) are filtered out. The owner toggle in the Creatives header flips this.
+let _dcoShowHidden = false;
 // Ad IDs that match the current search/campaign filter — used to scope DCO grid.
 // null = unfiltered (no search active); Set = only show DCO rows touching these ads.
 let _dcoVisibleAdIds: Set<string> | null = null;
@@ -577,6 +581,25 @@ function renderDcoAssets() {
     const keep = (r: AssetBreakdownRow) => r.adIds.some(id => visible.has(id));
     images = images.filter(keep);
     videos = videos.filter(keep);
+  }
+
+  // Hidden-by-default filter: cross-account / no-thumbnail sub-$1 assets.
+  const hiddenCount = images.filter(r => r.hidden).length + videos.filter(r => r.hidden).length;
+  if (!_dcoShowHidden) {
+    images = images.filter(r => !r.hidden);
+    videos = videos.filter(r => !r.hidden);
+  }
+  // Update the toggle button label/count if it exists.
+  const toggleBtn = document.getElementById('dco-show-hidden-btn');
+  if (toggleBtn) {
+    if (hiddenCount === 0) {
+      toggleBtn.classList.add('hidden');
+    } else {
+      toggleBtn.classList.remove('hidden');
+      toggleBtn.textContent = _dcoShowHidden
+        ? `Hide ${hiddenCount} low-value asset${hiddenCount !== 1 ? 's' : ''}`
+        : `Show ${hiddenCount} hidden asset${hiddenCount !== 1 ? 's' : ''}`;
+    }
   }
 
   if (header) {
@@ -1644,7 +1667,20 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <p className="text-[11px] text-slate-500 mt-1 mb-1">
                 Performance of each individual image and video used inside dynamic ads (where Meta automatically rotates assets). Totals are summed across every ad that used the asset.
               </p>
-              <div id="dco-assets-meta" className="text-[11px] text-slate-500 mb-3"></div>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <div id="dco-assets-meta" className="text-[11px] text-slate-500"></div>
+                <button
+                  id="dco-show-hidden-btn"
+                  className="hidden sort-btn text-[10px]"
+                  onClick={() => { _dcoShowHidden = !_dcoShowHidden; renderDcoAssets(); }}
+                >Show hidden assets</button>
+                <span className="relative group inline-flex items-center text-slate-500 hover:text-slate-300 cursor-help" title="Why are some assets hidden?">
+                  <i data-lucide="info" className="w-3.5 h-3.5"></i>
+                  <span className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 hidden group-hover:block z-10 w-80 p-3 rounded-lg bg-slate-950 border border-slate-700 text-[10px] leading-relaxed text-slate-300 shadow-xl">
+                    Some assets are hidden by default: those with no preview thumbnail and under $1 in spend. These are typically videos that were duplicated from another Meta ad account — Meta&apos;s API blocks thumbnail and metadata access for those video objects (error code 100, subcode 33), even though their spend is still attributed here. They contribute only residual cents, so we hide them to keep the grid clean. Click &ldquo;Show hidden assets&rdquo; to reveal them.
+                  </span>
+                </span>
+              </div>
               <div id="dco-assets-totals" className="hidden mb-4 bg-slate-900/40 border border-slate-800 rounded-xl p-3">
                 <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all visible assets</div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2" id="dco-assets-totals-grid"></div>

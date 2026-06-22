@@ -42,6 +42,7 @@ interface AssetSummary {
   adCount: number;             // how many of the input ads use this asset
   adIds: string[];             // distinct ad ids contributing — used by client-side search filter
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+  hidden: boolean;             // true when no thumbnail AND under $1 spend — client decides whether to show
 }
 
 interface AdMeta {
@@ -181,7 +182,9 @@ export async function GET(req: NextRequest) {
 
     // 3) Aggregate. The same hash/video can appear across multiple ads;
     //    we sum metrics and count distinct ad_ids per asset.
-    interface AggBucket extends AssetSummary { _adIdSet: Set<string>; _perAd: Map<string, { spend: number; results: number; impressions: number; linkClicks: number }> }
+    // AggBucket omits `hidden` — it's computed in finalize() from the final
+    // spend total, not maintained incrementally during aggregation.
+    interface AggBucket extends Omit<AssetSummary, 'hidden'> { _adIdSet: Set<string>; _perAd: Map<string, { spend: number; results: number; impressions: number; linkClicks: number }> }
     const accAd = (row: AggBucket, adId: string, r: BreakdownRow) => {
       const sp = parseFloat(r.spend || '0') || 0;
       const im = parseInt(r.impressions || '0', 10) || 0;
@@ -347,6 +350,7 @@ export async function GET(req: NextRequest) {
           });
         });
         ads.sort((a, b) => b.spend - a.spend);
+        const roundedSpend = Math.round(r.spend * 100) / 100;
         out.push({
           assetKey: r.assetKey,
           type: r.type,
@@ -356,7 +360,7 @@ export async function GET(req: NextRequest) {
           body: r.body,
           title: r.title,
           name: r.name,
-          spend: Math.round(r.spend * 100) / 100,
+          spend: roundedSpend,
           results: r.results,
           impressions: r.impressions,
           linkClicks: r.linkClicks,
@@ -365,21 +369,19 @@ export async function GET(req: NextRequest) {
           adCount: r._adIdSet.size,
           adIds: Array.from(r._adIdSet),
           ads,
+          // Marked hidden when no thumbnail AND under $1 spend — typically
+          // cross-account videos that Meta blocks (code 100 / subcode 33).
+          // Client renders an info toggle to let the owner reveal them.
+          hidden: r.thumbnail === null && roundedSpend < 1,
         });
       }
       out.sort((a, b) => b.spend - a.spend);
       return out;
     };
 
-    // Hide noise: assets with no thumbnail AND under $1 spend. These are
-    // typically videos owned by a different ad account (Meta returns
-    // GraphMethodException on lookup) that delivered only a few cents of
-    // residual spend — not worth a "NO PREVIEW" placeholder in the grid.
-    const isMeaningful = (a: AssetSummary) => a.thumbnail !== null || a.spend >= 1;
-
     const payload = {
-      images: finalize(imageAgg.values()).filter(isMeaningful),
-      videos: finalize(videoAgg.values()).filter(isMeaningful),
+      images: finalize(imageAgg.values()),
+      videos: finalize(videoAgg.values()),
       adsWithSpec: hasFeedSpec.size,
       adsTotal: accountWide ? discoveredAdIds.length : adIds.length,
     };
