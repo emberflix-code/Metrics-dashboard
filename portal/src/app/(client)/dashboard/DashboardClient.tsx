@@ -1411,11 +1411,39 @@ if (typeof window !== 'undefined') {
   const _renderModalAdsTab = (c: CreativeRow): void => {
     const body = document.getElementById('creative-modal-body');
     if (!body) return;
-    const media = c.type === 'video' && c.videoSource
-      ? `<video src="${c.videoSource}" poster="${c.thumbnail || ''}" controls preload="metadata" playsinline class="w-full h-full object-contain bg-slate-950"></video>`
-      : c.thumbnail
-        ? `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="w-full h-full object-contain bg-slate-950" />`
-        : `<div class="w-full h-full flex items-center justify-center text-slate-500 text-sm">No preview available</div>`;
+    // Link to Meta Ads Manager — only useful when we know the ad ID.
+    const adsManagerUrl = c.sampleAdId
+      ? `https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${encodeURIComponent(c.sampleAdId)}`
+      : null;
+    let media: string;
+    if (c.type === 'video' && c.videoSource) {
+      // Playable.
+      media = `<video src="${c.videoSource}" poster="${c.thumbnail || ''}" controls preload="metadata" playsinline class="w-full h-full object-contain bg-slate-950"></video>`;
+    } else if (c.type === 'video') {
+      // Video ad but Meta blocked source lookup (cross-account, code 100/subcode 33).
+      // Show the poster + a clear explainer so the user knows why it isn't playing
+      // and can jump to Ads Manager where Meta authenticates them directly.
+      const poster = c.thumbnail
+        ? `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="absolute inset-0 w-full h-full object-contain bg-slate-950 opacity-60" />`
+        : '';
+      const link = adsManagerUrl
+        ? `<a href="${adsManagerUrl}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 text-xs font-medium mt-2">View in Ads Manager <i data-lucide="external-link" class="w-3 h-3"></i></a>`
+        : '';
+      media = `
+        <div class="relative w-full h-full bg-slate-950">
+          ${poster}
+          <div class="relative z-10 w-full h-full flex flex-col items-center justify-center text-center px-4">
+            <i data-lucide="video-off" class="w-8 h-8 text-slate-400 mb-2"></i>
+            <div class="text-xs font-semibold text-slate-200">Video preview unavailable</div>
+            <div class="text-[10px] text-slate-400 mt-1 max-w-xs leading-relaxed">Meta blocks playback for videos owned by a different ad account, even when spend is attributed here.</div>
+            ${link}
+          </div>
+        </div>`;
+    } else if (c.thumbnail) {
+      media = `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="w-full h-full object-contain bg-slate-950" />`;
+    } else {
+      media = `<div class="w-full h-full flex items-center justify-center text-slate-500 text-sm">No preview available</div>`;
+    }
     const statusBadge = (s: string) => {
       const colors: Record<string,string> = { ACTIVE:'#34d399', PAUSED:'#94a3b8', CAMPAIGN_PAUSED:'#94a3b8', ADSET_PAUSED:'#94a3b8', WITH_ISSUES:'#fbbf24', IN_PROCESS:'#60a5fa', ARCHIVED:'#475569' };
       const dot = colors[s] || '#475569';
