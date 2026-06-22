@@ -288,12 +288,15 @@ export async function GET(req: NextRequest) {
         // picture is the auto-poster Meta picks; thumbnails edge has every
         // auto-generated frame and is usually populated even when picture
         // is empty (e.g. very new uploads, or videos with no impressions yet).
-        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source,picture,thumbnails{uri,is_preferred}&access_token=${token}`;
+        const u = `https://graph.facebook.com/v22.0/${vid}?fields=source,picture,thumbnails{uri,is_preferred},status,created_time&access_token=${token}`;
         const res = await fetch(u);
         const json = await res.json() as {
           source?: string;
           picture?: string;
           thumbnails?: { data?: { uri?: string; is_preferred?: boolean }[] };
+          status?: { video_status?: string; processing_progress?: number };
+          created_time?: string;
+          error?: { message?: string; code?: number; type?: string };
         };
         const row = videoAgg.get(vid);
         if (!row) return;
@@ -305,7 +308,21 @@ export async function GET(req: NextRequest) {
           const any = thumbs.find(t => t.uri)?.uri;
           if (preferred || any) row.thumbnail = preferred || any || null;
         }
-      } catch { /* leave nulls */ }
+        // One-time diagnostic: only log the videos that ended up with no
+        // thumbnail at all, so we can see exactly what Meta returned.
+        if (!row.thumbnail) {
+          console.log('[VIDEO-NOPREVIEW]', vid, 'spend:', row.spend.toFixed(2), {
+            hasSource: !!json.source,
+            hasPicture: !!json.picture,
+            thumbCount: json.thumbnails?.data?.length ?? 0,
+            status: json.status,
+            created: json.created_time,
+            error: json.error,
+          });
+        }
+      } catch (e) {
+        console.log('[VIDEO-NOPREVIEW-EXC]', vid, e instanceof Error ? e.message : String(e));
+      }
     }));
 
     // 6) Materialize, round, derive CTR/CPL, drop the internal Set/Map, materialize per-ad rows.
