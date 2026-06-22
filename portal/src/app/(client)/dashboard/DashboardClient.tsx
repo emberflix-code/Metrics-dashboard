@@ -79,6 +79,8 @@ let _dcoLoading = false;
 // When false (default), assets flagged hidden by the API (no thumbnail + sub-$1
 // spend) are filtered out. The owner toggle in the Creatives header flips this.
 let _dcoShowHidden = false;
+// When true, show only assets with at least one result (lead).
+let _dcoOnlyWithResults = false;
 // Ad IDs that match the current search/campaign filter — used to scope DCO grid.
 // null = unfiltered (no search active); Set = only show DCO rows touching these ads.
 let _dcoVisibleAdIds: Set<string> | null = null;
@@ -588,6 +590,11 @@ function renderDcoAssets() {
   if (!_dcoShowHidden) {
     images = images.filter(r => !r.hidden);
     videos = videos.filter(r => !r.hidden);
+  }
+
+  if (_dcoOnlyWithResults) {
+    images = images.filter(r => r.results > 0);
+    videos = videos.filter(r => r.results > 0);
   }
   // Update the toggle button label/count if it exists.
   const toggleBtn = document.getElementById('dco-show-hidden-btn');
@@ -1651,7 +1658,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
                   <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Asset Performance — every image &amp; video
                 </h3>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1 flex-wrap">
                   <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
                   {([
                     ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
@@ -1662,6 +1669,15 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                       renderDcoAssets();
                     }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
                   ))}
+                  <button
+                    id="dco-only-results-btn"
+                    className="sort-btn ml-2"
+                    onClick={(e) => {
+                      _dcoOnlyWithResults = !_dcoOnlyWithResults;
+                      (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _dcoOnlyWithResults);
+                      renderDcoAssets();
+                    }}
+                  >Has results only</button>
                 </div>
               </div>
               <p className="text-[11px] text-slate-500 mt-1 mb-1">
