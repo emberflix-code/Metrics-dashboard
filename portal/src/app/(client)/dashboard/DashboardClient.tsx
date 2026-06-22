@@ -586,6 +586,12 @@ function renderDcoAssets() {
     videos = videos.filter(keep);
   }
 
+  // Snapshot the campaign-scoped set BEFORE applying user toggles. Totals are
+  // calculated from this so they always reflect the full picture, not just
+  // what survived the Hidden / Has-results-only filters.
+  const totalsImages = images;
+  const totalsVideos = videos;
+
   // Hidden-by-default filter: cross-account / no-thumbnail sub-$1 assets.
   const hiddenCount = images.filter(r => r.hidden).length + videos.filter(r => r.hidden).length;
   if (!_dcoShowHidden) {
@@ -618,16 +624,18 @@ function renderDcoAssets() {
 
   const all: AssetBreakdownRow[] = [...images, ...videos];
   // Totals card. We sum spend, leads, impressions, link clicks across every
-  // visible asset, then derive CTR / CPL from the sums (NOT averaged from
+  // asset in the campaign-scoped set (before Hidden / Has-results-only toggles
+  // are applied), then derive CTR / CPL from the sums (NOT averaged from
   // per-card CTRs — that would be wrong).
+  const totalsAll: AssetBreakdownRow[] = [...totalsImages, ...totalsVideos];
   const totalsEl = document.getElementById('dco-assets-totals');
   const totalsGrid = document.getElementById('dco-assets-totals-grid');
   if (totalsEl && totalsGrid) {
-    if (all.length === 0) {
+    if (totalsAll.length === 0) {
       totalsEl.classList.add('hidden');
     } else {
       let sumSpend = 0, sumLeads = 0, sumImpr = 0, sumClicks = 0;
-      for (const r of all) {
+      for (const r of totalsAll) {
         sumSpend += r.spend;
         sumLeads += r.results;
         sumImpr += r.impressions;
@@ -1699,7 +1707,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 </span>
               </div>
               <div id="dco-assets-totals" className="hidden mb-4 bg-slate-900/40 border border-slate-800 rounded-xl p-3">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all visible assets</div>
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all assets in this date range</div>
                 <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2" id="dco-assets-totals-grid"></div>
                 <div className="text-[10px] text-slate-500 italic leading-relaxed">
                   Note: totals may differ slightly (typically 1&ndash;3%) from the ad-level KPI cards above. Meta excludes a few placements&mdash;Reels, in-stream video, and some catalog ads&mdash;from per-asset breakdowns, so their spend appears in the ad totals but not here. For Dynamic Creative ads, Meta redistributes spend across the assets it rotated, so summing every asset can also slightly exceed the ad total.
