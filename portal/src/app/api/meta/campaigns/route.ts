@@ -14,11 +14,18 @@ export async function GET(req: NextRequest) {
     url.searchParams.set('fields', sp.get('fields') || 'id,name,effective_status');
     url.searchParams.set('limit', sp.get('limit') || '200');
 
+    // Explicitly include DELETED + ARCHIVED so a campaign that had spend
+    // during the selected date range still appears in the status map. Without
+    // this, Meta filters them out by default and the dashboard table omits
+    // them entirely while their spend still shows up in KPI totals.
+    const ALL_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
+    const filters: { field: string; operator: string; value: string | string[] }[] = [
+      { field: 'effective_status', operator: 'IN', value: ALL_STATUSES },
+    ];
     if (campaignFilter) {
-      url.searchParams.set('filtering', JSON.stringify([
-        { field: 'name', operator: 'CONTAIN', value: campaignFilter }
-      ]));
+      filters.push({ field: 'name', operator: 'CONTAIN', value: campaignFilter });
     }
+    url.searchParams.set('filtering', JSON.stringify(filters));
 
     url.searchParams.set('access_token', token);
 
