@@ -18,17 +18,42 @@ export async function GET(req: NextRequest) {
     if (sp.get('time_increment')) url.searchParams.set('time_increment', sp.get('time_increment')!);
     if (sp.get('action_attribution_windows')) url.searchParams.set('action_attribution_windows', sp.get('action_attribution_windows')!);
 
-    // Push campaign filter to Meta API — avoids fetching all campaigns then filtering client-side
-    if (campaignFilter) {
+    // Meta's /insights endpoint silently drops DELETED + ARCHIVED entities
+    // unless we explicitly opt them in. Without this, a campaign that ran for
+    // months but has since been deleted contributes spend to the account-level
+    // KPI cards yet vanishes from the per-campaign table → mystery gap.
+    const level = sp.get('level') || 'campaign';
+    const ALL_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
+    if (level === 'campaign') {
       url.searchParams.set('filtering', JSON.stringify([
-        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }
+        { field: 'campaign.effective_status', operator: 'IN', value: ALL_STATUSES },
+        ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
+      ]));
+    } else if (level === 'adset') {
+      url.searchParams.set('filtering', JSON.stringify([
+        { field: 'adset.effective_status', operator: 'IN', value: ALL_STATUSES },
+        ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
+      ]));
+    } else if (level === 'ad') {
+      url.searchParams.set('filtering', JSON.stringify([
+        { field: 'ad.effective_status', operator: 'IN', value: ALL_STATUSES },
+        ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
+      ]));
+    } else if (campaignFilter) {
+      // account level — only the campaign-name filter applies; statuses are
+      // inherently summarized.
+      url.searchParams.set('filtering', JSON.stringify([
+        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
       ]));
     }
 
     url.searchParams.set('access_token', token);
 
     const res = await fetch(url.toString());
-    const json = await res.json();
+    const json = await res.json() as { data?: { campaign_id?: string }[]; error?: unknown };
+    if (Array.isArray(json.data)) {
+      console.log('[INSIGHTS-DEBUG]', 'account:', accountId, 'level:', level, 'rows:', json.data.length);
+    }
     return NextResponse.json(sanitizePaging(json), { status: res.status });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';
