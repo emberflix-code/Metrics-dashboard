@@ -98,10 +98,9 @@ let _dcoOnlyWithResults = true;
 let _kpiResultsTotal: number | null = null;
 // Static-ads (non-DCO) state. Populated by fetchStaticAssets() once the DCO
 // fetch has run and we know which ad IDs are DCO so we can subtract them.
+// Rendered into the same unified grid as DCO rows by renderDcoAssets().
 let _staticAssets: CreativeRow[] | null = null;
 let _staticLoading = false;
-let _staticSort: 'spend' | 'results' | 'cpl' | 'ctr' = 'spend';
-let _staticOnlyWithResults = true;
 // Ad IDs (across all accounts) that have asset_feed_spec — populated by the
 // asset-breakdown fetch, consumed by the static fetch to filter those out.
 let _dcoAdIdSet: Set<string> = new Set();
@@ -587,7 +586,7 @@ function renderDcoAssets() {
   const header = document.getElementById('dco-assets-meta');
   if (!wrap) return;
 
-  if (_dcoLoading) {
+  if (_dcoLoading || _staticLoading) {
     wrap.innerHTML = Array.from({length:4}, () => `
       <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
         <div class="skeleton aspect-video w-full"></div>
@@ -601,19 +600,47 @@ function renderDcoAssets() {
     return;
   }
 
-  if (!_dcoAssets || (_dcoAssets.images.length === 0 && _dcoAssets.videos.length === 0)) {
-    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">
-      ${_dcoAssets?.reason === 'no_asset_feed_spec'
-        ? 'No Dynamic Creative ads found in this date range.'
-        : 'No DCO assets to show. (Account has no per-asset metrics for this range.)'}
-    </div>`;
+  // Convert static (non-DCO) rows from CreativeRow shape into AssetBreakdownRow
+  // shape so the unified grid render path doesn't branch. Static rows have a
+  // 1:1 ad-to-asset relationship, so adIds = [the contributing ad's id] and
+  // adCount = ads.length. They share every metric field already.
+  const staticAsBreakdown: AssetBreakdownRow[] = (_staticAssets || []).map(s => ({
+    assetKey: s.assetKey,
+    type: s.type === 'image' || s.type === 'video' ? s.type : 'image',
+    thumbnail: s.thumbnail,
+    videoSource: s.videoSource,
+    videoId: s.videoId,
+    body: s.body,
+    title: s.title,
+    name: s.sampleAdName || null,
+    spend: s.spend,
+    results: s.results,
+    impressions: s.impressions,
+    linkClicks: s.linkClicks,
+    ctr: s.ctr,
+    cpl: s.cpl,
+    adCount: s.ads.length,
+    adIds: s.ads.map(a => a.id),
+    ads: s.ads,
+    hidden: s.thumbnail === null,
+  }));
+
+  // Bucket static rows by type so they merge with the DCO image/video arrays.
+  const dcoImages = _dcoAssets?.images || [];
+  const dcoVideos = _dcoAssets?.videos || [];
+  const staticImages = staticAsBreakdown.filter(r => r.type === 'image');
+  const staticVideos = staticAsBreakdown.filter(r => r.type === 'video');
+
+  const combinedHasAnything = dcoImages.length + dcoVideos.length + staticImages.length + staticVideos.length > 0;
+  if (!combinedHasAnything) {
+    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets to show for this date range.</div>`;
     if (header) header.textContent = '';
     document.getElementById('dco-assets-totals')?.classList.add('hidden');
     return;
   }
 
-  let images = _dcoAssets.images;
-  let videos = _dcoAssets.videos;
+  let images = [...dcoImages, ...staticImages];
+  let videos = [...dcoVideos, ...staticVideos];
   // Apply search/campaign filter from the rest of the dashboard: only show assets
   // whose adIds intersect with the currently-visible ads.
   if (_dcoVisibleAdIds) {
@@ -655,44 +682,35 @@ function renderDcoAssets() {
 
   if (header) {
     const total = images.length + videos.length;
-    const adsCount = _dcoVisibleAdIds ? _dcoVisibleAdIds.size : _dcoAssets.adsTotal;
+    let adsCount: number;
+    if (_dcoVisibleAdIds) {
+      adsCount = _dcoVisibleAdIds.size;
+    } else {
+      // Distinct ad IDs across the unified set (DCO + static).
+      const seen = new Set<string>();
+      for (const r of [...images, ...videos]) for (const id of r.adIds) seen.add(id);
+      adsCount = seen.size;
+    }
     header.textContent = `${total} distinct asset${total !== 1 ? 's' : ''} across ${adsCount} ad${adsCount !== 1 ? 's' : ''}`;
   }
 
   const all: AssetBreakdownRow[] = [...images, ...videos];
-  // Totals card. We sum spend, leads, impressions, link clicks across every
-  // asset in the campaign-scoped set (before Hidden / Has-results-only toggles
-  // are applied), then derive CTR / CPL from the sums (NOT averaged from
-  // per-card CTRs — that would be wrong).
+  // Per-asset totals card was removed — Meta's breakdown API undercounts at
+  // the asset level (drops deleted-entity ads + excluded placements), so any
+  // sum we display here would mislead clients vs. the KPI cards above. The
+  // KPI cards (which roll up from level=campaign) remain the source of truth.
+  // We still snapshot the pre-filter set below for the mismatch banner.
   const totalsAll: AssetBreakdownRow[] = [...totalsImages, ...totalsVideos];
-  const totalsEl = document.getElementById('dco-assets-totals');
-  const totalsGrid = document.getElementById('dco-assets-totals-grid');
-  if (totalsEl && totalsGrid) {
-    if (totalsAll.length === 0) {
-      totalsEl.classList.add('hidden');
-    } else {
-      let sumSpend = 0, sumLeads = 0, sumImpr = 0, sumClicks = 0;
-      for (const r of totalsAll) {
-        sumSpend += r.spend;
-        sumLeads += r.results;
-        sumImpr += r.impressions;
-        sumClicks += r.linkClicks;
-      }
-      const totalCtr = sumImpr > 0 ? (sumClicks / sumImpr) * 100 : 0;
-      const totalCpl = sumLeads > 0 ? sumSpend / sumLeads : 0;
-      totalsGrid.innerHTML = `
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">Spend</div><div class="text-sm font-mono font-semibold text-emerald-300">$${sumSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">Leads</div><div class="text-sm font-mono font-semibold text-amber-300">${sumLeads}</div></div>
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">CPL</div><div class="text-sm font-mono font-semibold text-violet-300">${sumLeads > 0 ? '$'+totalCpl.toFixed(2) : '—'}</div></div>
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">CTR</div><div class="text-sm font-mono font-semibold text-rose-300">${totalCtr.toFixed(2)}%</div></div>
-      `;
-      totalsEl.classList.remove('hidden');
-    }
-  }
 
   // Mismatch banner — only shown when the top KPI's lead count differs from
-  // the per-asset sum by >=5%. Most common cause: client uses Google Sheet for
-  // canonical leads, and Meta's per-asset totals diverge from the sheet truth.
+  // the per-asset sum by >=5%. Three real causes:
+  //   1) No-preview assets are hidden by default in the grid (toggle reveals
+  //      them). Their leads sum into the canonical totals but aren't visible
+  //      in the cards below.
+  //   2) Meta excludes some placements (Reels, in-stream, catalog) from
+  //      per-asset breakdowns entirely.
+  //   3) When `use_sheet_for_leads` is on, KPI reads from the client's sheet
+  //      while breakdown rows are Meta-attributed — the two sources differ.
   const banner = document.getElementById('dco-leads-mismatch');
   if (banner) {
     let sumLeadsForCompare = 0;
@@ -702,11 +720,26 @@ function renderDcoAssets() {
       const delta = Math.abs(kpi - sumLeadsForCompare);
       const pct = (delta / Math.max(kpi, sumLeadsForCompare)) * 100;
       if (pct >= 5) {
-        const source = _platform === 'google' ? 'your Google Sheet' : "Meta's ad-level totals";
+        const hiddenCountForBanner = totalsAll.filter(r => r.hidden).length;
+        const source = (_useSheetForLeads && _sheetLeadsByDay) || _platform === 'google'
+          ? 'your Google Sheet'
+          : "Meta's ad-level totals";
+        const reasons: string[] = [];
+        if (hiddenCountForBanner > 0) {
+          reasons.push(`<strong>${hiddenCountForBanner} asset${hiddenCountForBanner !== 1 ? 's are' : ' is'} hidden</strong> below because Meta did not return a preview thumbnail — their leads still count toward the KPI total. Click &ldquo;Show hidden assets&rdquo; to see them.`);
+        }
+        reasons.push("Meta excludes a few placements (Reels, in-stream video, catalog ads) from per-asset breakdowns, so their leads appear in the KPI total but not in the grid.");
+        if ((_useSheetForLeads && _sheetLeadsByDay) || _platform === 'google') {
+          reasons.push("Your KPI leads come from your sheet, while the per-asset breakdown uses Meta&apos;s attribution — the two sources naturally differ.");
+        }
         banner.innerHTML = `
           <i data-lucide="info" class="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
           <div class="text-[11px] text-amber-200/90 leading-relaxed">
-            <span class="font-semibold">Heads up:</span> the top KPI card shows <span class="font-mono">${kpi}</span> leads (from ${source}), but the per-asset breakdown below sums to <span class="font-mono">${sumLeadsForCompare}</span> — a ${pct.toFixed(0)}% gap. This usually happens when leads are tracked outside Meta (e.g. via a sheet) and Meta&apos;s per-asset attribution captures a subset of conversions. The KPI card is the source of truth for total leads; the breakdown shows how Meta attributed the ones it could see.
+            <span class="font-semibold">Heads up:</span> the top KPI card shows <span class="font-mono">${kpi}</span> leads (from ${source}), but the visible per-asset cards below sum to <span class="font-mono">${sumLeadsForCompare}</span> — a ${pct.toFixed(0)}% gap. Possible reasons:
+            <ul class="list-disc pl-4 mt-1 space-y-0.5">
+              ${reasons.map(r => `<li>${r}</li>`).join('')}
+            </ul>
+            <div class="mt-1.5">The KPI card remains the source of truth for total leads.</div>
           </div>`;
         banner.classList.remove('hidden');
       } else {
@@ -897,15 +930,22 @@ async function fetchStaticAssets() {
       }
     }));
 
-    // Drop rows where any contributing ad is a DCO ad (its asset breakdown
-    // is already in the DCO view). Use ALL contributing ads — if even one ad
-    // is DCO, that asset is split-reported there anyway, so we exclude.
+    // Dedup at the asset-key level, not the ad-ID level. Meta returns the
+    // same ad twice when it has a video: once in the image_asset DCO breakdown
+    // (using the video's poster hash) and once in /ads as a video creative.
+    // Filtering at ad-ID drops the video — its `video:<id>` assetKey never
+    // appeared in the DCO breakdown so it should stay.
+    const dcoAssetKeys = new Set<string>();
+    if (_dcoAssets) {
+      for (const a of _dcoAssets.images) dcoAssetKeys.add(a.assetKey);
+      for (const a of _dcoAssets.videos) dcoAssetKeys.add(a.assetKey);
+    }
     const merged = new Map<string, CreativeRow>();
     for (const r of responses) {
       if (!r?.data) continue;
       for (const row of r.data) {
-        const isPureStatic = row.ads.every(a => !_dcoAdIdSet.has(a.id));
-        if (!isPureStatic) continue;
+        // True duplicate: same assetKey is already in the DCO breakdown.
+        if (dcoAssetKeys.has(row.assetKey)) continue;
         const existing = merged.get(row.assetKey);
         if (!existing) { merged.set(row.assetKey, { ...row }); continue; }
         // Cross-account same-asset merge (rare but defensive).
@@ -928,114 +968,10 @@ async function fetchStaticAssets() {
   }
 }
 
+// Thin shim — the unified grid (renderDcoAssets) now folds static rows in
+// directly. Kept so existing fetchStaticAssets() callers don't break.
 function renderStaticAssets() {
-  const wrap = document.getElementById('static-assets-grid');
-  const header = document.getElementById('static-assets-meta');
-  if (!wrap) return;
-
-  if (_staticLoading) {
-    wrap.innerHTML = Array.from({length:4}, () => `
-      <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
-        <div class="skeleton aspect-video w-full"></div>
-        <div class="p-3 space-y-2">
-          <div class="skeleton h-4 w-3/4"></div>
-          <div class="skeleton h-3 w-1/2"></div>
-        </div>
-      </div>`).join('');
-    if (header) header.textContent = '';
-    document.getElementById('static-assets-totals')?.classList.add('hidden');
-    return;
-  }
-
-  if (!_staticAssets || _staticAssets.length === 0) {
-    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No static (non-DCO) ads found in this date range.</div>`;
-    if (header) header.textContent = '';
-    document.getElementById('static-assets-totals')?.classList.add('hidden');
-    return;
-  }
-
-  // Apply same campaign-scope filter as the DCO grid.
-  let rows = _staticAssets;
-  if (_dcoVisibleAdIds) {
-    const visible = _dcoVisibleAdIds;
-    rows = rows.filter(r => r.ads.some(a => visible.has(a.id)));
-  }
-  // Snapshot for totals (pre user-toggle filters).
-  const totalsRows = rows;
-
-  if (_staticOnlyWithResults) rows = rows.filter(r => r.results > 0);
-
-  // Header count.
-  if (header) {
-    const total = rows.length;
-    header.textContent = `${total} static asset${total !== 1 ? 's' : ''}`;
-  }
-
-  // Totals card (mirrors the DCO totals computation).
-  const totalsEl = document.getElementById('static-assets-totals');
-  const totalsGrid = document.getElementById('static-assets-totals-grid');
-  if (totalsEl && totalsGrid) {
-    if (totalsRows.length === 0) {
-      totalsEl.classList.add('hidden');
-    } else {
-      let sumSpend = 0, sumLeads = 0, sumImpr = 0, sumClicks = 0;
-      for (const r of totalsRows) {
-        sumSpend += r.spend; sumLeads += r.results;
-        sumImpr += r.impressions; sumClicks += r.linkClicks;
-      }
-      const totalCtr = sumImpr > 0 ? (sumClicks / sumImpr) * 100 : 0;
-      const totalCpl = sumLeads > 0 ? sumSpend / sumLeads : 0;
-      totalsGrid.innerHTML = `
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">Spend</div><div class="text-sm font-mono font-semibold text-emerald-300">$${sumSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div></div>
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">Leads</div><div class="text-sm font-mono font-semibold text-amber-300">${sumLeads}</div></div>
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">CPL</div><div class="text-sm font-mono font-semibold text-violet-300">${sumLeads > 0 ? '$'+totalCpl.toFixed(2) : '—'}</div></div>
-        <div><div class="text-[10px] uppercase tracking-wider text-slate-500">CTR</div><div class="text-sm font-mono font-semibold text-rose-300">${totalCtr.toFixed(2)}%</div></div>
-      `;
-      totalsEl.classList.remove('hidden');
-    }
-  }
-
-  if (rows.length === 0) {
-    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No static ads with results in this date range. Toggle &ldquo;Has results only&rdquo; off to see all.</div>`;
-    return;
-  }
-
-  const sorted = [...rows].sort((a, b) => {
-    switch (_staticSort) {
-      case 'spend':   return b.spend - a.spend;
-      case 'results': return b.results - a.results;
-      case 'cpl':     return (a.cpl || Infinity) - (b.cpl || Infinity);
-      case 'ctr':     return b.ctr - a.ctr;
-    }
-  });
-
-  wrap.innerHTML = sorted.map((r, i) => {
-    const thumb = r.thumbnail
-      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" class="w-full h-full object-cover" />`
-      : '';
-    const noThumbClass = r.thumbnail ? '' : ' no-thumb';
-    const cpl = r.results > 0 ? `$${r.cpl.toFixed(2)}` : '—';
-    const ctr = `${r.ctr.toFixed(2)}%`;
-    const badge = _typeBadge(r.type);
-    return `
-      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
-        <div class="relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
-          ${thumb}
-          <div class="absolute top-2 left-2">${badge}</div>
-          ${r.ads.length > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${r.ads.length} ads</div>` : ''}
-        </div>
-        <div class="p-3">
-          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px]">
-            <div class="text-slate-500">Spend</div><div class="text-right font-mono text-slate-200">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
-            <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
-            <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
-            <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
-          </div>
-        </div>
-      </div>`;
-  }).join('');
-
-  if (typeof lucide !== 'undefined') lucide.createIcons();
+  renderDcoAssets();
 }
 
 // Kick off a sheet fetch for this Meta client when use_sheet_for_leads is on.
@@ -1445,25 +1381,36 @@ function initDashboard(accountIds: string[], campaignFilter: string, showAccount
 
   // Resolve the ad account's timezone (e.g. America/Chicago for Middleton, WI)
   // and switch the date picker over to it. Until this resolves, the picker
-  // uses the browser's local timezone, which is fine as a fallback. Fires once
-  // per dashboard load.
+  // uses the browser's local timezone as a fallback. Fires once per load.
+  //
+  // Cross-tz refetch: if the active preset's `until` shifts when account-tz
+  // resolves (e.g. Manila browser viewing a NY account at midnight), we must
+  // update `_dpSince`/`_dpUntil` AND re-fire fetchMetaCampaigns. Otherwise the
+  // initial data load runs against the wrong floor and KPI cards include a
+  // partial day BM doesn't show.
+  const initialUntilByPreset = _dpPresetRange(_dpActivePreset)?.until;
   if (accountIds[0]) {
     fetch(`/api/meta/account-info?account_id=${encodeURIComponent(accountIds[0])}`)
       .then(r => r.json())
       .then(j => {
-        console.log('[CLIENT TZ DEBUG] account-info response:', j);
-        if (j?.timezone_name) {
-          _accountTimezone = j.timezone_name;
-          console.log('[CLIENT TZ DEBUG] _accountTimezone set to:', _accountTimezone, '_dpNow():', _dpNow().toString());
-          // Re-paint the picker so today/this_month reflect the new tz.
-          dpPopulatePresets();
-          dpRenderBothCals();
-          updateDateLabel();
-        } else {
-          console.log('[CLIENT TZ DEBUG] no timezone_name in response, falling back to browser local');
+        if (!j?.timezone_name) return;
+        _accountTimezone = j.timezone_name;
+        // Recompute the active preset's range under the account TZ.
+        const r2 = _dpPresetRange(_dpActivePreset);
+        if (r2 && (r2.until !== initialUntilByPreset || r2.since !== _dpSince)) {
+          _dpSince = r2.since;
+          _dpUntil = r2.until;
+        }
+        // Re-paint the picker so today/this_month reflect the new tz.
+        dpPopulatePresets();
+        dpRenderBothCals();
+        updateDateLabel();
+        // If the preset's `until` shifted, refetch.
+        if (r2 && r2.until !== initialUntilByPreset) {
+          fetchMetaCampaigns().catch(err => showNotification(err.message, 'error'));
         }
       })
-      .catch((e) => { console.log('[CLIENT TZ DEBUG] account-info fetch error:', e); });
+      .catch(() => { /* falls back to browser local tz silently */ });
   }
 
   // Restore UI state
@@ -1859,7 +1806,13 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 <span className="h-4 block" id="search-hint"></span>
               </div>
             </div>
-            <button onClick={() => fetchMetaCampaigns().catch(err=>showNotification(err.message,'error'))} className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold px-5 py-2 rounded-lg transition-colors flex items-center gap-2 self-end mb-[20px]">
+            <button onClick={() => {
+              fetchMetaCampaigns().catch(err=>showNotification(err.message,'error'));
+              // If the Creatives view is currently visible, also refresh its
+              // per-asset data so it stays in sync with the new date/filter.
+              const creativesVisible = !document.getElementById('creatives-view')?.classList.contains('hidden');
+              if (creativesVisible) fetchDcoAssets();
+            }} className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold px-5 py-2 rounded-lg transition-colors flex items-center gap-2 self-end mb-[20px]">
               <i data-lucide="refresh-cw" className="w-4 h-4"></i> Apply
             </button>
           </div>
@@ -1877,18 +1830,27 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
             <div className="flex items-center gap-1 px-4 pt-3 pb-0 border-b border-slate-800">
               {platform === 'meta' && (['campaign','adset','ad'] as const).map(l => (
                 <button key={l} id={`tab-${l}`} onClick={() => {
-                  if (l===_currentLevel) return;
-                  // Leaving the creatives view, hide it.
+                  // Always restore the Table/Analytics view AND mark this level
+                  // active, even when the level didn't change — the user may have
+                  // been on Creatives and just wants to come back to this tab.
+                  const wasOnCreatives = !document.getElementById('creatives-view')?.classList.contains('hidden');
                   document.getElementById('creatives-view')?.classList.add('hidden');
-                  document.getElementById('table-view')?.classList.remove('hidden');
-                  document.getElementById('analytics-view')?.classList.toggle('hidden', _currentView !== 'analytics');
                   document.getElementById('tab-creatives')?.classList.remove('active-tab');
-                  const lo=['campaign','adset','ad']; const pi=lo.indexOf(_currentLevel); const ni=lo.indexOf(l);
+                  const lo=['campaign','adset','ad'];
+                  lo.forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.toggle('active-tab',x===l);});
+                  // Show whichever main view the user last had open.
+                  document.getElementById('table-view')?.classList.toggle('hidden', _currentView !== 'table');
+                  document.getElementById('analytics-view')?.classList.toggle('hidden', _currentView !== 'analytics');
+                  // Same level + just returning from Creatives = nothing to refetch.
+                  if (l===_currentLevel) {
+                    if (wasOnCreatives && _currentView === 'analytics') renderAnalytics();
+                    return;
+                  }
+                  const pi=lo.indexOf(_currentLevel); const ni=lo.indexOf(l);
                   if (ni>pi&&_selectedRows.size>0){_drilldownParentIds=new Set(_selectedRows);_drilldownParentLevel=_currentLevel;}
                   else {_drilldownParentIds.clear();_drilldownParentLevel=null;}
                   _currentLevel=l; _selectedRows.clear(); _sortCol=null;
                   localStorage.setItem('meta_level',l);
-                  lo.forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.toggle('active-tab',x===l);});
                   fetchMetaCampaigns().catch(err=>showNotification(err.message,'error'));
                 }} className={`level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors${l==='campaign'?' active-tab':''}`}>
                   {l.charAt(0).toUpperCase()+l.slice(1)}{l==='adset'?' Sets':l==='ad'?'s':'s'}
@@ -1916,8 +1878,31 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <div className="ml-auto flex items-center gap-2 pb-2">
                 <span id="selection-summary" className="text-xs text-slate-500 hidden"></span>
                 <div className="flex items-center gap-0.5 bg-slate-800/60 rounded-lg p-0.5">
-                  <button id="view-btn-table" onClick={() => { _currentView='table'; localStorage.setItem('meta_view','table'); document.getElementById('table-view')?.classList.remove('hidden'); document.getElementById('analytics-view')?.classList.add('hidden'); document.getElementById('view-btn-table')?.classList.add('active-view-btn'); document.getElementById('view-btn-analytics')?.classList.remove('active-view-btn'); }} className="view-btn active-view-btn flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold"><i data-lucide="table-2" className="w-3 h-3"></i> Table</button>
-                  <button id="view-btn-analytics" onClick={() => { _currentView='analytics'; localStorage.setItem('meta_view','analytics'); document.getElementById('table-view')?.classList.add('hidden'); document.getElementById('analytics-view')?.classList.remove('hidden'); document.getElementById('view-btn-table')?.classList.remove('active-view-btn'); document.getElementById('view-btn-analytics')?.classList.add('active-view-btn'); renderAnalytics(); }} className="view-btn flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold"><i data-lucide="bar-chart-2" className="w-3 h-3"></i> Analytics</button>
+                  <button id="view-btn-table" onClick={() => {
+                    _currentView='table';
+                    localStorage.setItem('meta_view','table');
+                    // Always close creatives when switching to Table/Analytics — the
+                    // Creatives tab is a separate view that lives outside this toggle.
+                    document.getElementById('creatives-view')?.classList.add('hidden');
+                    document.getElementById('tab-creatives')?.classList.remove('active-tab');
+                    document.getElementById(`tab-${_currentLevel}`)?.classList.add('active-tab');
+                    document.getElementById('table-view')?.classList.remove('hidden');
+                    document.getElementById('analytics-view')?.classList.add('hidden');
+                    document.getElementById('view-btn-table')?.classList.add('active-view-btn');
+                    document.getElementById('view-btn-analytics')?.classList.remove('active-view-btn');
+                  }} className="view-btn active-view-btn flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold"><i data-lucide="table-2" className="w-3 h-3"></i> Table</button>
+                  <button id="view-btn-analytics" onClick={() => {
+                    _currentView='analytics';
+                    localStorage.setItem('meta_view','analytics');
+                    document.getElementById('creatives-view')?.classList.add('hidden');
+                    document.getElementById('tab-creatives')?.classList.remove('active-tab');
+                    document.getElementById(`tab-${_currentLevel}`)?.classList.add('active-tab');
+                    document.getElementById('table-view')?.classList.add('hidden');
+                    document.getElementById('analytics-view')?.classList.remove('hidden');
+                    document.getElementById('view-btn-table')?.classList.remove('active-view-btn');
+                    document.getElementById('view-btn-analytics')?.classList.add('active-view-btn');
+                    renderAnalytics();
+                  }} className="view-btn flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold"><i data-lucide="bar-chart-2" className="w-3 h-3"></i> Analytics</button>
                 </div>
               </div>
             </div>
@@ -1992,133 +1977,53 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
             </div>
 
-            {/* Creatives view — per-asset breakdown */}
+            {/* Creatives view — unified per-asset grid (DCO + Static) */}
             <div id="creatives-view" className="hidden p-5">
-              {/* Sub-tabs */}
-              <div className="flex items-center gap-1 mb-4 border-b border-slate-800">
-                <button
-                  id="creatives-tab-dco"
-                  className="px-3 py-2 text-xs font-semibold uppercase tracking-wider border-b-2 border-amber-400 text-amber-300"
-                  onClick={() => {
-                    document.getElementById('creatives-dco-pane')?.classList.remove('hidden');
-                    document.getElementById('creatives-static-pane')?.classList.add('hidden');
-                    document.getElementById('creatives-tab-dco')?.classList.add('border-amber-400','text-amber-300');
-                    document.getElementById('creatives-tab-dco')?.classList.remove('border-transparent','text-slate-500');
-                    document.getElementById('creatives-tab-static')?.classList.remove('border-amber-400','text-amber-300');
-                    document.getElementById('creatives-tab-static')?.classList.add('border-transparent','text-slate-500');
-                  }}
-                >Dynamic (DCO)</button>
-                <button
-                  id="creatives-tab-static"
-                  className="px-3 py-2 text-xs font-semibold uppercase tracking-wider border-b-2 border-transparent text-slate-500 hover:text-slate-300"
-                  onClick={() => {
-                    document.getElementById('creatives-dco-pane')?.classList.add('hidden');
-                    document.getElementById('creatives-static-pane')?.classList.remove('hidden');
-                    document.getElementById('creatives-tab-static')?.classList.add('border-amber-400','text-amber-300');
-                    document.getElementById('creatives-tab-static')?.classList.remove('border-transparent','text-slate-500');
-                    document.getElementById('creatives-tab-dco')?.classList.remove('border-amber-400','text-amber-300');
-                    document.getElementById('creatives-tab-dco')?.classList.add('border-transparent','text-slate-500');
-                    renderStaticAssets();
-                  }}
-                >Static ads</button>
-              </div>
-
-              {/* DCO pane */}
-              <div id="creatives-dco-pane">
-                <div className="flex items-center justify-between mb-1">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Asset Performance — every image &amp; video
-                  </h3>
-                  <div className="flex items-center gap-1 flex-wrap">
-                    <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
-                    {([
-                      ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
-                    ] as const).map(([k,label]) => (
-                      <button key={k} data-dco-sort={k} onClick={() => {
-                        _dcoSort = k;
-                        document.querySelectorAll('[data-dco-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.dcoSort === k));
-                        renderDcoAssets();
-                      }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
-                    ))}
-                    <button
-                      id="dco-only-results-btn"
-                      className="sort-btn active-sort-btn ml-2"
-                      onClick={(e) => {
-                        _dcoOnlyWithResults = !_dcoOnlyWithResults;
-                        (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _dcoOnlyWithResults);
-                        renderDcoAssets();
-                      }}
-                    >Has results only</button>
-                  </div>
-                </div>
-                <p className="text-[11px] text-slate-500 mt-1 mb-1">
-                  Performance of each individual image and video used inside dynamic ads (where Meta automatically rotates assets). Totals are summed across every ad that used the asset.
-                </p>
-                <div className="flex flex-wrap items-center gap-2 mb-3">
-                  <div id="dco-assets-meta" className="text-[11px] text-slate-500"></div>
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Asset Performance — every image &amp; video
+                </h3>
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
+                  {([
+                    ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
+                  ] as const).map(([k,label]) => (
+                    <button key={k} data-dco-sort={k} onClick={() => {
+                      _dcoSort = k;
+                      document.querySelectorAll('[data-dco-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.dcoSort === k));
+                      renderDcoAssets();
+                    }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
+                  ))}
                   <button
-                    id="dco-show-hidden-btn"
-                    className="hidden sort-btn text-[10px]"
-                    onClick={() => { _dcoShowHidden = !_dcoShowHidden; renderDcoAssets(); }}
-                  >Show hidden assets</button>
-                  <span className="relative group inline-flex items-center text-slate-500 hover:text-slate-300 cursor-help" title="Why are some assets hidden?">
-                    <i data-lucide="info" className="w-3.5 h-3.5"></i>
-                    <span className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 hidden group-hover:block z-10 w-80 p-3 rounded-lg bg-slate-950 border border-slate-700 text-[10px] leading-relaxed text-slate-300 shadow-xl">
-                      Some assets are hidden by default: those with no preview thumbnail and under $1 in spend. These are typically videos that were duplicated from another Meta ad account — Meta&apos;s API blocks thumbnail and metadata access for those video objects (error code 100, subcode 33), even though their spend is still attributed here. They contribute only residual cents, so we hide them to keep the grid clean. Click &ldquo;Show hidden assets&rdquo; to reveal them.
-                    </span>
+                    id="dco-only-results-btn"
+                    className="sort-btn active-sort-btn ml-2"
+                    onClick={(e) => {
+                      _dcoOnlyWithResults = !_dcoOnlyWithResults;
+                      (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _dcoOnlyWithResults);
+                      renderDcoAssets();
+                    }}
+                  >Has results only</button>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1 mb-1">
+                Every image and video this account ran — both Dynamic Creative (rotating) assets and static single-creative ads. Multiple ads sharing the same asset are grouped into one card.
+              </p>
+              <div className="flex flex-wrap items-center gap-2 mb-3">
+                <div id="dco-assets-meta" className="text-[11px] text-slate-500"></div>
+                <button
+                  id="dco-show-hidden-btn"
+                  className="hidden sort-btn text-[10px]"
+                  onClick={() => { _dcoShowHidden = !_dcoShowHidden; renderDcoAssets(); }}
+                >Show hidden assets</button>
+                <span className="relative group inline-flex items-center text-slate-500 hover:text-slate-300 cursor-help" title="Why are some assets hidden?">
+                  <i data-lucide="info" className="w-3.5 h-3.5"></i>
+                  <span className="pointer-events-none absolute left-5 top-1/2 -translate-y-1/2 hidden group-hover:block z-10 w-80 p-3 rounded-lg bg-slate-950 border border-slate-700 text-[10px] leading-relaxed text-slate-300 shadow-xl">
+                    Some assets are hidden by default: those with no preview thumbnail. These are typically videos that were duplicated from another Meta ad account — Meta&apos;s API blocks thumbnail and metadata access for those video objects (error code 100, subcode 33), even though their spend is still attributed here. Click &ldquo;Show hidden assets&rdquo; to reveal them.
                   </span>
-                </div>
-                <div id="dco-leads-mismatch" className="hidden mb-3 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2"></div>
-                <div id="dco-assets-totals" className="hidden mb-4 bg-slate-900/40 border border-slate-800 rounded-xl p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all assets in this date range</div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2" id="dco-assets-totals-grid"></div>
-                  <div className="text-[10px] text-slate-500 italic leading-relaxed">
-                    Note: totals may differ slightly (typically 1&ndash;3%) from the ad-level KPI cards above. Meta excludes a few placements&mdash;Reels, in-stream video, and some catalog ads&mdash;from per-asset breakdowns, so their spend appears in the ad totals but not here. For Dynamic Creative ads, Meta redistributes spend across the assets it rotated, so summing every asset can also slightly exceed the ad total.
-                  </div>
-                </div>
-                <div id="dco-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+                </span>
               </div>
-
-              {/* Static (non-DCO) pane */}
-              <div id="creatives-static-pane" className="hidden">
-                <div className="flex items-center justify-between mb-1">
-                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
-                    <i data-lucide="image" className="w-3.5 h-3.5 text-blue-400"></i> Static Ads — single-creative performance
-                  </h3>
-                  <div className="flex items-center gap-1 flex-wrap">
-                    <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
-                    {([
-                      ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
-                    ] as const).map(([k,label]) => (
-                      <button key={k} data-static-sort={k} onClick={() => {
-                        _staticSort = k;
-                        document.querySelectorAll('[data-static-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.staticSort === k));
-                        renderStaticAssets();
-                      }} className={`sort-btn ${k==='spend'?'active-sort-btn':''}`}>{label}</button>
-                    ))}
-                    <button
-                      id="static-only-results-btn"
-                      className="sort-btn active-sort-btn ml-2"
-                      onClick={(e) => {
-                        _staticOnlyWithResults = !_staticOnlyWithResults;
-                        (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _staticOnlyWithResults);
-                        renderStaticAssets();
-                      }}
-                    >Has results only</button>
-                  </div>
-                </div>
-                <p className="text-[11px] text-slate-500 mt-1 mb-1">
-                  Ads that use a single image or single video (non-DCO). Each card represents one creative; multiple ads sharing the same image/video are grouped.
-                </p>
-                <div className="flex flex-wrap items-center gap-2 mb-3">
-                  <div id="static-assets-meta" className="text-[11px] text-slate-500"></div>
-                </div>
-                <div id="static-assets-totals" className="hidden mb-4 bg-slate-900/40 border border-slate-800 rounded-xl p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500 mb-2">Totals across all static ads in this date range</div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-2" id="static-assets-totals-grid"></div>
-                </div>
-                <div id="static-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
-              </div>
+              <div id="dco-leads-mismatch" className="hidden mb-3 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2"></div>
+              <div id="dco-assets-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
             </div>
           </div>
         </div>

@@ -19,9 +19,8 @@ export async function GET(req: NextRequest) {
     if (sp.get('action_attribution_windows')) url.searchParams.set('action_attribution_windows', sp.get('action_attribution_windows')!);
 
     // Meta's /insights endpoint silently drops DELETED + ARCHIVED entities
-    // unless we explicitly opt them in. Without this, a campaign that ran for
-    // months but has since been deleted contributes spend to the account-level
-    // KPI cards yet vanishes from the per-campaign table → mystery gap.
+    // unless we explicitly opt them in. Mirroring Meta BM's "All statuses"
+    // mode at every level so spend reconciles with the BM screenshot total.
     const level = sp.get('level') || 'campaign';
     const ALL_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
     if (level === 'campaign') {
@@ -40,8 +39,6 @@ export async function GET(req: NextRequest) {
         ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
       ]));
     } else if (campaignFilter) {
-      // account level — only the campaign-name filter applies; statuses are
-      // inherently summarized.
       url.searchParams.set('filtering', JSON.stringify([
         { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
       ]));
@@ -50,10 +47,7 @@ export async function GET(req: NextRequest) {
     url.searchParams.set('access_token', token);
 
     const res = await fetch(url.toString());
-    const json = await res.json() as { data?: { campaign_id?: string }[]; error?: unknown };
-    if (Array.isArray(json.data)) {
-      console.log('[INSIGHTS-DEBUG]', 'account:', accountId, 'level:', level, 'rows:', json.data.length);
-    }
+    const json = await res.json();
     return NextResponse.json(sanitizePaging(json), { status: res.status });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';

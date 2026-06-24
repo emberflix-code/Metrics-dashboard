@@ -123,6 +123,9 @@ export async function GET(req: NextRequest) {
     const timeRange = sp.get('time_range') || '{}';
     const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
 
+    // Include DELETED/ARCHIVED so per-ad totals reconcile with KPI cards.
+    const ALL_AD_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
+
     // 1) Insights at ad level — the metrics we need.
     const insightsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
     insightsUrl.searchParams.set('fields', 'ad_id,ad_name,campaign_name,adset_name,spend,impressions,inline_link_clicks,reach,actions');
@@ -130,11 +133,10 @@ export async function GET(req: NextRequest) {
     insightsUrl.searchParams.set('time_range', timeRange);
     insightsUrl.searchParams.set('limit', '500');
     insightsUrl.searchParams.set('action_attribution_windows', attribution);
-    if (campaignFilter) {
-      insightsUrl.searchParams.set('filtering', JSON.stringify([
-        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
-      ]));
-    }
+    insightsUrl.searchParams.set('filtering', JSON.stringify([
+      { field: 'ad.effective_status', operator: 'IN', value: ALL_AD_STATUSES },
+      ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
+    ]));
 
     // 2) Ads + their creative metadata (one call thanks to field expansion).
     const adsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
@@ -143,11 +145,10 @@ export async function GET(req: NextRequest) {
       'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}'
     );
     adsUrl.searchParams.set('limit', '200');
-    if (campaignFilter) {
-      adsUrl.searchParams.set('filtering', JSON.stringify([
-        { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
-      ]));
-    }
+    adsUrl.searchParams.set('filtering', JSON.stringify([
+      { field: 'effective_status', operator: 'IN', value: ALL_AD_STATUSES },
+      ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
+    ]));
 
     const [insights, ads] = await Promise.all([
       fetchAll<AdInsight>(insightsUrl, token),

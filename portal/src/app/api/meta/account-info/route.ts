@@ -27,8 +27,6 @@ export async function GET(req: NextRequest) {
       name?: string;
       error?: { message?: string };
     };
-    console.log('[ACCOUNT-INFO DEBUG] raw Meta response keys:', Object.keys(json), 'tz:', json.timezone_name, 'offset:', json.timezone_offset_hours_utc, 'currency:', json.currency);
-
     if (json.error) return NextResponse.json({ error: json.error }, { status: res.status });
 
     return NextResponse.json({

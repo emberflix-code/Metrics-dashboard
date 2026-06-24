@@ -30,16 +30,7 @@ export async function GET(req: NextRequest) {
     url.searchParams.set('access_token', token);
 
     const res = await fetch(url.toString());
-    const json = await res.json() as { data?: { id?: string; name?: string; effective_status?: string }[]; error?: unknown };
-    // Diagnostic: surface what statuses Meta actually returned so we can
-    // confirm whether DELETED/ARCHIVED entities are coming through.
-    if (Array.isArray(json.data)) {
-      const counts: Record<string, number> = {};
-      for (const c of json.data) counts[c.effective_status || 'UNKNOWN'] = (counts[c.effective_status || 'UNKNOWN'] || 0) + 1;
-      console.log('[CAMPAIGNS-DEBUG]', 'account:', accountId, 'total:', json.data.length, 'by status:', counts);
-    } else {
-      console.log('[CAMPAIGNS-DEBUG]', 'account:', accountId, 'no data, response:', json);
-    }
+    const json = await res.json();
     return NextResponse.json(sanitizePaging(json), { status: res.status });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';

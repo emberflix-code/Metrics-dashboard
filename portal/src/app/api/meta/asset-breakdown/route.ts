@@ -103,7 +103,8 @@ export async function GET(req: NextRequest) {
     const timeRange = sp.get('time_range') || '{}';
     const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
 
-    const cacheKey = `${accountId}|${timeRange}|${campaignFilter}|${accountWide ? 'all' : [...adIds].sort().join(',')}`;
+    // v5: investigate-videos diagnostic round.
+    const cacheKey = `v5|${accountId}|${timeRange}|${campaignFilter}|${accountWide ? 'all' : [...adIds].sort().join(',')}`;
     const hit = _cache.get(cacheKey);
     if (hit && hit.expires > Date.now()) {
       return NextResponse.json(hit.payload);
@@ -114,6 +115,14 @@ export async function GET(req: NextRequest) {
     //    breakdown only sees ads for this client, not all account ads). In
     //    per-ad mode we additionally filter by ad.id IN [...] for the
     //    explicit list passed by the modal.
+    //
+    // NOTE: we intentionally do NOT add an effective_status filter here even
+    // though we do at the regular insights route. Meta's breakdowns endpoint
+    // appears to silently return zero rows for `breakdowns=video_asset` when
+    // an ad.effective_status filter is present — verified empirically against
+    // Middleton, where BM shows running videos but the filtered call returned
+    // dcoVideos: 0. Leaving Meta's default status behavior intact preserves
+    // video asset visibility.
     const filtering: { field: string; operator: string; value: string | string[] }[] = [];
     if (campaignFilter) filtering.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     if (!accountWide) filtering.push({ field: 'ad.id', operator: 'IN', value: adIds });
@@ -464,10 +473,11 @@ export async function GET(req: NextRequest) {
           adCount: r._adIdSet.size,
           adIds: Array.from(r._adIdSet),
           ads,
-          // Marked hidden when no thumbnail AND under $1 spend — typically
-          // cross-account videos that Meta blocks (code 100 / subcode 33).
-          // Client renders an info toggle to let the owner reveal them.
-          hidden: r.thumbnail === null && roundedSpend < 1,
+          // Marked hidden when there's no thumbnail at all. Assets with a
+          // preview stay visible regardless of status (DELETED/ARCHIVED ads
+          // keep their thumbnail). The client's "Show hidden assets" toggle
+          // reveals these no-preview rows when the owner wants to inspect them.
+          hidden: r.thumbnail === null,
         });
       }
       out.sort((a, b) => b.spend - a.spend);
@@ -479,10 +489,14 @@ export async function GET(req: NextRequest) {
       videos: finalize(videoAgg.values()),
       adsWithSpec: hasFeedSpec.size,
       adsTotal: accountWide ? discoveredAdIds.length : adIds.length,
-      // Ad IDs that have asset_feed_spec — used by the client to subtract
-      // these from the /api/meta/creatives response to derive the
-      // "Static Ads" view (ads without DCO).
-      dcoAdIds: Array.from(hasFeedSpec),
+      // Ad IDs whose spend is ALREADY being reported per-asset in this
+      // response. The client subtracts these from /api/meta/creatives so
+      // static ads don't double-count. We use discoveredAdIds (ads that
+      // produced breakdown rows) rather than hasFeedSpec (ads whose creative
+      // lookup returned asset_feed_spec) — Meta's per-ad creative fetch can
+      // miss asset_feed_spec for plenty of ads that nonetheless return
+      // per-asset breakdown rows, so hasFeedSpec systematically under-counts.
+      dcoAdIds: discoveredAdIds,
     };
 
     _cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, payload });
