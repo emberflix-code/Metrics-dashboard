@@ -27,11 +27,13 @@ interface ClientDetail {
 interface AgencyAccount {
   id: string;
   name: string;
+  bmLabel?: string;
 }
 
-interface AgencySettings {
-  meta_account_ids: string[];
-  meta_accounts: AgencyAccount[];
+interface BmConnectionRow {
+  label: string;
+  account_ids: string[];
+  accounts_json: { id: string; name?: string }[];
 }
 
 export default async function ClientDetailPage({ params }: { params: { id: string } }) {
@@ -48,9 +50,21 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
 
   if (!client) redirect('/admin');
 
-  const [agency] = await query<AgencySettings>(
-    `SELECT meta_account_ids, meta_accounts FROM agency_settings WHERE id = 1`
+  // Build a unified list of accounts across all BM connections so the admin
+  // can assign accounts from any BM to this client.
+  const bmRows = await query<BmConnectionRow>(
+    `SELECT label, account_ids, accounts_json
+     FROM agency_bm_connections
+     ORDER BY sort_order ASC, created_at ASC`
   );
+  const agencyAccounts: AgencyAccount[] = [];
+  for (const bm of bmRows) {
+    const nameById = new Map<string, string>();
+    for (const a of bm.accounts_json || []) if (a.id) nameById.set(a.id, a.name || '');
+    for (const id of bm.account_ids || []) {
+      agencyAccounts.push({ id, name: nameById.get(id) || '', bmLabel: bm.label });
+    }
+  }
 
   return (
     <div className="min-h-screen bg-slate-950 p-6">
@@ -80,7 +94,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           </p>
           <AdAccountSelector
             clientId={client.id}
-            agencyAccounts={agency?.meta_accounts?.length ? agency.meta_accounts : (agency?.meta_account_ids ?? []).map(id => ({ id, name: '' }))}
+            agencyAccounts={agencyAccounts}
             currentAccountIds={client.ad_account_ids ?? []}
           />
         </div>

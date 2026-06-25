@@ -5,9 +5,9 @@ import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
 import DashboardClient from './DashboardClient';
 
-interface AgencySettings {
-  meta_token_enc: string | null;
-  meta_account_ids: string[];
+interface BmConnectionRow {
+  token_enc: string;
+  account_ids: string[];
 }
 
 interface ClientRow {
@@ -25,11 +25,11 @@ export default async function DashboardPage() {
   const session = await getServerSession(authOptions);
   if (!session || session.user.role !== 'client') redirect('/login');
 
-  const [agency] = await query<AgencySettings>(
-    `SELECT meta_token_enc, meta_account_ids FROM agency_settings WHERE id = 1`
+  const connections = await query<BmConnectionRow>(
+    `SELECT token_enc, account_ids FROM agency_bm_connections ORDER BY sort_order ASC, created_at ASC`
   );
 
-  if (!agency?.meta_token_enc) {
+  if (connections.length === 0) {
     return (
       <div className="min-h-screen bg-slate-950 flex items-center justify-center p-6">
         <div className="text-center">
@@ -45,8 +45,9 @@ export default async function DashboardPage() {
     );
   }
 
-  // Verify token decrypts server-side — never sent to client JS
-  void decrypt(agency.meta_token_enc);
+  // Verify the first connection's token decrypts (catches bad encryption at
+  // page load instead of failing every API call).
+  void decrypt(connections[0].token_enc);
 
   const [client] = await query<ClientRow>(
     `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads
@@ -57,10 +58,12 @@ export default async function DashboardPage() {
     [session.user.id]
   );
 
+  // Union all accounts across BM connections; client scope (if any) intersects.
+  const allAgencyAccountIds = Array.from(new Set(connections.flatMap(c => c.account_ids || [])));
   const accountIds =
     client?.ad_account_ids?.length > 0
       ? client.ad_account_ids
-      : agency.meta_account_ids;
+      : allAgencyAccountIds;
 
   return (
     <DashboardClient

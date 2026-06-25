@@ -3,35 +3,73 @@ import { authOptions } from './auth';
 import { query } from './db';
 import { decrypt } from './crypto';
 
-interface AgencySettings {
-  meta_token_enc: string | null;
-  meta_account_ids: string[];
+interface BmConnectionRow {
+  id: string;
+  label: string;
+  token_enc: string;
+  account_ids: string[];
+  accounts_json: { id: string; name?: string }[];
 }
 
 interface ClientRow {
   campaign_filter: string;
 }
 
-/**
- * Returns the agency-level Meta token + account IDs, plus the current
- * client's campaign_filter so the dashboard can scope campaigns by name.
- */
-export async function getClientConnection(): Promise<{
-  token: string;
+export interface AgencyAccount {
+  id: string;
+  name: string;
+  bmLabel: string;
+}
+
+export interface ClientConnection {
+  /** All ad account IDs accessible to this client (across every BM). */
   accountIds: string[];
+  /** Full account metadata with the BM label, for UI grouping. */
+  accounts: AgencyAccount[];
+  /** Look up the right token for a given ad account ID. Throws if unknown. */
+  tokenForAccount(accountId: string): string;
+  /** Campaign-name substring filter the client wants applied. */
   campaignFilter: string;
-}> {
+  /**
+   * Default token — used by routes that don't yet take an account_id, or for
+   * agency-wide operations. Picks the first connection's token. Will be
+   * removed once every route is per-account.
+   */
+  token: string;
+}
+
+/**
+ * Returns the agency's Meta connections (one per BM) merged with the current
+ * client's account scope. Routes call tokenForAccount(accountId) to pick the
+ * right token for each Meta API call.
+ */
+export async function getClientConnection(): Promise<ClientConnection> {
   const session = await getServerSession(authOptions);
   if (!session) throw new Error('Unauthorized');
 
-  const [agency] = await query<AgencySettings>(
-    `SELECT meta_token_enc, meta_account_ids FROM agency_settings WHERE id = 1`
+  const connections = await query<BmConnectionRow>(
+    `SELECT id, label, token_enc, account_ids, accounts_json
+     FROM agency_bm_connections
+     ORDER BY sort_order ASC, created_at ASC`
   );
+  if (connections.length === 0) throw new Error('Agency Meta connection not configured');
 
-  if (!agency?.meta_token_enc) throw new Error('Agency Meta connection not configured');
+  // Build an account → connection lookup so any route can resolve the right token.
+  const accountToConnection = new Map<string, BmConnectionRow>();
+  const allAccounts: AgencyAccount[] = [];
+  for (const conn of connections) {
+    const nameLookup = new Map<string, string>();
+    for (const a of conn.accounts_json || []) if (a.id) nameLookup.set(a.id, a.name || '');
+    for (const accId of conn.account_ids || []) {
+      accountToConnection.set(accId, conn);
+      allAccounts.push({ id: accId, name: nameLookup.get(accId) || '', bmLabel: conn.label });
+    }
+  }
 
-  const [client] = await query<ClientRow>(
-    `SELECT c.campaign_filter
+  // Optional per-client scope: clients.ad_account_ids restricts which accounts
+  // this client can see. If empty/null, the client sees every agency account.
+  const [client] = await query<{ campaign_filter: string; ad_account_ids: string[] | null }>(
+    `SELECT c.campaign_filter, c.ad_account_ids
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -39,10 +77,29 @@ export async function getClientConnection(): Promise<{
     [session.user.id]
   );
 
+  let scopedAccounts = allAccounts;
+  if (client?.ad_account_ids && client.ad_account_ids.length > 0) {
+    const allowed = new Set(client.ad_account_ids);
+    scopedAccounts = allAccounts.filter(a => allowed.has(a.id));
+  }
+
+  const tokenForAccount = (accountId: string): string => {
+    const conn = accountToConnection.get(accountId);
+    if (!conn) throw new Error(`No Meta connection found for ad account ${accountId}`);
+    return decrypt(conn.token_enc);
+  };
+
+  // Default token: first connection's token, for routes that haven't been
+  // updated to per-account lookup yet. Safe because old single-BM clients
+  // only had one connection.
+  const defaultToken = decrypt(connections[0].token_enc);
+
   return {
-    token: decrypt(agency.meta_token_enc),
-    accountIds: agency.meta_account_ids,
-    campaignFilter: client?.campaign_filter ?? '',
+    accountIds: scopedAccounts.map(a => a.id),
+    accounts: scopedAccounts,
+    tokenForAccount,
+    campaignFilter: (client as ClientRow | undefined)?.campaign_filter ?? '',
+    token: defaultToken,
   };
 }
 

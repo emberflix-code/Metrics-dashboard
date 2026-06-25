@@ -68,6 +68,9 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
           placeholder="Sheet1"
           className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
         />
+        <p className="mt-1 text-xs text-slate-500">
+          One tab name, or multiple separated by <code className="text-slate-400">|</code> to aggregate. Example: <code className="text-slate-400">Alloy Middleton, WI | Alloy Wexford, PA</code> unions both tabs into one dataset.
+        </p>
       </div>
 
       <div className="flex items-start gap-3 p-3 bg-slate-800/50 border border-slate-700/60 rounded-lg">
@@ -99,7 +102,7 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
           className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
         />
         <p className="mt-1 text-xs text-slate-500">
-          When set, the client&apos;s dashboard shows a &quot;View Google Ads&quot; switch.
+          When set, the client&apos;s dashboard shows a &quot;View Google Ads&quot; switch. Multiple tabs can be unioned by separating with <code className="text-slate-400">|</code>.
         </p>
       </div>
 

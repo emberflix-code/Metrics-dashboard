@@ -7,12 +7,13 @@ import { getClientConnection } from '@/lib/meta';
 // in PHT is looking at a US-based account.
 export async function GET(req: NextRequest) {
   try {
-    const { token, accountIds } = await getClientConnection();
+    const { tokenForAccount, accountIds } = await getClientConnection();
     const sp = req.nextUrl.searchParams;
 
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
     if (!accountId) return NextResponse.json({ error: { message: 'Missing account_id' } }, { status: 400 });
     if (!accountIds.includes(accountId)) return NextResponse.json({ error: { message: 'Account not authorized' } }, { status: 403 });
+    const token = tokenForAccount(accountId);
 
     const url = new URL(`https://graph.facebook.com/v22.0/act_${accountId}`);
     url.searchParams.set('fields', 'id,timezone_name,timezone_offset_hours_utc,currency,name');

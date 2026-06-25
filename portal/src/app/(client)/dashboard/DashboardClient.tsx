@@ -252,15 +252,57 @@ function getComparisonDateRange(since: string, until: string, mode: string) {
 }
 
 // ── UI helpers ────────────────────────────────────────────────────────────────
-function showNotification(msg: string, type: 'success'|'error') {
+function showNotification(msg: string, type: 'success'|'error', durationMs?: number) {
   const el = document.createElement('div');
   const bg = type==='success' ? 'bg-emerald-500' : 'bg-red-500';
   const icon = type==='success' ? 'check-circle' : 'alert-circle';
-  el.className = `fixed top-4 right-4 ${bg} text-white px-4 py-3 rounded-lg flex items-center gap-2 text-sm font-semibold shadow-lg z-50`;
-  el.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4"></i> ${msg}`;
+  el.className = `fixed top-4 right-4 ${bg} text-white px-4 py-3 rounded-lg flex items-start gap-2 text-sm font-semibold shadow-lg z-50 max-w-md`;
+  // Allow a multi-line message body — render newlines as <br>.
+  const safe = String(msg).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br/>');
+  el.innerHTML = `<i data-lucide="${icon}" class="w-4 h-4 shrink-0 mt-0.5"></i><div class="flex-1 leading-relaxed font-normal">${safe}</div><button class="ml-2 -mr-1 -mt-1 p-1 hover:bg-white/10 rounded shrink-0" onclick="this.parentElement.remove()"><i data-lucide="x" class="w-3.5 h-3.5"></i></button>`;
   document.body.appendChild(el);
   lucide.createIcons();
-  setTimeout(() => { el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(),300); }, 3000);
+  const ms = durationMs ?? (type === 'error' ? 12000 : 3000);
+  setTimeout(() => { el.style.opacity='0'; el.style.transition='opacity .3s'; setTimeout(()=>el.remove(),300); }, ms);
+}
+
+// Translate Meta's API error object into a client-facing string. Meta itself
+// often provides better copy in `error_user_title` / `error_user_msg` than
+// in `message`; surface those when present. For a small set of well-known
+// codes we replace the message entirely with an actionable explanation.
+interface MetaApiError {
+  message?: string;
+  type?: string;
+  code?: number;
+  error_subcode?: number;
+  error_user_title?: string;
+  error_user_msg?: string;
+  fbtrace_id?: string;
+}
+function humanizeMetaError(e: MetaApiError): string {
+  // Known structural errors with actionable fixes.
+  // 1487534 = "Too many rows" on level=campaign,time_increment=1 for long ranges.
+  if (e.error_subcode === 1487534) {
+    return 'This date range is too wide for Meta to return all daily data in one request. Try a shorter range (Last 30 days / This month) and the dashboard will load.';
+  }
+  // 17 = per-user rate limit — recoverable, retryable.
+  if (e.code === 17) {
+    return 'Meta has temporarily rate-limited the API token. Please wait ~5 minutes and reload — no data is lost.';
+  }
+  // 100 + subcode 33 — usually our cross-account video, but if it surfaces
+  // at the top level it means the account itself isn't reachable.
+  if (e.code === 100 && e.error_subcode === 33) {
+    return 'One of the assigned ad accounts is no longer reachable with the current Meta token. Ask your admin to refresh the Business Manager connection.';
+  }
+  // 190 = OAuth token expired/invalidated.
+  if (e.code === 190) {
+    return 'The Meta token for this account has expired or been revoked. Your admin needs to refresh the Business Manager connection in Settings.';
+  }
+  // Default: prefer Meta's user-friendly copy, fall back to the raw message.
+  const friendly = [e.error_user_title, e.error_user_msg].filter(Boolean).join(': ');
+  if (friendly) return friendly;
+  const parts = [e.message, e.type && `(${e.type})`, e.code && `Code ${e.code}`].filter(Boolean);
+  return parts.join(' ') || 'Meta API error';
 }
 
 function showLoadingBar() {
@@ -1031,7 +1073,7 @@ async function fetchMetaCampaigns() {
     const fetchOneAccount = async (accountId: string): Promise<any[]> => {
       const statusRes = await fetch(`/api/meta/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}`);
       const statusJson = await statusRes.json();
-      if (statusJson.error) { const e=statusJson.error; throw new Error([e.message,e.type&&`(${e.type})`,e.code&&`Code ${e.code}`].filter(Boolean).join(' ')); }
+      if (statusJson.error) { throw new Error(humanizeMetaError(statusJson.error)); }
       const statusMap: Record<string,string>={};
       for (const c of (statusJson.data||[])) statusMap[c.id]=c.effective_status;
 
@@ -1042,7 +1084,7 @@ async function fetchMetaCampaigns() {
         const fetchUrl: string = isFirstPage ? url : `/api/meta/next-page?url=${encodeURIComponent(url)}`;
         const response = await fetch(fetchUrl);
         const json = await response.json();
-        if (json.error) { const e=json.error; throw new Error([e.message,e.type&&`(${e.type})`,e.code&&`Code ${e.code}`].filter(Boolean).join(' ')||'Meta API error'); }
+        if (json.error) { throw new Error(humanizeMetaError(json.error)); }
         const mapped = (json.data||[]).map((item: any)=>{
           const am: Record<string,number>={};
           for (const a of (item.actions||[])) am[a.action_type]=parseInt(a.value||0);
@@ -1076,29 +1118,41 @@ async function fetchMetaCampaigns() {
     _trendData = [];
     try {
       if (since!==until) {
-        const trendAcc = accountIds[0];
-        let tUrl: string|null = `/api/meta/insights?account_id=${encodeURIComponent(trendAcc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since,until}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+        // Fetch trend data from every account this client is scoped to,
+        // then sum by date. Critical when clients span multiple BMs — using
+        // only accountIds[0] would silently exclude the other BM's spend.
         const byDate: Record<string,any>={};
-        let tFirst=true;
-        while (tUrl) {
-          const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
-          const tRes=await fetch(tFetch); const tJson=await tRes.json();
-          if (tJson.error||!tJson.data) break;
-          for (const d of tJson.data) {
-            if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
-            const am: Record<string,number>={};
-            for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
-            const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
-            const results=pL>0?pL:fL>0?fL:(am['lead']||0);
-            const spend=Math.round(parseFloat(d.spend||0)*100)/100;
-            const dt=d.date_start;
-            if (!byDate[dt]) byDate[dt]={date:dt,spend:0,results:0};
-            byDate[dt].spend=Math.round((byDate[dt].spend+spend)*100)/100;
-            byDate[dt].results+=results;
+        let trendError: MetaApiError | null = null;
+        await Promise.all(accountIds.map(async acc => {
+          let tUrl: string|null = `/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since,until}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+          let tFirst=true;
+          while (tUrl) {
+            const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
+            const tRes=await fetch(tFetch); const tJson=await tRes.json();
+            if (tJson.error) { if (!trendError) trendError = tJson.error; break; }
+            if (!tJson.data) break;
+            for (const d of tJson.data) {
+              if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
+              const am: Record<string,number>={};
+              for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
+              const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+              const results=pL>0?pL:fL>0?fL:(am['lead']||0);
+              const spend=Math.round(parseFloat(d.spend||0)*100)/100;
+              const dt=d.date_start;
+              if (!byDate[dt]) byDate[dt]={date:dt,spend:0,results:0};
+              byDate[dt].spend=Math.round((byDate[dt].spend+spend)*100)/100;
+              byDate[dt].results+=results;
+            }
+            tUrl=tJson.paging?.next||null;
           }
-          tUrl=tJson.paging?.next||null;
-        }
+        }));
         _trendData=Object.values(byDate).sort((a:any,b:any)=>a.date.localeCompare(b.date));
+        // Non-fatal: if the trend fetch hit Meta's row-limit (or any other
+        // error), tell the client. KPI cards / table still load — only the
+        // daily trend chart is degraded.
+        if (trendError) {
+          showNotification('Daily trend chart unavailable: ' + humanizeMetaError(trendError), 'error');
+        }
       }
     } catch {}
 
@@ -1120,35 +1174,50 @@ async function fetchMetaCampaigns() {
       if (cr) {
         _comparisonRange=cr;
         try {
-          const compAcc=accountIds[0];
-          const ctotUrl=`/api/meta/insights?account_id=${encodeURIComponent(compAcc)}&fields=${encodeURIComponent('spend,reach,impressions,inline_link_clicks,actions')}&level=account&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&limit=10&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
-          const ctotRes=await fetch(ctotUrl); const ctotJson=await ctotRes.json();
-          if (!ctotJson.error&&ctotJson.data?.length>0) {
-            const d=ctotJson.data[0]; const am: Record<string,number>={};
-            for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
-            const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
-            _comparisonTotals={reach:parseInt(d.reach||0),impressions:parseInt(d.impressions||0),spent:Math.round(parseFloat(d.spend||0)*100)/100,linkClicks:parseInt(d.inline_link_clicks||0),results:pL>0?pL:fL>0?fL:(am['lead']||0)};
-          }
-          if (cr.since!==cr.until) {
-            let ctUrl: string|null=`/api/meta/insights?account_id=${encodeURIComponent(compAcc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
-            const cByDate: Record<string,any>={};
-            let ctFirst=true;
-            while (ctUrl) {
-              const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;
-              const ctRes=await fetch(ctFetch); const ctJson=await ctRes.json();
-              if (ctJson.error||!ctJson.data) break;
-              for (const d of ctJson.data) {
-                if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
-                const am: Record<string,number>={};
-                for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
-                const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
-                const spend=Math.round(parseFloat(d.spend||0)*100)/100; const dt=d.date_start;
-                if (!cByDate[dt]) cByDate[dt]={date:dt,spend:0,results:0};
-                cByDate[dt].spend=Math.round((cByDate[dt].spend+spend)*100)/100;
-                cByDate[dt].results+=(pL>0?pL:fL>0?fL:(am['lead']||0));
-              }
-              ctUrl=ctJson.paging?.next||null;
+          // Sum account-level totals across every account this client is
+          // scoped to (could span multiple BMs).
+          const compTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0 };
+          let compHasAny = false;
+          await Promise.all(accountIds.map(async acc => {
+            const ctotUrl=`/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('spend,reach,impressions,inline_link_clicks,actions')}&level=account&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&limit=10&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+            const ctotRes=await fetch(ctotUrl); const ctotJson=await ctotRes.json();
+            if (!ctotJson.error&&ctotJson.data?.length>0) {
+              const d=ctotJson.data[0]; const am: Record<string,number>={};
+              for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
+              const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+              compTot.reach += parseInt(d.reach||0);
+              compTot.impressions += parseInt(d.impressions||0);
+              compTot.spent = Math.round((compTot.spent + parseFloat(d.spend||0)) * 100) / 100;
+              compTot.linkClicks += parseInt(d.inline_link_clicks||0);
+              compTot.results += (pL>0?pL:fL>0?fL:(am['lead']||0));
+              compHasAny = true;
             }
+          }));
+          if (compHasAny) _comparisonTotals = compTot;
+
+          if (cr.since!==cr.until) {
+            // Trend across all accounts, summed by date.
+            const cByDate: Record<string,any>={};
+            await Promise.all(accountIds.map(async acc => {
+              let ctUrl: string|null=`/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+              let ctFirst=true;
+              while (ctUrl) {
+                const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;
+                const ctRes=await fetch(ctFetch); const ctJson=await ctRes.json();
+                if (ctJson.error||!ctJson.data) break;
+                for (const d of ctJson.data) {
+                  if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
+                  const am: Record<string,number>={};
+                  for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
+                  const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+                  const spend=Math.round(parseFloat(d.spend||0)*100)/100; const dt=d.date_start;
+                  if (!cByDate[dt]) cByDate[dt]={date:dt,spend:0,results:0};
+                  cByDate[dt].spend=Math.round((cByDate[dt].spend+spend)*100)/100;
+                  cByDate[dt].results+=(pL>0?pL:fL>0?fL:(am['lead']||0));
+                }
+                ctUrl=ctJson.paging?.next||null;
+              }
+            }));
             _comparisonTrendData=Object.values(cByDate).sort((a:any,b:any)=>a.date.localeCompare(b.date));
           }
         } catch {}

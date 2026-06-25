@@ -81,12 +81,13 @@ const _cache = new Map<string, CacheEntry>();
 
 export async function GET(req: NextRequest) {
   try {
-    const { token, accountIds, campaignFilter } = await getClientConnection();
+    const { tokenForAccount, accountIds, campaignFilter } = await getClientConnection();
     const sp = req.nextUrl.searchParams;
 
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
     if (!accountId) return NextResponse.json({ error: { message: 'Missing account_id' } }, { status: 400 });
     if (!accountIds.includes(accountId)) return NextResponse.json({ error: { message: 'Account not authorized' } }, { status: 403 });
+    const token = tokenForAccount(accountId);
 
     const adIdsParam = sp.get('ad_ids');
     // When ad_ids is omitted, the route aggregates across ALL ads in the account

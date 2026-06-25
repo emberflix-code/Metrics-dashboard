@@ -14,23 +14,23 @@ interface ClientRow {
   ad_account_ids: string[];
 }
 
-interface AgencyAccount {
-  id: string;
-  name: string;
-}
-
-interface AgencySettings {
-  meta_token_enc: string | null;
-  meta_accounts: AgencyAccount[];
-}
-
 export default async function AdminPage() {
   const session = await getServerSession(authOptions);
   if (!session || session.user.role !== 'admin') redirect('/login');
 
-  const [agency] = await query<AgencySettings>(
-    `SELECT meta_token_enc, meta_accounts FROM agency_settings WHERE id = 1`
+  // Connection presence drives the "not configured yet" warning. Any BM
+  // counts — agency only needs at least one. We also pull the account list
+  // so the table can show ad-account names instead of bare IDs.
+  const connections = await query<{ accounts_json: { id: string; name?: string }[] }>(
+    `SELECT accounts_json FROM agency_bm_connections`
   );
+  const hasMetaConnection = connections.length > 0;
+  const accountNameById = new Map<string, string>();
+  for (const c of connections) {
+    for (const a of c.accounts_json || []) {
+      if (a.id) accountNameById.set(a.id, a.name || '');
+    }
+  }
 
   const clients = await query<ClientRow>(`
     SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.created_at, u.email
@@ -54,7 +54,7 @@ export default async function AdminPage() {
               className="flex items-center gap-2 text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-600 px-3 py-2 rounded-lg transition-colors"
             >
               <span className="text-xs">⚙</span> Agency Settings
-              {!agency?.meta_token_enc && (
+              {!hasMetaConnection && (
                 <span className="text-xs bg-red-500/10 text-red-400 border border-red-500/20 px-1.5 py-0.5 rounded-full">!</span>
               )}
             </a>
@@ -69,7 +69,7 @@ export default async function AdminPage() {
           </div>
         </div>
 
-        {!agency?.meta_token_enc && (
+        {!hasMetaConnection && (
           <div className="mb-4 p-4 bg-amber-500/10 border border-amber-500/20 rounded-xl text-sm text-amber-300">
             <strong>No Meta connection yet.</strong>{' '}
             <a href="/admin/settings" className="underline hover:text-amber-200">Set up the agency connection</a>{' '}
@@ -105,10 +105,10 @@ export default async function AdminPage() {
                     {c.ad_account_ids?.length > 0 ? (
                       <div className="flex flex-col gap-1">
                         {c.ad_account_ids.map(id => {
-                          const acc = agency?.meta_accounts?.find(a => a.id === id);
+                          const name = accountNameById.get(id);
                           return (
                             <span key={id} className="text-xs font-mono text-slate-300">
-                              {acc?.name ? <><span className="text-slate-200">{acc.name}</span><span className="text-slate-500 ml-1">({id})</span></> : `act_${id}`}
+                              {name ? <><span className="text-slate-200">{name}</span><span className="text-slate-500 ml-1">({id})</span></> : `act_${id}`}
                             </span>
                           );
                         })}

@@ -113,12 +113,13 @@ async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
 
 export async function GET(req: NextRequest) {
   try {
-    const { token, accountIds, campaignFilter } = await getClientConnection();
+    const { tokenForAccount, accountIds, campaignFilter } = await getClientConnection();
     const sp = req.nextUrl.searchParams;
 
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
     if (!accountId) return NextResponse.json({ error: { message: 'Missing account_id' } }, { status: 400 });
     if (!accountIds.includes(accountId)) return NextResponse.json({ error: { message: 'Account not authorized' } }, { status: 403 });
+    const token = tokenForAccount(accountId);
 
     const timeRange = sp.get('time_range') || '{}';
     const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
