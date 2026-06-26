@@ -449,10 +449,10 @@ function renderCards(t: any, selCount=0) {
   // Leads label tracks source. Subtitle hints to the client when it differs
   // from Meta so they don't wonder why the number doesn't match BM.
   const leadsLabel = _platform === 'google' ? 'Leads'
-    : _leadsSource === 'ghl' && _ghlBookingsByDay ? 'Leads · from GHL'
-    : _leadsSource === 'sheet' && _sheetLeadsByDay ? 'Leads · from sheet'
-    : _useSheetForLeads && _sheetLeadsByDay ? 'Leads · from sheet'  // legacy boolean fallback
-    : 'Results';
+    : _leadsSource === 'ghl' && _ghlBookingsByDay ? 'Leads'
+    : _leadsSource === 'sheet' && _sheetLeadsByDay ? 'Leads'
+    : _useSheetForLeads && _sheetLeadsByDay ? 'Leads'  // legacy boolean fallback
+    : 'Leads';
   // Admin-facing order: Amount Spent → Impressions → Link Clicks → CTR → CPL
   // → Leads → Bookings. The Bookings card is appended only when the admin
   // enabled show_bookings AND we have GHL data. When show_book_rate is also
