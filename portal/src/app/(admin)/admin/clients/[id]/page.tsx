@@ -6,6 +6,7 @@ import CampaignFilterForm from './CampaignFilterForm';
 import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
 import SheetConfigForm from './SheetConfigForm';
+import GhlConfigForm from './GhlConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
 
@@ -22,6 +23,11 @@ interface ClientDetail {
   sheet_tab: string;
   google_sheet_tab: string;
   use_sheet_for_leads: boolean;
+  leads_source: 'meta' | 'sheet' | 'ghl';
+  show_bookings: boolean;
+  show_book_rate: boolean;
+  ghl_location_id: string;
+  has_ghl_token: boolean;
 }
 
 interface AgencyAccount {
@@ -41,7 +47,11 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   if (!session || session.user.role !== 'admin') redirect('/login');
 
   const [client] = await query<ClientDetail>(`
-    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads, c.created_at, u.email, u.auto_login_token
+    SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
+           c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
+           c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id,
+           (length(c.ghl_token_enc) > 0) AS has_ghl_token,
+           c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
@@ -117,7 +127,23 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentSheetId={client.sheet_id ?? ''}
             currentSheetTab={client.sheet_tab ?? ''}
             currentGoogleSheetTab={client.google_sheet_tab ?? ''}
-            currentUseSheetForLeads={client.use_sheet_for_leads ?? false}
+            currentLeadsSource={client.leads_source ?? 'meta'}
+            hasGhlToken={!!client.has_ghl_token}
+          />
+        </div>
+
+        {/* GoHighLevel — Bookings */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">GoHighLevel — Bookings</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Connect a GHL Private Integration token to surface booked-contact attribution on the dashboard. Counts contacts tagged <span className="font-mono text-slate-300">booked appointment</span> within 30 days of opt-in.
+          </p>
+          <GhlConfigForm
+            clientId={client.id}
+            hasToken={!!client.has_ghl_token}
+            currentLocationId={client.ghl_location_id ?? ''}
+            currentShowBookings={client.show_bookings ?? false}
+            currentShowBookRate={client.show_book_rate ?? false}
           />
         </div>
 

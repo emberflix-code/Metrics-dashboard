@@ -23,6 +23,19 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_login_token TEXT UNI
 // the rollout is opt-in per client.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS use_sheet_for_leads BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// GHL bookings integration + leads-source picker (see migration 010).
+// Defaults are safe-no-op so existing clients are unaffected on first deploy:
+// leads_source defaults to 'meta', show_bookings defaults to false.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS ghl_token_enc TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS ghl_location_id TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS leads_source TEXT NOT NULL DEFAULT 'meta'`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_bookings BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_book_rate BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+// One-shot backfill: any client that had `use_sheet_for_leads = true` now has
+// `leads_source = 'sheet'`. Idempotent — the guard `leads_source = 'meta'`
+// makes this no-op on re-run (admin may have manually switched to 'ghl' since).
+pool.query(`UPDATE clients SET leads_source = 'sheet' WHERE use_sheet_for_leads = true AND leads_source = 'meta'`).catch(() => {});
+
 // Multi-BM support: agency_bm_connections holds one row per Business Manager
 // the agency has access to. Each row has its own token + ad accounts. The
 // legacy agency_settings.meta_token_enc / meta_account_ids columns are still

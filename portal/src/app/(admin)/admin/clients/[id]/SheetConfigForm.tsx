@@ -2,21 +2,29 @@
 
 import { useState } from 'react';
 
+type LeadsSource = 'meta' | 'sheet' | 'ghl';
+
 interface Props {
   clientId: string;
   currentSheetId: string;
   currentSheetTab: string;
   currentGoogleSheetTab: string;
-  currentUseSheetForLeads: boolean;
+  currentLeadsSource: LeadsSource;
+  hasGhlToken: boolean;
 }
 
-export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab, currentGoogleSheetTab, currentUseSheetForLeads }: Props) {
+export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab, currentGoogleSheetTab, currentLeadsSource, hasGhlToken }: Props) {
   const [sheetId, setSheetId] = useState(currentSheetId);
   const [sheetTab, setSheetTab] = useState(currentSheetTab);
   const [googleSheetTab, setGoogleSheetTab] = useState(currentGoogleSheetTab);
-  const [useSheetForLeads, setUseSheetForLeads] = useState(currentUseSheetForLeads);
+  const [leadsSource, setLeadsSource] = useState<LeadsSource>(currentLeadsSource);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+
+  // Greying-out the unavailable options is just a UX hint — the server-side
+  // resolver in DashboardClient.tsx falls back to a valid source anyway.
+  const sheetDisabled = !sheetTab.trim();
+  const ghlDisabled = !hasGhlToken;
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -29,7 +37,7 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
         sheet_id: sheetId.trim(),
         sheet_tab: sheetTab.trim(),
         google_sheet_tab: googleSheetTab.trim(),
-        use_sheet_for_leads: useSheetForLeads,
+        leads_source: leadsSource,
       }),
     });
     setSaving(false);
@@ -73,20 +81,26 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
         </p>
       </div>
 
-      <div className="flex items-start gap-3 p-3 bg-slate-800/50 border border-slate-700/60 rounded-lg">
-        <input
-          id="use-sheet-for-leads"
-          type="checkbox"
-          checked={useSheetForLeads}
-          onChange={e => setUseSheetForLeads(e.target.checked)}
-          className="mt-0.5 w-4 h-4 rounded border-slate-600 bg-slate-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-0"
-        />
-        <label htmlFor="use-sheet-for-leads" className="text-xs text-slate-300 leading-relaxed cursor-pointer">
-          <span className="font-medium block">Use sheet as the source of truth for leads (Meta dashboard)</span>
-          <span className="text-slate-500 mt-0.5 block">
-            When enabled, the &ldquo;Leads&rdquo; KPI on the Meta dashboard reads the daily lead total from the Meta tab above (column: <span className="font-mono text-slate-400">Leads</span>) instead of Meta&apos;s pixel events. Per-asset and per-campaign breakdowns continue to use Meta&apos;s attribution.
-          </span>
+      <div className="p-3 bg-slate-800/50 border border-slate-700/60 rounded-lg space-y-2">
+        <label className="block text-xs font-medium text-slate-300">
+          Leads KPI source <span className="ml-1 text-slate-500 font-normal">(which dataset feeds the &ldquo;Leads&rdquo; card on the Meta dashboard)</span>
         </label>
+        <select
+          value={leadsSource}
+          onChange={e => setLeadsSource(e.target.value as LeadsSource)}
+          className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+        >
+          <option value="meta">Meta — Meta&apos;s pixel events (default)</option>
+          <option value="sheet" disabled={sheetDisabled}>
+            Google Sheet — sum of &ldquo;Leads&rdquo; column from the Meta tab above{sheetDisabled ? ' (set a Meta tab first)' : ''}
+          </option>
+          <option value="ghl" disabled={ghlDisabled}>
+            GoHighLevel — count of booked-contact attributions{ghlDisabled ? ' (configure a GHL token first)' : ''}
+          </option>
+        </select>
+        <p className="text-[11px] text-slate-500 leading-relaxed">
+          Per-campaign and per-asset breakdowns continue to use Meta&apos;s attribution regardless of this setting. If the chosen source becomes unavailable, the dashboard falls back to Meta automatically.
+        </p>
       </div>
 
       <div>

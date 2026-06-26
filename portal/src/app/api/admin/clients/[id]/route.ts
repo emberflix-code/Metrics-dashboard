@@ -2,7 +2,10 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
+import { encrypt } from '@/lib/crypto';
 import bcrypt from 'bcryptjs';
+
+const VALID_LEADS_SOURCES = new Set(['meta', 'sheet', 'ghl']);
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -44,6 +47,42 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (body.use_sheet_for_leads !== undefined) {
     await query('UPDATE clients SET use_sheet_for_leads = $1 WHERE id = $2', [!!body.use_sheet_for_leads, params.id]);
+  }
+
+  // GHL bookings + leads-source picker.
+  if (body.ghl_token !== undefined) {
+    const t = String(body.ghl_token).trim();
+    // Empty string = "keep existing"; only update when a new token is provided.
+    if (t.length > 0) {
+      await query('UPDATE clients SET ghl_token_enc = $1 WHERE id = $2', [encrypt(t), params.id]);
+    }
+  }
+
+  if (body.ghl_token_clear === true) {
+    // Explicit clear: separate from "keep existing" empty-string semantics above.
+    await query(`UPDATE clients SET ghl_token_enc = '' WHERE id = $1`, [params.id]);
+  }
+
+  if (body.ghl_location_id !== undefined) {
+    await query('UPDATE clients SET ghl_location_id = $1 WHERE id = $2', [String(body.ghl_location_id).trim(), params.id]);
+  }
+
+  if (body.leads_source !== undefined) {
+    const v = String(body.leads_source).trim();
+    if (!VALID_LEADS_SOURCES.has(v)) {
+      return NextResponse.json({ error: 'leads_source must be one of: meta, sheet, ghl' }, { status: 400 });
+    }
+    // Backward-compat for one release: also flip the boolean so any reader
+    // that hasn't been migrated still sees the right value.
+    await query('UPDATE clients SET leads_source = $1, use_sheet_for_leads = $2 WHERE id = $3', [v, v === 'sheet', params.id]);
+  }
+
+  if (body.show_bookings !== undefined) {
+    await query('UPDATE clients SET show_bookings = $1 WHERE id = $2', [!!body.show_bookings, params.id]);
+  }
+
+  if (body.show_book_rate !== undefined) {
+    await query('UPDATE clients SET show_book_rate = $1 WHERE id = $2', [!!body.show_book_rate, params.id]);
   }
 
   if (body.password !== undefined) {

@@ -19,6 +19,10 @@ interface ClientRow {
   sheet_tab: string;
   google_sheet_tab: string;
   use_sheet_for_leads: boolean;
+  leads_source: 'meta' | 'sheet' | 'ghl';
+  show_bookings: boolean;
+  show_book_rate: boolean;
+  has_ghl_token: boolean;
 }
 
 export default async function DashboardPage() {
@@ -50,13 +54,26 @@ export default async function DashboardPage() {
   void decrypt(connections[0].token_enc);
 
   const [client] = await query<ClientRow>(
-    `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account, c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads
+    `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
+            c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
+            c.leads_source, c.show_bookings, c.show_book_rate,
+            (length(c.ghl_token_enc) > 0) AS has_ghl_token
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
      LIMIT 1`,
     [session.user.id]
   );
+
+  // Server-side resolver: collapse "wants source X but it's not configured"
+  // into a usable source. Order: ghl → sheet → meta. The dashboard reads the
+  // resolved source as-is and never has to second-guess the admin's intent.
+  const requestedSource = client?.leads_source ?? 'meta';
+  const resolvedLeadsSource: 'meta' | 'sheet' | 'ghl' =
+    requestedSource === 'ghl' && client?.has_ghl_token ? 'ghl' :
+    requestedSource === 'sheet' && client?.sheet_tab ? 'sheet' :
+    requestedSource === 'ghl' && client?.sheet_tab ? 'sheet' :
+    'meta';
 
   // Union all accounts across BM connections; client scope (if any) intersects.
   const allAgencyAccountIds = Array.from(new Set(connections.flatMap(c => c.account_ids || [])));
@@ -74,7 +91,10 @@ export default async function DashboardPage() {
       platform="meta"
       hasGoogleAds={!!client?.google_sheet_tab}
       googleUrl="/dashboard/google"
-      useSheetForLeads={client?.use_sheet_for_leads ?? false}
+      useSheetForLeads={resolvedLeadsSource === 'sheet'}
+      leadsSource={resolvedLeadsSource}
+      showBookings={!!(client?.show_bookings && client?.has_ghl_token)}
+      showBookRate={!!(client?.show_bookings && client?.show_book_rate && client?.has_ghl_token)}
     />
   );
 }

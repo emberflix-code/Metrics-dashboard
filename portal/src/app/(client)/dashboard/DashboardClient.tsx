@@ -19,6 +19,9 @@ interface Props {
   metaUrl?: string;             // link target for "View Meta" switch (on /dashboard/google)
   googleUrl?: string;           // link target for "View Google Ads" switch (on /dashboard)
   useSheetForLeads?: boolean;   // when true, Meta dashboard KPI reads leads from sheet_tab
+  leadsSource?: 'meta' | 'sheet' | 'ghl';  // resolved server-side; drives Leads KPI source
+  showBookings?: boolean;       // when true (and GHL is configured), show the 7th Bookings card
+  showBookRate?: boolean;       // when true, the Bookings card also renders book rate as subtitle
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -49,6 +52,20 @@ let _useSheetForLeads = false;
 // fetchMetaCampaigns when _useSheetForLeads is on. Used to override t.results
 // and trend data for the current date range.
 let _sheetLeadsByDay: Record<string, number> | null = null;
+
+// GHL bookings integration. Source for the optional 7th "Bookings" KPI card
+// AND for the Leads card when _leadsSource === 'ghl'. Pattern mirrors the
+// sheet-leads state above — day-bucketed and campaign-id-bucketed for the
+// per-day chart and per-campaign table column respectively.
+//
+// Book Rate is derived at render time as bookings / leads, so we don't need
+// a separate cancellation track. The route still surfaces cancelled-contact
+// counts in its response for admin debugging.
+let _leadsSource: 'meta' | 'sheet' | 'ghl' = 'meta';
+let _showBookings = false;
+let _showBookRate = false;
+let _ghlBookingsByDay: Record<string, number> | null = null;
+let _ghlBookingsByCampaignId: Record<string, number> | null = null;
 
 // Creative breakdown state — one row per asset, populated by /api/meta/creatives
 interface CreativeRow {
@@ -392,17 +409,25 @@ function getSelectedTotals(data: any[]) {
 
 // ── renderCards ───────────────────────────────────────────────────────────────
 function renderCards(t: any, selCount=0) {
-  // Sheet override: when the admin has enabled use_sheet_for_leads for this
-  // client AND we have a fetched lead-by-day map, replace the Meta-attributed
-  // results with the sum of sheet leads inside the current date range.
-  if (_platform === 'meta' && _useSheetForLeads && _sheetLeadsByDay) {
+  // Leads-source override. The admin picks one of three sources via
+  // `leads_source`; we substitute t.results with the sum from that source
+  // over the current date range. Meta is the default (no override).
+  if (_platform === 'meta') {
     try {
       const { since, until } = getDateRange();
-      let sheetSum = 0;
-      for (const [day, leads] of Object.entries(_sheetLeadsByDay)) {
-        if (day >= since && day <= until) sheetSum += leads;
+      if (_leadsSource === 'sheet' && _sheetLeadsByDay) {
+        let sum = 0;
+        for (const [day, leads] of Object.entries(_sheetLeadsByDay)) {
+          if (day >= since && day <= until) sum += leads;
+        }
+        t = { ...t, results: sum };
+      } else if (_leadsSource === 'ghl' && _ghlBookingsByDay) {
+        let sum = 0;
+        for (const [day, count] of Object.entries(_ghlBookingsByDay)) {
+          if (day >= since && day <= until) sum += count;
+        }
+        t = { ...t, results: sum };
       }
-      t = { ...t, results: sheetSum };
     } catch { /* keep Meta value on any error */ }
   }
   _kpiResultsTotal = typeof t.results === 'number' ? t.results : null;
@@ -421,16 +446,48 @@ function renderCards(t: any, selCount=0) {
     const cls=good?(up?'delta-up-good':'delta-down-good'):(up?'delta-up-bad':'delta-down-bad');
     return `<span class="${cls} font-mono">${up?'↑':'↓'}${Math.abs(pct).toFixed(1)}%</span>`;
   }
-  const cards=[
-    {label:'Link Clicks', value:fmt(t.linkClicks),  icon:'mouse-pointer-click', color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
-    {label:'Impressions', value:fmt(t.impressions), icon:'eye',                 color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
-    {label:'Amount Spent',value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
-    {label:((_platform==='google'||(_useSheetForLeads&&_sheetLeadsByDay))?'Leads':'Results'), value:fmt(t.results), icon:'target', color:'amber', delta:makeDelta(t.results,_comparisonTotals?.results)},
-    {label:'CTR',         value:fmtPct(ctr),        icon:'mouse-pointer-click', color:'rose',    delta:makeDelta(ctr,compCtr)},
-    {label:'CPL',         value:fmtUsd(cpl),        icon:'receipt',             color:'violet',  delta:makeDelta(cpl,compCpl,true)},
+  // Leads label tracks source. Subtitle hints to the client when it differs
+  // from Meta so they don't wonder why the number doesn't match BM.
+  const leadsLabel = _platform === 'google' ? 'Leads'
+    : _leadsSource === 'ghl' && _ghlBookingsByDay ? 'Leads · from GHL'
+    : _leadsSource === 'sheet' && _sheetLeadsByDay ? 'Leads · from sheet'
+    : _useSheetForLeads && _sheetLeadsByDay ? 'Leads · from sheet'  // legacy boolean fallback
+    : 'Results';
+  // Admin-facing order: Amount Spent → Impressions → Link Clicks → CTR → CPL
+  // → Leads → Bookings. The Bookings card is appended only when the admin
+  // enabled show_bookings AND we have GHL data. When show_book_rate is also
+  // on, the Bookings card's `delta` slot renders the book rate (bookings /
+  // leads × 100) as a subtitle rather than a separate card.
+  const cards: { label: string; value: string; icon: string; color: string; delta: string }[] = [
+    {label:'Amount Spent', value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
+    {label:'Impressions',  value:fmt(t.impressions),icon:'eye',                  color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
+    {label:'Link Clicks',  value:fmt(t.linkClicks), icon:'mouse-pointer-click',  color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
+    {label:'CTR',          value:fmtPct(ctr),       icon:'mouse-pointer-click',  color:'rose',    delta:makeDelta(ctr,compCtr)},
+    {label:'CPL',          value:fmtUsd(cpl),       icon:'receipt',              color:'violet',  delta:makeDelta(cpl,compCpl,true)},
+    {label:leadsLabel,     value:fmt(t.results),    icon:'target',               color:'amber',   delta:makeDelta(t.results,_comparisonTotals?.results)},
   ];
-  const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20'};
-  const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400'};
+  if (_showBookings && _ghlBookingsByDay && _platform === 'meta') {
+    let bookingsSum = 0;
+    try {
+      const { since, until } = getDateRange();
+      for (const [day, count] of Object.entries(_ghlBookingsByDay)) {
+        if (day >= since && day <= until) bookingsSum += count;
+      }
+    } catch { /* leave at 0 */ }
+    let subtitle = '';
+    if (_showBookRate) {
+      const leadsForRate = typeof t.results === 'number' ? t.results : 0;
+      if (leadsForRate > 0) {
+        const rate = (bookingsSum / leadsForRate) * 100;
+        subtitle = `<span class="text-sky-300 font-mono text-[11px]">${rate.toFixed(0)}% book rate</span>`;
+      } else {
+        subtitle = '<span class="text-slate-500 text-[11px]">— book rate</span>';
+      }
+    }
+    cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:subtitle});
+  }
+  const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20'};
+  const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400',teal:'text-teal-400'};
   const selBadge = selCount>0 ? `<span class="text-[10px] text-blue-400 font-normal normal-case">${selCount} selected</span>` : '';
   const grid = document.getElementById('cards-grid');
   if (grid) grid.innerHTML = cards.map((c,i)=>`
@@ -481,6 +538,8 @@ function renderTable() {
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('impressions')">Impressions${arrow('impressions')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('cpm')">CPM${arrow('cpm')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('results')">Results${arrow('results')}</th>
+    ${(_showBookings && _ghlBookingsByCampaignId) ? `<th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('bookings')">Bookings${arrow('bookings')}</th>` : ''}
+    ${(_showBookings && _showBookRate && _ghlBookingsByCampaignId) ? `<th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('bookRate')">Book Rate${arrow('bookRate')}</th>` : ''}
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('spent')">Spent (USD)${arrow('spent')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('ctr')">CTR${arrow('ctr')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('linkClicks')">Link Clicks${arrow('linkClicks')}</th>
@@ -509,6 +568,8 @@ function renderTable() {
       <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.impressions)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmtUsd(c.cpm)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.results)}</td>
+      ${(_showBookings && _ghlBookingsByCampaignId) ? `<td class="text-right px-4 py-3 font-mono text-xs text-teal-300">${typeof c.bookings === 'number' ? fmt(c.bookings) : '<span class="text-slate-600">—</span>'}</td>` : ''}
+      ${(_showBookings && _showBookRate && _ghlBookingsByCampaignId) ? `<td class="text-right px-4 py-3 font-mono text-xs text-sky-300">${typeof c.bookRate === 'number' ? `${c.bookRate.toFixed(0)}%` : '<span class="text-slate-600">—</span>'}</td>` : ''}
       <td class="text-right px-4 py-3 font-mono text-xs text-emerald-400">${fmtUsd(c.spent)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmtPct(c.ctr)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.linkClicks)}</td>
@@ -529,6 +590,14 @@ function renderTable() {
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.impressions)}</td>
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmtUsd(tCpm)}</td>
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.results)}</td>
+    ${(_showBookings && _ghlBookingsByCampaignId) ? (() => {
+      const bookedTotal = data.reduce((s:number, c:any) => s + (typeof c.bookings === 'number' ? c.bookings : 0), 0);
+      // Book Rate = bookings / leads × 100 (subtotal level).
+      const rate = totals.results > 0 ? (bookedTotal / totals.results) * 100 : null;
+      const bookingsCell = `<td class="text-right px-4 py-3 font-mono text-xs text-teal-300">${fmt(bookedTotal)}</td>`;
+      const rateCell = _showBookRate ? `<td class="text-right px-4 py-3 font-mono text-xs text-sky-300">${rate !== null ? `${rate.toFixed(0)}%` : '<span class="text-slate-600">—</span>'}</td>` : '';
+      return bookingsCell + rateCell;
+    })() : ''}
     <td class="text-right px-4 py-3 font-mono text-xs text-emerald-400">${fmtUsd(totals.spent)}</td>
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmtPct(tCtr)}</td>
     <td class="text-right px-4 py-3 font-mono text-xs text-white">${fmt(totals.linkClicks)}</td>
@@ -574,6 +643,12 @@ function renderAnalytics() {
       {label:'Spend ($)',data:_trendData.map(d=>d.spend),borderColor:'#34d399',backgroundColor:'rgba(52,211,153,0.10)',yAxisID:'ySpend',tension:0.35,pointRadius:3,fill:true},
       {label:'Results',data:_trendData.map(d=>d.results),borderColor:'#f59e0b',backgroundColor:'rgba(245,158,11,0.10)',yAxisID:'yResults',tension:0.35,pointRadius:3,fill:true},
     ];
+    // 3rd dataset: GHL bookings. Shares the yResults axis (both are integer
+    // daily counts on similar scales). Only drawn when the admin enabled
+    // show_bookings AND the fetch returned data.
+    if (_showBookings && _ghlBookingsByDay) {
+      ds.push({label:'Bookings',data:_trendData.map(d=>_ghlBookingsByDay?.[d.date] ?? 0),borderColor:'#14b8a6',backgroundColor:'rgba(20,184,166,0.08)',yAxisID:'yResults',tension:0.35,pointRadius:3,fill:false});
+    }
     if (hasComp) {
       ds.push({label:'Spend (prev)',data:compTrendAligned.map(c=>c?.spend??null),borderColor:'rgba(52,211,153,0.35)',backgroundColor:'transparent',yAxisID:'ySpend',tension:0.35,pointRadius:2,fill:false,borderDash:[5,4],spanGaps:true});
       ds.push({label:'Results (prev)',data:compTrendAligned.map(c=>c?.results??null),borderColor:'rgba(245,158,11,0.35)',backgroundColor:'transparent',yAxisID:'yResults',tension:0.35,pointRadius:2,fill:false,borderDash:[5,4],spanGaps:true});
@@ -1036,6 +1111,44 @@ async function fetchSheetLeadsForMeta(): Promise<void> {
   }
 }
 
+// GHL bookings fetch — mirrors fetchSheetLeadsForMeta. Fires whenever the
+// client either uses GHL as the Leads source OR has the Bookings KPI card
+// enabled. Buckets rows by day (for KPI + trend chart) and by Meta campaign
+// id (for the per-campaign table column).
+async function fetchGhlBookingsForClient(since: string, until: string): Promise<void> {
+  // Skip the network call entirely when neither feature needs it.
+  if (_leadsSource !== 'ghl' && !_showBookings) {
+    _ghlBookingsByDay = null;
+    _ghlBookingsByCampaignId = null;
+    return;
+  }
+  try {
+    const url = `/api/ghl/bookings?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+    const res = await fetch(url);
+    const json = await res.json() as {
+      rows?: { campaignId: string; day: string; contactId: string; attribution: 'first' | 'last'; cancelled: boolean }[];
+      enabled?: boolean;
+      error?: string;
+    };
+    if (!json.enabled || !json.rows) {
+      _ghlBookingsByDay = null;
+      _ghlBookingsByCampaignId = null;
+      return;
+    }
+    const byDay: Record<string, number> = {};
+    const byCampaign: Record<string, number> = {};
+    for (const r of json.rows) {
+      byDay[r.day] = (byDay[r.day] || 0) + 1;
+      if (r.campaignId) byCampaign[r.campaignId] = (byCampaign[r.campaignId] || 0) + 1;
+    }
+    _ghlBookingsByDay = byDay;
+    _ghlBookingsByCampaignId = byCampaign;
+  } catch {
+    _ghlBookingsByDay = null;
+    _ghlBookingsByCampaignId = null;
+  }
+}
+
 // ── fetchMetaCampaigns ────────────────────────────────────────────────────────
 async function fetchMetaCampaigns() {
   showLoadingBar();
@@ -1051,6 +1164,10 @@ async function fetchMetaCampaigns() {
     const selectedAccount = (document.getElementById('ad-account') as HTMLSelectElement)?.value || 'all';
     const {since,until} = getDateRange();
     const timeRange = JSON.stringify({since,until});
+
+    // Fire the GHL bookings fetch in parallel too. Needs the resolved date
+    // range so it can't piggyback on the sheet promise's earlier call site.
+    const ghlPromise = fetchGhlBookingsForClient(since, until);
 
     if (_platform === 'google') {
       await loadGoogleSheetData(since, until);
@@ -1105,6 +1222,21 @@ async function fetchMetaCampaigns() {
     allMapped = results.flat();
 
     if (allMapped.length===0) { _campaigns.splice(0,_campaigns.length); renderTable(); showNotification('No campaign data found for this date range','success'); return; }
+    // Join GHL booking counts by Meta campaign_id when the feature is enabled.
+    // Null marks "no GHL data" → table renders em-dashes; a real 0 means the
+    // campaign is in both systems but has no bookings this period.
+    // Book Rate = bookings / results (leads) × 100, per campaign.
+    if (_showBookings && _ghlBookingsByCampaignId) {
+      for (const row of allMapped) {
+        const cid = row.campaignId;
+        const booked = (cid && _ghlBookingsByCampaignId[cid] != null) ? _ghlBookingsByCampaignId[cid] : null;
+        row.bookings = booked;
+        // Need leads > 0 to compute a meaningful rate. Otherwise null → em-dash.
+        row.bookRate = booked != null && typeof row.results === 'number' && row.results > 0
+          ? (booked / row.results) * 100
+          : null;
+      }
+    }
     _campaigns.splice(0,_campaigns.length,...allMapped);
 
     localStorage.setItem('meta_delivery',(document.getElementById('delivery-filter') as HTMLSelectElement)?.value||'all');
@@ -1224,9 +1356,11 @@ async function fetchMetaCampaigns() {
       }
     }
 
-    // Make sure the sheet leads (if enabled) are loaded before the first KPI
-    // render so the override takes effect on the initial paint, not a flash.
+    // Make sure the sheet leads + GHL bookings (if enabled) are loaded before
+    // the first KPI render so any source overrides take effect on the initial
+    // paint, not a flash.
     await sheetPromise;
+    await ghlPromise;
 
     // If the sheet override is on, also rewrite the comparison series so
     // delta arrows and the comparison trend reflect sheet leads, not Meta's.
@@ -1701,10 +1835,13 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
+  _leadsSource = leadsSource;
+  _showBookings = showBookings;
+  _showBookRate = showBookRate;
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
@@ -1889,7 +2026,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
 
         {/* Summary Cards */}
         <div className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-3">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3" id="cards-grid"></div>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 xl:grid-cols-7 gap-3" id="cards-grid"></div>
         </div>
 
         {/* Table */}
