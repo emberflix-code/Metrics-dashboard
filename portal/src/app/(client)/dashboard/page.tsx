@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
 import DashboardClient from './DashboardClient';
+import ImpersonationBanner from '@/components/ImpersonationBanner';
 
 interface BmConnectionRow {
   token_enc: string;
@@ -82,19 +83,29 @@ export default async function DashboardPage() {
       ? client.ad_account_ids
       : allAgencyAccountIds;
 
+  const impersonatedBy = session.user.impersonatedBy;
+
   return (
-    <DashboardClient
-      accountIds={accountIds}
-      clientName={client?.name ?? session.user.email ?? 'Client'}
-      campaignFilter={client?.campaign_filter ?? ''}
-      showAccount={client?.show_account ?? false}
-      platform="meta"
-      hasGoogleAds={!!client?.google_sheet_tab}
-      googleUrl="/dashboard/google"
-      useSheetForLeads={resolvedLeadsSource === 'sheet'}
-      leadsSource={resolvedLeadsSource}
-      showBookings={!!(client?.show_bookings && client?.has_ghl_token)}
-      showBookRate={!!(client?.show_bookings && client?.show_book_rate && client?.has_ghl_token)}
-    />
+    <>
+      {impersonatedBy && (
+        <ImpersonationBanner
+          adminEmail={impersonatedBy.email}
+          clientName={client?.name ?? session.user.email ?? 'Client'}
+        />
+      )}
+      <DashboardClient
+        accountIds={accountIds}
+        clientName={client?.name ?? session.user.email ?? 'Client'}
+        campaignFilter={client?.campaign_filter ?? ''}
+        showAccount={client?.show_account ?? false}
+        platform="meta"
+        hasGoogleAds={!!client?.google_sheet_tab}
+        googleUrl="/dashboard/google"
+        useSheetForLeads={resolvedLeadsSource === 'sheet'}
+        leadsSource={resolvedLeadsSource}
+        showBookings={!!(client?.show_bookings && client?.has_ghl_token)}
+        showBookRate={!!(client?.show_bookings && client?.show_book_rate && client?.has_ghl_token)}
+      />
+    </>
   );
 }

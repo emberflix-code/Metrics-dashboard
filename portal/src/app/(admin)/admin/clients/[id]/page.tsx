@@ -9,6 +9,7 @@ import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
+import ImpersonateButton from './ImpersonateButton';
 
 interface ClientDetail {
   id: string;
@@ -85,7 +86,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
 
         {/* Client info */}
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <div className="flex items-start justify-between">
+          <div className="flex items-start justify-between mb-4">
             <div>
               <h1 className="text-lg font-bold text-white">{client.name}</h1>
               <p className="text-sm text-slate-400 mt-0.5">{client.email}</p>
@@ -94,6 +95,10 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
               Created {new Date(client.created_at).toLocaleDateString()}
             </span>
           </div>
+          <ImpersonateButton clientId={client.id} clientName={client.name} />
+          <p className="mt-2 text-xs text-slate-500">
+            Opens this client&apos;s dashboard as if you were signed in as them. A banner at the top lets you return to admin.
+          </p>
         </div>
 
         {/* Ad Account Assignment */}

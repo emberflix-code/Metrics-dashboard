@@ -59,6 +59,9 @@ export const authOptions: NextAuthOptions = {
       session.user.id = token.id;
       session.user.role = token.role;
       session.user.clientId = token.clientId;
+      // Preserved when the token was minted by the impersonation endpoint —
+      // the client dashboard renders a banner + return-to-admin button off it.
+      session.user.impersonatedBy = token.impersonatedBy ?? null;
       return session;
     },
   },
