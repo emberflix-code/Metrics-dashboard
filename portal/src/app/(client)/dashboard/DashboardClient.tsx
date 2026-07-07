@@ -322,6 +322,32 @@ function humanizeMetaError(e: MetaApiError): string {
   return parts.join(' ') || 'Meta API error';
 }
 
+// Meta occasionally load-sheds parallel requests with code:1 / code:2 (their
+// generic "API Unknown"). Retry once after a short backoff — clears most
+// transient failures without user-visible degradation.
+async function fetchMetaJsonWithRetry(url: string): Promise<any> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const res = await fetch(url);
+    const json = await res.json();
+    const code = json?.error?.code;
+    const transient = code === 1 || code === 2;
+    if (!transient || attempt === 1) return json;
+    await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+  }
+}
+
+// Run async tasks with a bounded in-flight concurrency to keep Meta happy.
+async function runPooled<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+  let idx = 0;
+  const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (idx < items.length) {
+      const my = idx++;
+      await worker(items[my]);
+    }
+  });
+  await Promise.all(runners);
+}
+
 function showLoadingBar() {
   document.getElementById('loading-bar')?.classList.add('active');
   // Centered overlay only on the very first load — subsequent refreshes
@@ -1209,14 +1235,13 @@ async function fetchMetaCampaigns() {
       for (const c of (statusJson.data||[])) statusMap[c.id]=c.effective_status;
 
       const byEntity: Record<string, any> = {};
-      await Promise.all(mainWindows.map(async (w) => {
+      await runPooled(mainWindows, 4, async (w) => {
         const chunkRange = JSON.stringify({ since: w.s, until: w.u });
         let url: string|null = `/api/meta/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(chunkRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
         let isFirstPage = true;
         while (url) {
           const fetchUrl: string = isFirstPage ? url : `/api/meta/next-page?url=${encodeURIComponent(url)}`;
-          const response = await fetch(fetchUrl);
-          const json = await response.json();
+          const json = await fetchMetaJsonWithRetry(fetchUrl);
           if (json.error) { throw new Error(humanizeMetaError(json.error)); }
           for (const item of (json.data||[])) {
             const am: Record<string,number>={};
@@ -1254,7 +1279,7 @@ async function fetchMetaCampaigns() {
           url = (json.paging&&json.paging.next)||null;
           isFirstPage = false;
         }
-      }));
+      });
       return Object.values(byEntity);
     }
 
@@ -1307,35 +1332,31 @@ async function fetchMetaCampaigns() {
         }
         const byDate: Record<string,any>={};
         let trendError: MetaApiError | null = null;
-        const tasks: Promise<void>[] = [];
-        for (const acc of accountIds) {
-          for (const w of windows) {
-            tasks.push((async () => {
-              let tUrl: string|null = `/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
-              let tFirst=true;
-              while (tUrl) {
-                const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
-                const tRes=await fetch(tFetch); const tJson=await tRes.json();
-                if (tJson.error) { if (!trendError) trendError = tJson.error; break; }
-                if (!tJson.data) break;
-                for (const d of tJson.data) {
-                  if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
-                  const am: Record<string,number>={};
-                  for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
-                  const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
-                  const results=pL>0?pL:fL>0?fL:(am['lead']||0);
-                  const spend=Math.round(parseFloat(d.spend||0)*100)/100;
-                  const dt=d.date_start;
-                  if (!byDate[dt]) byDate[dt]={date:dt,spend:0,results:0};
-                  byDate[dt].spend=Math.round((byDate[dt].spend+spend)*100)/100;
-                  byDate[dt].results+=results;
-                }
-                tUrl=tJson.paging?.next||null;
-              }
-            })());
+        const trendUnits: { acc: string; w: { s: string; u: string } }[] = [];
+        for (const acc of accountIds) for (const w of windows) trendUnits.push({ acc, w });
+        await runPooled(trendUnits, 4, async ({ acc, w }) => {
+          let tUrl: string|null = `/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+          let tFirst=true;
+          while (tUrl) {
+            const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
+            const tJson = await fetchMetaJsonWithRetry(tFetch);
+            if (tJson.error) { if (!trendError) trendError = tJson.error; break; }
+            if (!tJson.data) break;
+            for (const d of tJson.data) {
+              if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
+              const am: Record<string,number>={};
+              for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
+              const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+              const results=pL>0?pL:fL>0?fL:(am['lead']||0);
+              const spend=Math.round(parseFloat(d.spend||0)*100)/100;
+              const dt=d.date_start;
+              if (!byDate[dt]) byDate[dt]={date:dt,spend:0,results:0};
+              byDate[dt].spend=Math.round((byDate[dt].spend+spend)*100)/100;
+              byDate[dt].results+=results;
+            }
+            tUrl=tJson.paging?.next||null;
           }
-        }
-        await Promise.all(tasks);
+        });
         _trendData=Object.values(byDate).sort((a:any,b:any)=>a.date.localeCompare(b.date));
         // Non-fatal: if the trend fetch hit Meta's row-limit (or any other
         // error), tell the client. KPI cards / table still load — only the
@@ -1399,32 +1420,28 @@ async function fetchMetaCampaigns() {
               }
             }
             const cByDate: Record<string,any>={};
-            const cTasks: Promise<void>[] = [];
-            for (const acc of accountIds) {
-              for (const w of cWindows) {
-                cTasks.push((async () => {
-                  let ctUrl: string|null=`/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
-                  let ctFirst=true;
-                  while (ctUrl) {
-                    const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;
-                    const ctRes=await fetch(ctFetch); const ctJson=await ctRes.json();
-                    if (ctJson.error||!ctJson.data) break;
-                    for (const d of ctJson.data) {
-                      if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
-                      const am: Record<string,number>={};
-                      for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
-                      const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
-                      const spend=Math.round(parseFloat(d.spend||0)*100)/100; const dt=d.date_start;
-                      if (!cByDate[dt]) cByDate[dt]={date:dt,spend:0,results:0};
-                      cByDate[dt].spend=Math.round((cByDate[dt].spend+spend)*100)/100;
-                      cByDate[dt].results+=(pL>0?pL:fL>0?fL:(am['lead']||0));
-                    }
-                    ctUrl=ctJson.paging?.next||null;
-                  }
-                })());
+            const cUnits: { acc: string; w: { s: string; u: string } }[] = [];
+            for (const acc of accountIds) for (const w of cWindows) cUnits.push({ acc, w });
+            await runPooled(cUnits, 4, async ({ acc, w }) => {
+              let ctUrl: string|null=`/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+              let ctFirst=true;
+              while (ctUrl) {
+                const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;
+                const ctJson = await fetchMetaJsonWithRetry(ctFetch);
+                if (ctJson.error||!ctJson.data) break;
+                for (const d of ctJson.data) {
+                  if (filteredCampaignIds.size>0&&!filteredCampaignIds.has(d.campaign_id)) continue;
+                  const am: Record<string,number>={};
+                  for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
+                  const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+                  const spend=Math.round(parseFloat(d.spend||0)*100)/100; const dt=d.date_start;
+                  if (!cByDate[dt]) cByDate[dt]={date:dt,spend:0,results:0};
+                  cByDate[dt].spend=Math.round((cByDate[dt].spend+spend)*100)/100;
+                  cByDate[dt].results+=(pL>0?pL:fL>0?fL:(am['lead']||0));
+                }
+                ctUrl=ctJson.paging?.next||null;
               }
-            }
-            await Promise.all(cTasks);
+            });
             _comparisonTrendData=Object.values(cByDate).sort((a:any,b:any)=>a.date.localeCompare(b.date));
           }
         } catch {}
