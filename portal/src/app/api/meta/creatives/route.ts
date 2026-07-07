@@ -102,15 +102,24 @@ async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
   let next: string | null = initial.includes('access_token=') ? initial : `${initial}&access_token=${token}`;
   let safety = 25;
   while (next && safety-- > 0) {
-    const res: Response = await fetch(next);
-    const json: { data?: T[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_msg?: string }; paging?: { next?: string } } = await res.json();
-    if (json.error) {
+    let json: { data?: T[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_msg?: string; error_user_title?: string }; paging?: { next?: string } } | undefined;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const res: Response = await fetch(next);
+      json = await res.json();
+      const err = json?.error;
+      if (!err) break;
+      const title = (err.error_user_title || '').toLowerCase();
+      const transient = err.code === 1 || err.code === 2 || title.includes('unknown error') || title.includes('temporarily');
+      if (!transient || attempt === 2) break;
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+    if (json?.error) {
       const scrubbed = next.replace(/access_token=[^&]+/, 'access_token=REDACTED');
       console.error('[CREATIVES-META-ERR]', JSON.stringify({ url: scrubbed, error: json.error }));
       throw new Error(json.error.message || 'Meta API error');
     }
-    if (Array.isArray(json.data)) out.push(...json.data);
-    next = json.paging?.next || null;
+    if (Array.isArray(json?.data)) out.push(...json!.data!);
+    next = json?.paging?.next || null;
   }
   return out;
 }
@@ -128,16 +137,21 @@ export async function GET(req: NextRequest) {
     const timeRange = sp.get('time_range') || '{}';
     const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
 
-    // Include DELETED/ARCHIVED so per-ad totals reconcile with KPI cards.
-    const ALL_AD_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
+    // NOTE: we deliberately do NOT pass an ad.effective_status filter to
+    // /insights. Meta's insights endpoint naturally returns only ads with
+    // delivery in the window; adding a 12-status filter forces the API to
+    // enumerate every historic ad on the account first, blowing up the row
+    // count and tripping code:1 "reduce the amount of data" on wide-range +
+    // high-ad-count accounts (e.g. AF Regional Omega). Statuses are attached
+    // later from the /ads fetch which is separately paginated.
 
     // 1) Insights at ad level — the metrics we need.
     // Wide date ranges on high-ad-count accounts trip Meta's per-request row
-    // cap (code:100 subcode:1487534) even at level=ad without breakdowns.
-    // Chunk into 7-day windows and sum metrics per ad_id across chunks.
+    // cap (code:1 "reduce the amount of data") even at level=ad without
+    // breakdowns. Chunk into 3-day windows and sum metrics per ad_id.
     let parsedRange: { since?: string; until?: string } = {};
     try { parsedRange = JSON.parse(timeRange); } catch {}
-    const CHUNK_DAYS = 7;
+    const CHUNK_DAYS = 3;
     const chunks: { since: string; until: string }[] = [];
     if (parsedRange.since && parsedRange.until) {
       const startMs = Date.parse(parsedRange.since + 'T00:00:00Z');
@@ -161,24 +175,29 @@ export async function GET(req: NextRequest) {
       u.searchParams.set('time_range', chunkRange);
       u.searchParams.set('limit', '500');
       u.searchParams.set('action_attribution_windows', attribution);
-      u.searchParams.set('filtering', JSON.stringify([
-        { field: 'ad.effective_status', operator: 'IN', value: ALL_AD_STATUSES },
-        ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
-      ]));
+      if (campaignFilter) {
+        u.searchParams.set('filtering', JSON.stringify([
+          { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
+        ]));
+      }
       return u;
     };
 
     // 2) Ads + their creative metadata (one call thanks to field expansion).
+    // Similarly slim: only ACTIVE/PAUSED so we don't drag every historic ad.
+    // Any ad that appears in insights but not in this /ads response is fine —
+    // it just gets rendered without a thumbnail (still visible in the grid).
     const adsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
     adsUrl.searchParams.set(
       'fields',
       'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}'
     );
     adsUrl.searchParams.set('limit', '200');
-    adsUrl.searchParams.set('filtering', JSON.stringify([
-      { field: 'effective_status', operator: 'IN', value: ALL_AD_STATUSES },
-      ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
-    ]));
+    const adsFilter: { field: string; operator: string; value: string | string[] }[] = [
+      { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED'] },
+    ];
+    if (campaignFilter) adsFilter.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
+    adsUrl.searchParams.set('filtering', JSON.stringify(adsFilter));
 
     // Fetch insights chunks in parallel; if any chunk fails, keep going with
     // the rest rather than throwing the whole request away.

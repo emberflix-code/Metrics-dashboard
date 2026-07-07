@@ -139,7 +139,7 @@ export async function GET(req: NextRequest) {
     try { parsedRange = JSON.parse(timeRange); } catch {}
     const rangeSince = parsedRange.since;
     const rangeUntil = parsedRange.until;
-    const CHUNK_DAYS = 7;
+    const CHUNK_DAYS = 3;
     const chunks: { since: string; until: string }[] = [];
     if (rangeSince && rangeUntil) {
       const startMs = Date.parse(rangeSince + 'T00:00:00Z');
@@ -170,15 +170,24 @@ export async function GET(req: NextRequest) {
       let next: string | null = url.toString();
       let safety = 25;
       while (next && safety-- > 0) {
-        const res = await fetch(next);
-        const json = await res.json() as { data?: BreakdownRow[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_msg?: string }; paging?: { next?: string } };
-        if (json.error) {
+        let json: { data?: BreakdownRow[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_msg?: string; error_user_title?: string }; paging?: { next?: string } } | undefined;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const res = await fetch(next);
+          json = await res.json();
+          const err = json?.error;
+          if (!err) break;
+          const title = (err.error_user_title || '').toLowerCase();
+          const transient = err.code === 1 || err.code === 2 || title.includes('unknown error') || title.includes('temporarily');
+          if (!transient || attempt === 2) break;
+          await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+        }
+        if (json?.error) {
           const scrubbed = next.replace(/access_token=[^&]+/, 'access_token=REDACTED');
           console.error('[BREAKDOWN-META-ERR]', JSON.stringify({ breakdown, since, until, url: scrubbed, error: json.error }));
           throw new Error(json.error.message || 'Meta breakdown error');
         }
-        if (Array.isArray(json.data)) out.push(...json.data);
-        next = json.paging?.next || null;
+        if (Array.isArray(json?.data)) out.push(...json!.data!);
+        next = json?.paging?.next || null;
       }
       return out;
     };
