@@ -103,8 +103,12 @@ async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
   let safety = 25;
   while (next && safety-- > 0) {
     const res: Response = await fetch(next);
-    const json: { data?: T[]; error?: { message?: string }; paging?: { next?: string } } = await res.json();
-    if (json.error) throw new Error(json.error.message || 'Meta API error');
+    const json: { data?: T[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_msg?: string }; paging?: { next?: string } } = await res.json();
+    if (json.error) {
+      const scrubbed = next.replace(/access_token=[^&]+/, 'access_token=REDACTED');
+      console.error('[CREATIVES-META-ERR]', JSON.stringify({ url: scrubbed, error: json.error }));
+      throw new Error(json.error.message || 'Meta API error');
+    }
     if (Array.isArray(json.data)) out.push(...json.data);
     next = json.paging?.next || null;
   }

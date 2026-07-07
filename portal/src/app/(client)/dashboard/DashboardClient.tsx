@@ -322,17 +322,19 @@ function humanizeMetaError(e: MetaApiError): string {
   return parts.join(' ') || 'Meta API error';
 }
 
-// Meta occasionally load-sheds parallel requests with code:1 / code:2 (their
-// generic "API Unknown"). Retry once after a short backoff — clears most
-// transient failures without user-visible degradation.
+// Meta load-sheds parallel requests with code:1/2 or an "Unknown error occurred"
+// title. Retry twice with backoff — clears most transient failures.
 async function fetchMetaJsonWithRetry(url: string): Promise<any> {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 3; attempt++) {
     const res = await fetch(url);
     const json = await res.json();
-    const code = json?.error?.code;
-    const transient = code === 1 || code === 2;
-    if (!transient || attempt === 1) return json;
-    await new Promise(r => setTimeout(r, 800 + Math.random() * 400));
+    const err = json?.error;
+    if (!err) return json;
+    const code = err.code;
+    const title = (err.error_user_title || '').toLowerCase();
+    const transient = code === 1 || code === 2 || title.includes('unknown error') || title.includes('temporarily');
+    if (!transient || attempt === 2) return json;
+    await new Promise(r => setTimeout(r, (800 * (attempt + 1)) + Math.random() * 400));
   }
 }
 
