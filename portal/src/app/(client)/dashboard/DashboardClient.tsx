@@ -1068,17 +1068,25 @@ async function fetchStaticAssets() {
       ? Array.from(select?.options || []).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i,''))
       : [selectedAccount.replace(/^act_/i,'')];
 
+    let firstStaticError: string | null = null;
     const responses = await Promise.all(accountIds.map(async acc => {
       const url = `/api/meta/creatives?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
       try {
         const res = await fetch(url);
         const json = await res.json();
-        if (json.error) return null;
+        if (json.error) {
+          if (!firstStaticError) firstStaticError = json.error.message || 'Creatives fetch failed';
+          return null;
+        }
         return json as { data: CreativeRow[] };
-      } catch {
+      } catch (e) {
+        if (!firstStaticError) firstStaticError = e instanceof Error ? e.message : 'Creatives fetch failed';
         return null;
       }
     }));
+    if (firstStaticError) {
+      showNotification('Static ads partial load: ' + firstStaticError, 'error');
+    }
 
     // Dedup at the asset-key level, not the ad-ID level. Meta returns the
     // same ad twice when it has a video: once in the image_asset DCO breakdown

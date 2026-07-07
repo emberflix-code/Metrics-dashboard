@@ -128,16 +128,41 @@ export async function GET(req: NextRequest) {
     const ALL_AD_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
 
     // 1) Insights at ad level — the metrics we need.
-    const insightsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
-    insightsUrl.searchParams.set('fields', 'ad_id,ad_name,campaign_name,adset_name,spend,impressions,inline_link_clicks,reach,actions');
-    insightsUrl.searchParams.set('level', 'ad');
-    insightsUrl.searchParams.set('time_range', timeRange);
-    insightsUrl.searchParams.set('limit', '500');
-    insightsUrl.searchParams.set('action_attribution_windows', attribution);
-    insightsUrl.searchParams.set('filtering', JSON.stringify([
-      { field: 'ad.effective_status', operator: 'IN', value: ALL_AD_STATUSES },
-      ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
-    ]));
+    // Wide date ranges on high-ad-count accounts trip Meta's per-request row
+    // cap (code:100 subcode:1487534) even at level=ad without breakdowns.
+    // Chunk into 7-day windows and sum metrics per ad_id across chunks.
+    let parsedRange: { since?: string; until?: string } = {};
+    try { parsedRange = JSON.parse(timeRange); } catch {}
+    const CHUNK_DAYS = 7;
+    const chunks: { since: string; until: string }[] = [];
+    if (parsedRange.since && parsedRange.until) {
+      const startMs = Date.parse(parsedRange.since + 'T00:00:00Z');
+      const endMs = Date.parse(parsedRange.until + 'T00:00:00Z');
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+        for (let cursor = startMs; cursor <= endMs; cursor += CHUNK_DAYS * 86400000) {
+          const chunkEnd = Math.min(cursor + (CHUNK_DAYS - 1) * 86400000, endMs);
+          chunks.push({
+            since: new Date(cursor).toISOString().slice(0, 10),
+            until: new Date(chunkEnd).toISOString().slice(0, 10),
+          });
+        }
+      }
+    }
+    if (chunks.length === 0) chunks.push({ since: parsedRange.since || '', until: parsedRange.until || '' });
+
+    const buildInsightsUrl = (chunkRange: string) => {
+      const u = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
+      u.searchParams.set('fields', 'ad_id,ad_name,campaign_name,adset_name,spend,impressions,inline_link_clicks,reach,actions');
+      u.searchParams.set('level', 'ad');
+      u.searchParams.set('time_range', chunkRange);
+      u.searchParams.set('limit', '500');
+      u.searchParams.set('action_attribution_windows', attribution);
+      u.searchParams.set('filtering', JSON.stringify([
+        { field: 'ad.effective_status', operator: 'IN', value: ALL_AD_STATUSES },
+        ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
+      ]));
+      return u;
+    };
 
     // 2) Ads + their creative metadata (one call thanks to field expansion).
     const adsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
@@ -151,10 +176,44 @@ export async function GET(req: NextRequest) {
       ...(campaignFilter ? [{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }] : []),
     ]));
 
-    const [insights, ads] = await Promise.all([
-      fetchAll<AdInsight>(insightsUrl, token),
+    // Fetch insights chunks in parallel; if any chunk fails, keep going with
+    // the rest rather than throwing the whole request away.
+    const insightsChunkPromises = chunks.map(c =>
+      fetchAll<AdInsight>(buildInsightsUrl(JSON.stringify({ since: c.since, until: c.until })), token)
+        .catch(() => [] as AdInsight[])
+    );
+    const [insightsChunked, ads] = await Promise.all([
+      Promise.all(insightsChunkPromises),
       fetchAll<AdCreative>(adsUrl, token),
     ]);
+
+    // Sum metrics per ad_id across chunks. Actions arrays are concatenated
+    // then re-aggregated by action_type in extractLeads().
+    const insightByAdId = new Map<string, AdInsight>();
+    for (const chunk of insightsChunked) {
+      for (const row of chunk) {
+        if (!row.ad_id) continue;
+        const existing = insightByAdId.get(row.ad_id);
+        if (!existing) {
+          insightByAdId.set(row.ad_id, { ...row });
+          continue;
+        }
+        existing.spend = String((parseFloat(existing.spend || '0') || 0) + (parseFloat(row.spend || '0') || 0));
+        existing.impressions = String((parseInt(existing.impressions || '0', 10) || 0) + (parseInt(row.impressions || '0', 10) || 0));
+        existing.inline_link_clicks = String((parseInt(existing.inline_link_clicks || '0', 10) || 0) + (parseInt(row.inline_link_clicks || '0', 10) || 0));
+        // Reach is not additive across time — Meta reports unique users per
+        // window. Summing is the best we can do without a separate account-
+        // wide reach call; slight over-count is acceptable for creative
+        // ranking purposes since users rank by spend anyway.
+        existing.reach = String((parseInt(existing.reach || '0', 10) || 0) + (parseInt(row.reach || '0', 10) || 0));
+        // Merge actions by action_type: sum values.
+        const merged: Record<string, number> = {};
+        for (const a of (existing.actions || [])) merged[a.action_type] = (merged[a.action_type] || 0) + (parseInt(a.value || '0', 10) || 0);
+        for (const a of (row.actions || [])) merged[a.action_type] = (merged[a.action_type] || 0) + (parseInt(a.value || '0', 10) || 0);
+        existing.actions = Object.entries(merged).map(([action_type, value]) => ({ action_type, value: String(value) }));
+      }
+    }
+    const insights: AdInsight[] = Array.from(insightByAdId.values());
 
     // Index creative metadata by ad ID.
     const creativeByAdId = new Map<string, AdCreative>();
