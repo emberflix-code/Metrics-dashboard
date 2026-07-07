@@ -975,17 +975,29 @@ async function fetchDcoAssets() {
       }
     })();
 
+    let firstBreakdownError: string | null = null;
     const responses = await Promise.all(accountIds.map(async acc => {
       const url = `/api/meta/asset-breakdown?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
       try {
         const res = await fetch(url);
         const json = await res.json();
-        if (json.error) return null;
+        // Top-level error (e.g. 4xx from our own route) — nothing to render.
+        if (json.error && !json.images && !json.videos) {
+          if (!firstBreakdownError) firstBreakdownError = json.error.message || 'Creatives fetch failed';
+          return null;
+        }
+        // Partial error: some chunks failed, rest succeeded. Surface it and
+        // still render what we got.
+        if (json.error?.message && !firstBreakdownError) firstBreakdownError = json.error.message;
         return json as { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsWithSpec: number; adsTotal: number; reason?: string; dcoAdIds?: string[] };
-      } catch {
+      } catch (e) {
+        if (!firstBreakdownError) firstBreakdownError = e instanceof Error ? e.message : 'Creatives fetch failed';
         return null;
       }
     }));
+    if (firstBreakdownError) {
+      showNotification('Creatives partial load: ' + firstBreakdownError, 'error');
+    }
     // Collect DCO ad IDs across accounts so the Static tab can subtract them.
     _dcoAdIdSet = new Set();
     for (const r of responses) {

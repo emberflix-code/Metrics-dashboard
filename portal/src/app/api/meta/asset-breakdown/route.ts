@@ -128,12 +128,40 @@ export async function GET(req: NextRequest) {
     if (campaignFilter) filtering.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     if (!accountWide) filtering.push({ field: 'ad.id', operator: 'IN', value: adIds });
     const filteringJson = filtering.length > 0 ? JSON.stringify(filtering) : null;
-    const fetchBreakdown = async (breakdown: 'image_asset' | 'video_asset'): Promise<BreakdownRow[]> => {
+    // level=ad + breakdowns=image_asset|video_asset is very row-heavy
+    // (ads × days × assets × attribution windows). Wide date ranges reliably
+    // trip Meta's per-request row cap (code:100 subcode:1487534). Chunk into
+    // 7-day windows and aggregate BreakdownRows across chunks. Metrics stay
+    // additive per (ad_id, asset_id) pair since Meta returns one row per
+    // (ad,asset,day-window) combination — summing across windows sums the
+    // period totals correctly.
+    let parsedRange: { since?: string; until?: string } = {};
+    try { parsedRange = JSON.parse(timeRange); } catch {}
+    const rangeSince = parsedRange.since;
+    const rangeUntil = parsedRange.until;
+    const CHUNK_DAYS = 7;
+    const chunks: { since: string; until: string }[] = [];
+    if (rangeSince && rangeUntil) {
+      const startMs = Date.parse(rangeSince + 'T00:00:00Z');
+      const endMs = Date.parse(rangeUntil + 'T00:00:00Z');
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+        for (let cursor = startMs; cursor <= endMs; cursor += CHUNK_DAYS * 86400000) {
+          const chunkEnd = Math.min(cursor + (CHUNK_DAYS - 1) * 86400000, endMs);
+          chunks.push({
+            since: new Date(cursor).toISOString().slice(0, 10),
+            until: new Date(chunkEnd).toISOString().slice(0, 10),
+          });
+        }
+      }
+    }
+    if (chunks.length === 0) chunks.push({ since: rangeSince || '', until: rangeUntil || '' });
+
+    const fetchBreakdownChunk = async (breakdown: 'image_asset' | 'video_asset', since: string, until: string): Promise<BreakdownRow[]> => {
       const url = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
       url.searchParams.set('level', 'ad');
       url.searchParams.set('breakdowns', breakdown);
       url.searchParams.set('fields', 'ad_id,spend,impressions,inline_link_clicks,actions');
-      url.searchParams.set('time_range', timeRange);
+      url.searchParams.set('time_range', JSON.stringify({ since, until }));
       url.searchParams.set('limit', '500');
       url.searchParams.set('action_attribution_windows', attribution);
       if (filteringJson) url.searchParams.set('filtering', filteringJson);
@@ -143,24 +171,45 @@ export async function GET(req: NextRequest) {
       let safety = 25;
       while (next && safety-- > 0) {
         const res = await fetch(next);
-        const json = await res.json() as { data?: BreakdownRow[]; error?: { message?: string }; paging?: { next?: string } };
+        const json = await res.json() as { data?: BreakdownRow[]; error?: { message?: string; code?: number }; paging?: { next?: string } };
         if (json.error) throw new Error(json.error.message || 'Meta breakdown error');
         if (Array.isArray(json.data)) out.push(...json.data);
         next = json.paging?.next || null;
       }
       return out;
     };
+    const fetchBreakdown = async (breakdown: 'image_asset' | 'video_asset'): Promise<{ rows: BreakdownRow[]; error: string | null }> => {
+      const merged: BreakdownRow[] = [];
+      let firstError: string | null = null;
+      for (const c of chunks) {
+        try {
+          const chunkRows = await fetchBreakdownChunk(breakdown, c.since, c.until);
+          merged.push(...chunkRows);
+        } catch (e) {
+          if (!firstError) firstError = e instanceof Error ? e.message : 'Meta breakdown error';
+        }
+      }
+      return { rows: merged, error: firstError };
+    };
 
-    const [imageRows, videoRows] = await Promise.all([
-      fetchBreakdown('image_asset').catch(() => [] as BreakdownRow[]),
-      fetchBreakdown('video_asset').catch(() => [] as BreakdownRow[]),
+    const [imageResult, videoResult] = await Promise.all([
+      fetchBreakdown('image_asset'),
+      fetchBreakdown('video_asset'),
     ]);
+    const imageRows = imageResult.rows;
+    const videoRows = videoResult.rows;
+    // Surface a partial-failure notice to the client so an empty Creatives tab
+    // isn't silently the same as a real "no DCO assets in range" result.
+    const breakdownError = imageResult.error || videoResult.error || null;
 
     if (imageRows.length === 0 && videoRows.length === 0) {
-      // Account-wide mode: no DCO assets had spend in this period.
+      // Account-wide mode: no DCO assets had spend in this period, OR every
+      // chunk request failed (row-cap on wide ranges is the common cause).
       // Per-ad mode: the input ads aren't DCO.
-      const payload = { images: [], videos: [], reason: 'no_asset_feed_spec' as const, adsWithSpec: 0, adsTotal: adIds.length };
-      _cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, payload });
+      const reason = breakdownError ? ('breakdown_error' as const) : ('no_asset_feed_spec' as const);
+      const payload = { images: [], videos: [], reason, adsWithSpec: 0, adsTotal: adIds.length, error: breakdownError ? { message: breakdownError } : undefined };
+      // Don't cache empty results caused by errors — user may want to retry.
+      if (!breakdownError) _cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, payload });
       return NextResponse.json(payload);
     }
 
@@ -485,7 +534,14 @@ export async function GET(req: NextRequest) {
       return out;
     };
 
-    const payload = {
+    const payload: {
+      images: AssetSummary[];
+      videos: AssetSummary[];
+      adsWithSpec: number;
+      adsTotal: number;
+      dcoAdIds: string[];
+      error?: { message: string };
+    } = {
       images: finalize(imageAgg.values()),
       videos: finalize(videoAgg.values()),
       adsWithSpec: hasFeedSpec.size,
@@ -499,8 +555,10 @@ export async function GET(req: NextRequest) {
       // per-asset breakdown rows, so hasFeedSpec systematically under-counts.
       dcoAdIds: discoveredAdIds,
     };
+    if (breakdownError) payload.error = { message: breakdownError };
 
-    _cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, payload });
+    // Only cache clean successes — partial-failure responses shouldn't stick.
+    if (!breakdownError) _cache.set(cacheKey, { expires: Date.now() + CACHE_TTL_MS, payload });
     return NextResponse.json(payload);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';
