@@ -1250,7 +1250,7 @@ async function fetchMetaCampaigns() {
         // 90-day, etc.). Fetch chunks in parallel per account, still summing
         // into a single byDate map so downstream code sees one continuous
         // trend series.
-        const CHUNK_DAYS = 30;
+        const CHUNK_DAYS = 7;
         const windows: { s: string; u: string }[] = [];
         {
           const startMs = Date.parse(since + 'T00:00:00Z');
@@ -1343,7 +1343,7 @@ async function fetchMetaCampaigns() {
           if (cr.since!==cr.until) {
             // Trend across all accounts, chunked into 30-day windows to dodge
             // Meta's per-request row cap on long comparison ranges.
-            const CHUNK_DAYS = 30;
+            const CHUNK_DAYS = 7;
             const cWindows: { s: string; u: string }[] = [];
             {
               const startMs = Date.parse(cr.since + 'T00:00:00Z');
