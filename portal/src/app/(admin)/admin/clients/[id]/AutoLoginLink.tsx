@@ -12,9 +12,10 @@ export default function AutoLoginLink({ clientId, initialToken }: Props) {
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  const url = token
-    ? `${window.location.origin}/auto-login?token=${token}`
-    : null;
+  // Guard: Next.js SSRs client components once for hydration. `window` is
+  // undefined at that pass, so referencing it at render time crashes the page.
+  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  const url = token ? `${origin}/auto-login?token=${token}` : null;
 
   async function generate() {
     setLoading(true);

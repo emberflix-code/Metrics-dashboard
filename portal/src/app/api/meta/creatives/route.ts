@@ -96,11 +96,16 @@ function unscaleMetaImage(url: string | null | undefined): string | null {
   return url ?? null;
 }
 
+// Return partial pages when Meta hard-fails mid-pagination. Throwing away
+// everything when page 3 of 10 fails is worse than rendering what we got —
+// the client-side dedup is idempotent and users prefer "some creatives" over
+// "empty grid". Only throws when the FIRST page fails (nothing to salvage).
 async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
   const out: T[] = [];
   const initial = url.toString();
   let next: string | null = initial.includes('access_token=') ? initial : `${initial}&access_token=${token}`;
   let safety = 25;
+  let isFirstPage = true;
   while (next && safety-- > 0) {
     let json: { data?: T[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_msg?: string; error_user_title?: string }; paging?: { next?: string } } | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -115,11 +120,14 @@ async function fetchAll<T>(url: URL, token: string): Promise<T[]> {
     }
     if (json?.error) {
       const scrubbed = next.replace(/access_token=[^&]+/, 'access_token=REDACTED');
-      console.error('[CREATIVES-META-ERR]', JSON.stringify({ url: scrubbed, error: json.error }));
-      throw new Error(json.error.message || 'Meta API error');
+      console.error('[CREATIVES-META-ERR]', JSON.stringify({ url: scrubbed, error: json.error, page: isFirstPage ? 'first' : 'mid' }));
+      if (isFirstPage) throw new Error(json.error.message || 'Meta API error');
+      // Mid-pagination failure: return what we have. Better than a blank grid.
+      return out;
     }
     if (Array.isArray(json?.data)) out.push(...json!.data!);
     next = json?.paging?.next || null;
+    isFirstPage = false;
   }
   return out;
 }
@@ -192,7 +200,10 @@ export async function GET(req: NextRequest) {
       'fields',
       'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}'
     );
-    adsUrl.searchParams.set('limit', '200');
+    // Meta's ad-level pagination gets rejected with code:1 on high-ad-count
+    // accounts when limit is too high. 50 gives Meta room to keep the response
+    // under the cap even when creative{...} expansion adds nested fields.
+    adsUrl.searchParams.set('limit', '50');
     const adsFilter: { field: string; operator: string; value: string | string[] }[] = [
       { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED'] },
     ];
