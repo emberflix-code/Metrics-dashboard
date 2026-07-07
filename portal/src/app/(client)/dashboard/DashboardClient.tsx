@@ -1158,7 +1158,6 @@ async function fetchMetaCampaigns() {
   try {
     const selectedAccount = (document.getElementById('ad-account') as HTMLSelectElement)?.value || 'all';
     const {since,until} = getDateRange();
-    const timeRange = JSON.stringify({since,until});
 
     // Fire the GHL bookings fetch in parallel too. Needs the resolved date
     // range so it can't piggyback on the sheet promise's earlier call site.
@@ -1182,6 +1181,26 @@ async function fetchMetaCampaigns() {
     const lvl = levelConfig[_currentLevel];
     let allMapped: any[] = [];
 
+    // Wide date ranges on high-campaign-count accounts trip Meta's per-request
+    // row cap (code:100 subcode:1487534) even at level=campaign without
+    // time_increment. Chunk into 7-day windows and sum numeric fields per
+    // entity across chunks; scalar identity fields come from whichever chunk
+    // saw the row first.
+    const CHUNK_DAYS_MAIN = 7;
+    const mainWindows: { s: string; u: string }[] = [];
+    {
+      const startMs = Date.parse(since + 'T00:00:00Z');
+      const endMs = Date.parse(until + 'T00:00:00Z');
+      if (Number.isFinite(startMs) && Number.isFinite(endMs) && endMs >= startMs) {
+        for (let cursor = startMs; cursor <= endMs; cursor += CHUNK_DAYS_MAIN * 86400000) {
+          const chunkEnd = Math.min(cursor + (CHUNK_DAYS_MAIN - 1) * 86400000, endMs);
+          mainWindows.push({ s: new Date(cursor).toISOString().slice(0,10), u: new Date(chunkEnd).toISOString().slice(0,10) });
+        }
+      } else {
+        mainWindows.push({ s: since, u: until });
+      }
+    }
+
     const fetchOneAccount = async (accountId: string): Promise<any[]> => {
       const statusRes = await fetch(`/api/meta/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}`);
       const statusJson = await statusRes.json();
@@ -1189,28 +1208,54 @@ async function fetchMetaCampaigns() {
       const statusMap: Record<string,string>={};
       for (const c of (statusJson.data||[])) statusMap[c.id]=c.effective_status;
 
-      const rows: any[] = [];
-      let url: string|null = `/api/meta/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(timeRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
-      let isFirstPage = true;
-      while (url) {
-        const fetchUrl: string = isFirstPage ? url : `/api/meta/next-page?url=${encodeURIComponent(url)}`;
-        const response = await fetch(fetchUrl);
-        const json = await response.json();
-        if (json.error) { throw new Error(humanizeMetaError(json.error)); }
-        const mapped = (json.data||[]).map((item: any)=>{
-          const am: Record<string,number>={};
-          for (const a of (item.actions||[])) am[a.action_type]=parseInt(a.value||0);
-          const pL=am['offsite_conversion.fb_pixel_lead']||0;
-          const fL=am['onsite_conversion.lead_grouped']||0;
-          const results=pL>0?pL:fL>0?fL:(am['lead']||0);
-          const entityId=item[lvl.idField];
-          return {id:entityId,name:item[lvl.nameField]||item.campaign_name,campaignId:item.campaign_id||'',adsetId:item.adset_id||'',campaignName:item.campaign_name||'',adsetName:item.adset_name||'',adName:item.ad_name||'',account:`act_${accountId}`,status:statusMap[entityId]||'UNKNOWN',reach:parseInt(item.reach||0),impressions:parseInt(item.impressions||0),spent:Math.round(parseFloat(item.spend||0)*100)/100,linkClicks:parseInt(item.inline_link_clicks||0),results};
-        });
-        rows.push(...mapped);
-        url = (json.paging&&json.paging.next)||null;
-        isFirstPage = false;
-      }
-      return rows;
+      const byEntity: Record<string, any> = {};
+      await Promise.all(mainWindows.map(async (w) => {
+        const chunkRange = JSON.stringify({ since: w.s, until: w.u });
+        let url: string|null = `/api/meta/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(chunkRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+        let isFirstPage = true;
+        while (url) {
+          const fetchUrl: string = isFirstPage ? url : `/api/meta/next-page?url=${encodeURIComponent(url)}`;
+          const response = await fetch(fetchUrl);
+          const json = await response.json();
+          if (json.error) { throw new Error(humanizeMetaError(json.error)); }
+          for (const item of (json.data||[])) {
+            const am: Record<string,number>={};
+            for (const a of (item.actions||[])) am[a.action_type]=parseInt(a.value||0);
+            const pL=am['offsite_conversion.fb_pixel_lead']||0;
+            const fL=am['onsite_conversion.lead_grouped']||0;
+            const results=pL>0?pL:fL>0?fL:(am['lead']||0);
+            const entityId=item[lvl.idField];
+            const existing = byEntity[entityId];
+            if (existing) {
+              existing.reach += parseInt(item.reach||0);
+              existing.impressions += parseInt(item.impressions||0);
+              existing.spent = Math.round((existing.spent + parseFloat(item.spend||0)) * 100) / 100;
+              existing.linkClicks += parseInt(item.inline_link_clicks||0);
+              existing.results += results;
+            } else {
+              byEntity[entityId] = {
+                id: entityId,
+                name: item[lvl.nameField]||item.campaign_name,
+                campaignId: item.campaign_id||'',
+                adsetId: item.adset_id||'',
+                campaignName: item.campaign_name||'',
+                adsetName: item.adset_name||'',
+                adName: item.ad_name||'',
+                account: `act_${accountId}`,
+                status: statusMap[entityId]||'UNKNOWN',
+                reach: parseInt(item.reach||0),
+                impressions: parseInt(item.impressions||0),
+                spent: Math.round(parseFloat(item.spend||0)*100)/100,
+                linkClicks: parseInt(item.inline_link_clicks||0),
+                results,
+              };
+            }
+          }
+          url = (json.paging&&json.paging.next)||null;
+          isFirstPage = false;
+        }
+      }));
+      return Object.values(byEntity);
     }
 
     const results = await Promise.all(accountIds.map(fetchOneAccount));
