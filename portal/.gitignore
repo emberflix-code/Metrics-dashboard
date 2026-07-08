@@ -34,3 +34,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# bulk client import output — contains password hashes / plaintext credentials
+bulk-import-clients.sql
+bulk-import-credentials.txt
+autologin_tokens.json
+autologin_links.txt
+autologin_tokens_existing.json
+autologin_links_existing.txt
+omega_regions.json

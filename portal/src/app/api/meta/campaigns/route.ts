@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientConnection, sanitizePaging } from '@/lib/meta';
+import { getClientConnection, sanitizePaging, isMultiKeywordFilter, matchesCampaignFilter } from '@/lib/meta';
 
 export async function GET(req: NextRequest) {
   try {
@@ -23,7 +23,10 @@ export async function GET(req: NextRequest) {
     const filters: { field: string; operator: string; value: string | string[] }[] = [
       { field: 'effective_status', operator: 'IN', value: ALL_STATUSES },
     ];
-    if (campaignFilter) {
+    // Meta's CONTAIN only matches one substring — multi-keyword (region/umbrella)
+    // filters are applied locally below instead of sent to Meta.
+    const multiKeyword = isMultiKeywordFilter(campaignFilter);
+    if (campaignFilter && !multiKeyword) {
       filters.push({ field: 'name', operator: 'CONTAIN', value: campaignFilter });
     }
     url.searchParams.set('filtering', JSON.stringify(filters));
@@ -32,6 +35,9 @@ export async function GET(req: NextRequest) {
 
     const res = await fetch(url.toString());
     const json = await res.json();
+    if (multiKeyword && Array.isArray(json?.data)) {
+      json.data = json.data.filter((c: { name?: string }) => matchesCampaignFilter(c.name || '', campaignFilter));
+    }
     return NextResponse.json(sanitizePaging(json), { status: res.status });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';

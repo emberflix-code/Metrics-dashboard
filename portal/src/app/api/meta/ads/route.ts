@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientConnection, sanitizePaging } from '@/lib/meta';
+import { getClientConnection, sanitizePaging, isMultiKeywordFilter, matchesCampaignFilter } from '@/lib/meta';
 
 export async function GET(req: NextRequest) {
   try {
@@ -12,7 +12,13 @@ export async function GET(req: NextRequest) {
     const token = tokenForAccount(accountId);
 
     const url = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
-    url.searchParams.set('fields', sp.get('fields') || 'id,name,effective_status');
+    const requestedFields = sp.get('fields') || 'id,name,effective_status';
+    // Meta's CONTAIN only matches one substring — multi-keyword (region/umbrella)
+    // filters are applied locally below instead of sent to Meta. That requires
+    // campaign.name in the response regardless of what the caller asked for.
+    const multiKeyword = isMultiKeywordFilter(campaignFilter);
+    const needsCampaignName = multiKeyword && !requestedFields.includes('campaign');
+    url.searchParams.set('fields', needsCampaignName ? `${requestedFields},campaign{name}` : requestedFields);
     url.searchParams.set('limit', sp.get('limit') || '200');
 
     // See campaigns route for rationale — explicitly include DELETED + ARCHIVED
@@ -21,7 +27,7 @@ export async function GET(req: NextRequest) {
     const filters: { field: string; operator: string; value: string | string[] }[] = [
       { field: 'effective_status', operator: 'IN', value: ALL_STATUSES },
     ];
-    if (campaignFilter) {
+    if (campaignFilter && !multiKeyword) {
       filters.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     }
     url.searchParams.set('filtering', JSON.stringify(filters));
@@ -30,6 +36,12 @@ export async function GET(req: NextRequest) {
 
     const res = await fetch(url.toString());
     const json = await res.json();
+    if (multiKeyword && Array.isArray(json?.data)) {
+      json.data = json.data.filter((a: { campaign?: { name?: string } }) => matchesCampaignFilter(a.campaign?.name || '', campaignFilter));
+      if (needsCampaignName) {
+        for (const row of json.data) delete row.campaign;
+      }
+    }
     return NextResponse.json(sanitizePaging(json), { status: res.status });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';

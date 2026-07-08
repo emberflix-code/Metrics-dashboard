@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientConnection } from '@/lib/meta';
+import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter } from '@/lib/meta';
 
 // One row per ad's insights (raw from Meta).
 interface AdInsight {
@@ -176,6 +176,10 @@ export async function GET(req: NextRequest) {
     }
     if (chunks.length === 0) chunks.push({ since: parsedRange.since || '', until: parsedRange.until || '' });
 
+    // Meta's CONTAIN only matches one substring — multi-keyword (region/umbrella)
+    // filters are applied locally after fetching instead of sent to Meta.
+    const multiKeyword = isMultiKeywordFilter(campaignFilter);
+
     const buildInsightsUrl = (chunkRange: string) => {
       const u = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
       u.searchParams.set('fields', 'ad_id,ad_name,campaign_name,adset_name,spend,impressions,inline_link_clicks,reach,actions');
@@ -183,7 +187,7 @@ export async function GET(req: NextRequest) {
       u.searchParams.set('time_range', chunkRange);
       u.searchParams.set('limit', '500');
       u.searchParams.set('action_attribution_windows', attribution);
-      if (campaignFilter) {
+      if (campaignFilter && !multiKeyword) {
         u.searchParams.set('filtering', JSON.stringify([
           { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
         ]));
@@ -195,6 +199,9 @@ export async function GET(req: NextRequest) {
     // Similarly slim: only ACTIVE/PAUSED so we don't drag every historic ad.
     // Any ad that appears in insights but not in this /ads response is fine —
     // it just gets rendered without a thumbnail (still visible in the grid).
+    // Ads are matched to insights by ad_id below, and insights are already
+    // filtered by campaign name, so this fetch doesn't need its own name
+    // filter even in the multi-keyword case.
     const adsUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/ads`);
     adsUrl.searchParams.set(
       'fields',
@@ -207,7 +214,7 @@ export async function GET(req: NextRequest) {
     const adsFilter: { field: string; operator: string; value: string | string[] }[] = [
       { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED'] },
     ];
-    if (campaignFilter) adsFilter.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
+    if (campaignFilter && !multiKeyword) adsFilter.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     adsUrl.searchParams.set('filtering', JSON.stringify(adsFilter));
 
     // Fetch insights chunks in parallel; if any chunk fails, keep going with
@@ -216,10 +223,13 @@ export async function GET(req: NextRequest) {
       fetchAll<AdInsight>(buildInsightsUrl(JSON.stringify({ since: c.since, until: c.until })), token)
         .catch(() => [] as AdInsight[])
     );
-    const [insightsChunked, ads] = await Promise.all([
+    const [insightsChunkedRaw, ads] = await Promise.all([
       Promise.all(insightsChunkPromises),
       fetchAll<AdCreative>(adsUrl, token),
     ]);
+    const insightsChunked = multiKeyword
+      ? insightsChunkedRaw.map(chunk => chunk.filter(row => matchesCampaignFilter(row.campaign_name || '', campaignFilter)))
+      : insightsChunkedRaw;
 
     // Sum metrics per ad_id across chunks. Actions arrays are concatenated
     // then re-aggregated by action_type in extractLeads().

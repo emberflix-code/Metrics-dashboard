@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientConnection } from '@/lib/meta';
+import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter } from '@/lib/meta';
 
 interface AssetFeedSpec {
   images?: { hash?: string; url?: string }[];
@@ -31,6 +31,7 @@ interface BreakdownRow {
   actions?: { action_type: string; value: string }[];
   image_asset?: { id?: string; hash?: string; name?: string };
   video_asset?: { id?: string; video_id?: string; name?: string };
+  campaign_name?: string;
 }
 
 interface AssetSummary {
@@ -124,8 +125,11 @@ export async function GET(req: NextRequest) {
     // Middleton, where BM shows running videos but the filtered call returned
     // dcoVideos: 0. Leaving Meta's default status behavior intact preserves
     // video asset visibility.
+    // Meta's CONTAIN only matches one substring — multi-keyword (region/umbrella)
+    // filters are applied locally after fetching instead of sent to Meta.
+    const multiKeyword = isMultiKeywordFilter(campaignFilter);
     const filtering: { field: string; operator: string; value: string | string[] }[] = [];
-    if (campaignFilter) filtering.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
+    if (campaignFilter && !multiKeyword) filtering.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     if (!accountWide) filtering.push({ field: 'ad.id', operator: 'IN', value: adIds });
     const filteringJson = filtering.length > 0 ? JSON.stringify(filtering) : null;
     // level=ad + breakdowns=image_asset|video_asset is very row-heavy
@@ -160,7 +164,9 @@ export async function GET(req: NextRequest) {
       const url = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
       url.searchParams.set('level', 'ad');
       url.searchParams.set('breakdowns', breakdown);
-      url.searchParams.set('fields', 'ad_id,spend,impressions,inline_link_clicks,actions');
+      // campaign_name is only needed for local multi-keyword filtering below,
+      // but always requesting it is harmless — nothing downstream reads it.
+      url.searchParams.set('fields', 'ad_id,spend,impressions,inline_link_clicks,actions,campaign_name');
       url.searchParams.set('time_range', JSON.stringify({ since, until }));
       url.searchParams.set('limit', '500');
       url.searchParams.set('action_attribution_windows', attribution);
@@ -189,7 +195,7 @@ export async function GET(req: NextRequest) {
         if (Array.isArray(json?.data)) out.push(...json!.data!);
         next = json?.paging?.next || null;
       }
-      return out;
+      return multiKeyword ? out.filter(row => matchesCampaignFilter(row.campaign_name || '', campaignFilter)) : out;
     };
     const fetchBreakdown = async (breakdown: 'image_asset' | 'video_asset'): Promise<{ rows: BreakdownRow[]; error: string | null }> => {
       const merged: BreakdownRow[] = [];

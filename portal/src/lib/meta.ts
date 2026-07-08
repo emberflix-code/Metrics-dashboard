@@ -103,6 +103,27 @@ export async function getClientConnection(): Promise<ClientConnection> {
   };
 }
 
+/**
+ * campaign_filter supports `|`-separated keywords for OR matching (e.g. a
+ * region umbrella client spanning several states: ", WI| MN| MI, | IN, | IL,").
+ * Meta's `CONTAIN` filter operator only matches one substring per clause and
+ * multiple filtering clauses are AND'd, so there's no way to express "contains
+ * ANY of these" server-side. Routes with a multi-keyword filter must omit the
+ * name filter from the Meta request and call `matchesCampaignFilter` locally
+ * on the results instead — see routes under /api/meta for the pattern.
+ */
+export function isMultiKeywordFilter(campaignFilter: string): boolean {
+  return campaignFilter.includes('|');
+}
+
+export function matchesCampaignFilter(name: string, campaignFilter: string): boolean {
+  if (!campaignFilter) return true;
+  const needles = campaignFilter.split('|').map(s => s.trim()).filter(Boolean);
+  if (needles.length === 0) return true;
+  const haystack = name.toLowerCase();
+  return needles.some(n => haystack.includes(n.toLowerCase()));
+}
+
 /** Strip access_token from paging.next before sending to client. */
 export function sanitizePaging(json: Record<string, unknown>): Record<string, unknown> {
   const paging = json?.paging as Record<string, unknown> | undefined;
