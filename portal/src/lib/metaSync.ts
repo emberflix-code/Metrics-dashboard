@@ -226,6 +226,19 @@ async function finishSync(accountId: string, opts: { success: boolean; error?: s
 // ── Step 1: entity refresh (campaigns/adsets/ads) ───────────────────────
 interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string } }
 
+// Batch size for unnest()-array upserts. Large enough to collapse thousands
+// of rows into a handful of round-trips, small enough to keep each query's
+// parameter arrays and payload reasonable. Postgres has no hard row-count
+// limit here (unlike Meta's API), this is purely about keeping individual
+// statements a sane size.
+const DB_BATCH_SIZE = 500;
+
+function chunkArrayGeneric<T>(arr: T[], size: number): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < arr.length; i += size) out.push(arr.slice(i, i + size));
+  return out;
+}
+
 async function syncEntities(accountId: string, token: string): Promise<number> {
   let upserted = 0;
   const levels: { level: 'campaign' | 'adset' | 'ad'; path: string; fields: string }[] = [
@@ -240,25 +253,34 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
     u.searchParams.set('filtering', JSON.stringify([{ field: 'effective_status', operator: 'IN', value: ALL_STATUSES }]));
     u.searchParams.set('access_token', token);
     const rows = await fetchMetaWithRetry<EntityRow>(u);
-    for (const r of rows) {
-      if (!r.id) continue;
+    const valid = rows.filter(r => !!r.id);
+
+    // Batched upsert via unnest() — one round-trip per DB_BATCH_SIZE rows
+    // instead of one per row. On large accounts (Omega alone has ~58k
+    // entities) row-by-row upserts generate enough Postgres log/checkpoint
+    // activity to trip Railway's per-second log-rate cap; batching collapses
+    // that by 2-3 orders of magnitude.
+    for (const batch of chunkArrayGeneric(valid, DB_BATCH_SIZE)) {
+      const entityIds = batch.map(r => r.id);
+      const names = batch.map(r => r.name || '');
+      const campaignIds = batch.map(r => lvl.level === 'campaign' ? r.id : (r.campaign?.id || null));
+      const campaignNames = batch.map(r => lvl.level === 'campaign' ? (r.name || '') : (r.campaign?.name || null));
+      const adsetIds = batch.map(r => lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null));
+      const adsetNames = batch.map(r => lvl.level === 'ad' ? (r.adset?.name || null) : (lvl.level === 'adset' ? (r.name || '') : null));
+      const statuses = batch.map(r => r.effective_status || 'UNKNOWN');
+
       await query(
         `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9, now())
+         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, now()
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
+           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status)
          ON CONFLICT (account_id, level, entity_id) DO UPDATE SET
            name = EXCLUDED.name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
            adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name,
            effective_status = EXCLUDED.effective_status, updated_at = now()`,
-        [
-          accountId, lvl.level, r.id, r.name || '',
-          lvl.level === 'campaign' ? r.id : (r.campaign?.id || null),
-          lvl.level === 'campaign' ? (r.name || '') : (r.campaign?.name || null),
-          lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null),
-          lvl.level === 'ad' ? (r.adset?.name || null) : (lvl.level === 'adset' ? (r.name || '') : null),
-          r.effective_status || 'UNKNOWN',
-        ]
+        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses]
       );
-      upserted++;
+      upserted += batch.length;
     }
   }
   return upserted;
@@ -378,34 +400,55 @@ async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: st
 
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[]): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds);
-  let written = 0;
+
+  interface Prepared {
+    entityId: string; date: string; campaignId: string; campaignName: string;
+    adsetId: string; adsetName: string; adName: string;
+    reach: number; impressions: number; spend: number; linkClicks: number; results: number;
+  }
+  const prepared: Prepared[] = [];
   for (const r of rows) {
     const entityId = level === 'campaign' ? r.campaign_id : level === 'adset' ? r.adset_id : r.ad_id;
     if (!entityId || !r.date_start) continue;
-    const results = resolveResultsFromActions(r.actions);
+    prepared.push({
+      entityId, date: r.date_start,
+      campaignId: r.campaign_id || '', campaignName: r.campaign_name || '',
+      adsetId: r.adset_id || '', adsetName: r.adset_name || '',
+      adName: r.ad_name || '',
+      reach: parseInt(r.reach || '0', 10) || 0,
+      impressions: parseInt(r.impressions || '0', 10) || 0,
+      spend: parseFloat(r.spend || '0') || 0,
+      linkClicks: parseInt(r.inline_link_clicks || '0', 10) || 0,
+      results: resolveResultsFromActions(r.actions),
+    });
+  }
+
+  // Batched upsert via unnest() — same rationale as syncEntities: row-by-row
+  // writes on a wide account (thousands of rows per chunk × hundreds of
+  // chunks) generate enough Postgres activity to trip Railway's log-rate cap.
+  for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
     await query(
       `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, synced_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, now()
+       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[])
+         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results)
        ON CONFLICT (account_id, level, entity_id, date) DO UPDATE SET
          campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
          adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name, ad_name = EXCLUDED.ad_name,
          reach = EXCLUDED.reach, impressions = EXCLUDED.impressions, spend = EXCLUDED.spend,
          link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results, synced_at = now()`,
       [
-        accountId, level, entityId, r.date_start,
-        r.campaign_id || '', r.campaign_name || '',
-        r.adset_id || '', r.adset_name || '',
-        r.ad_name || '',
-        parseInt(r.reach || '0', 10) || 0,
-        parseInt(r.impressions || '0', 10) || 0,
-        parseFloat(r.spend || '0') || 0,
-        parseInt(r.inline_link_clicks || '0', 10) || 0,
-        results,
+        accountId, level,
+        batch.map(p => p.entityId), batch.map(p => p.date),
+        batch.map(p => p.campaignId), batch.map(p => p.campaignName),
+        batch.map(p => p.adsetId), batch.map(p => p.adsetName), batch.map(p => p.adName),
+        batch.map(p => p.reach), batch.map(p => p.impressions),
+        batch.map(p => p.spend), batch.map(p => p.linkClicks), batch.map(p => p.results),
       ]
     );
-    written++;
   }
-  return { written, hadGaps };
+
+  return { written: prepared.length, hadGaps };
 }
 
 interface SyncState {
@@ -665,24 +708,38 @@ async function syncCreatives(accountId: string, token: string, since: string, un
   }
   const adMap = Array.from(adMapByPair.values());
 
-  for (const asset of Array.from(assetsByKey.values())) {
+  // Batched upserts — same rationale as syncEntities/syncInsightsChunk. A
+  // large account can have thousands of distinct assets and tens of
+  // thousands of asset-to-ad mappings; one round-trip per row was enough to
+  // trip Railway's Postgres log-rate cap.
+  const assetList = Array.from(assetsByKey.values());
+  for (const batch of chunkArrayGeneric(assetList, DB_BATCH_SIZE)) {
     await query(
       `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, thumbnail_fetched_at, video_id, body, title, updated_at)
-       VALUES ($1,$2,$3,$4, CASE WHEN $4::text IS NOT NULL THEN now() ELSE NULL END, $5,$6,$7, now())
+       SELECT $1, asset_key, type, thumbnail,
+              CASE WHEN thumbnail IS NOT NULL THEN now() ELSE NULL END,
+              video_id, body, title, now()
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+         AS t(asset_key, type, thumbnail, video_id, body, title)
        ON CONFLICT (account_id, asset_key) DO UPDATE SET
          type = EXCLUDED.type,
          thumbnail = COALESCE(EXCLUDED.thumbnail, meta_creative_assets.thumbnail),
          thumbnail_fetched_at = CASE WHEN EXCLUDED.thumbnail IS NOT NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
          video_id = EXCLUDED.video_id, body = EXCLUDED.body, title = EXCLUDED.title, updated_at = now()`,
-      [accountId, asset.assetKey, asset.type, asset.thumbnail, asset.videoId, asset.body, asset.title]
+      [
+        accountId,
+        batch.map(a => a.assetKey), batch.map(a => a.type), batch.map(a => a.thumbnail),
+        batch.map(a => a.videoId), batch.map(a => a.body), batch.map(a => a.title),
+      ]
     );
   }
-  for (const m of adMap) {
+  for (const batch of chunkArrayGeneric(adMap, DB_BATCH_SIZE)) {
     await query(
       `INSERT INTO meta_creative_asset_ad_map (account_id, asset_key, ad_id, weight)
-       VALUES ($1,$2,$3,$4)
+       SELECT $1, asset_key, ad_id, weight
+       FROM unnest($2::text[], $3::text[], $4::numeric[]) AS t(asset_key, ad_id, weight)
        ON CONFLICT (account_id, asset_key, ad_id) DO UPDATE SET weight = EXCLUDED.weight`,
-      [accountId, m.assetKey, m.adId, m.weight]
+      [accountId, batch.map(m => m.assetKey), batch.map(m => m.adId), batch.map(m => m.weight)]
     );
   }
 
@@ -766,16 +823,38 @@ async function syncCreatives(accountId: string, token: string, since: string, un
     u.searchParams.set('access_token', token);
     let rows: BreakdownRow[] = [];
     try { rows = await fetchMetaWithRetry<BreakdownRow>(u); } catch { return; }
+
+    interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number }
+    const prepared: PreparedBreakdown[] = [];
     for (const r of rows) {
       const assetHash = breakdown === 'image_asset' ? r.image_asset?.hash : r.video_asset?.video_id;
       const assetKey = breakdown === 'image_asset' ? (assetHash ? `image:${assetHash}` : null) : (assetHash ? `video:${assetHash}` : null);
       if (!assetKey || !r.ad_id || !r.date_start) continue;
+      prepared.push({
+        assetKey, adId: r.ad_id, date: r.date_start,
+        spend: parseFloat(r.spend || '0') || 0,
+        impressions: parseInt(r.impressions || '0', 10) || 0,
+        linkClicks: parseInt(r.inline_link_clicks || '0', 10) || 0,
+        results: resolveResultsFromActions(r.actions),
+      });
+    }
+
+    // Batched upsert — this is the highest-volume write in the whole sync
+    // (per asset × per ad × per day), the main source of the row-by-row
+    // Postgres log flood this batching pass fixes.
+    for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
       await query(
         `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+         SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results
+         FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[])
+           AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results)
          ON CONFLICT (account_id, asset_key, ad_id, date) DO UPDATE SET
            spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results`,
-        [accountId, assetKey, r.ad_id, r.date_start, parseFloat(r.spend || '0') || 0, parseInt(r.impressions || '0', 10) || 0, parseInt(r.inline_link_clicks || '0', 10) || 0, resolveResultsFromActions(r.actions)]
+        [
+          accountId,
+          batch.map(p => p.assetKey), batch.map(p => p.adId), batch.map(p => p.date),
+          batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results),
+        ]
       );
     }
   });
