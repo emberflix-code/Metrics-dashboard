@@ -103,6 +103,47 @@ export async function getClientConnection(): Promise<ClientConnection> {
   };
 }
 
+export interface ClientDbScope {
+  /** Every ad account ID this client is allowed to see (already resolved — never empty-means-all). */
+  accountIds: string[];
+  /** Campaign-name substring/multi-keyword filter the client wants applied. */
+  campaignFilter: string;
+}
+
+/**
+ * Session-bound account/filter resolution for the DB-backed (`cached` mode)
+ * read routes under /api/meta/db/* — same session + client_users scoping as
+ * getClientConnection(), but without resolving a Meta token (DB reads don't
+ * need one). Like getClientConnection(), an empty clients.ad_account_ids
+ * resolves to every agency account (from agency_bm_connections) rather than
+ * being left empty — callers can rely on accountIds always being the final
+ * allowed set.
+ */
+export async function getClientDbScope(): Promise<ClientDbScope> {
+  const session = await getServerSession(authOptions);
+  if (!session) throw new Error('Unauthorized');
+
+  const [client] = await query<{ campaign_filter: string; ad_account_ids: string[] | null }>(
+    `SELECT c.campaign_filter, c.ad_account_ids
+     FROM clients c
+     JOIN client_users cu ON cu.client_id = c.id
+     WHERE cu.user_id = $1
+     LIMIT 1`,
+    [session.user.id]
+  );
+
+  let accountIds = client?.ad_account_ids ?? [];
+  if (accountIds.length === 0) {
+    const rows = await query<{ account_ids: string[] }>(`SELECT account_ids FROM agency_bm_connections`);
+    accountIds = Array.from(new Set(rows.flatMap(r => r.account_ids || [])));
+  }
+
+  return {
+    accountIds,
+    campaignFilter: client?.campaign_filter ?? '',
+  };
+}
+
 /**
  * campaign_filter supports `|`-separated keywords for OR matching (e.g. a
  * region umbrella client spanning several states: ", WI| MN| MI, | IN, | IL,").
@@ -122,6 +163,27 @@ export function matchesCampaignFilter(name: string, campaignFilter: string): boo
   if (needles.length === 0) return true;
   const haystack = name.toLowerCase();
   return needles.some(n => haystack.includes(n.toLowerCase()));
+}
+
+/**
+ * Resolves a Meta `actions[]` array (from any insights response) down to a
+ * single "results" count. Pixel-based leads take priority over onsite leads
+ * over a generic 'lead' action, mirroring how Meta's own Ads Manager reports
+ * results for lead-gen campaigns. Shared by the creatives and asset-breakdown
+ * routes and the DB sync module so cached-mode numbers match live-mode
+ * byte-for-byte. (DashboardClient.tsx has its own inline copies of this same
+ * chain — those are browser-side, hitting our routes rather than Meta
+ * directly, so they're intentionally left as-is rather than merged here.)
+ */
+export function resolveResultsFromActions(actions?: { action_type: string; value: string }[]): number {
+  if (!actions) return 0;
+  const m: Record<string, number> = {};
+  for (const a of actions) m[a.action_type] = parseInt(a.value || '0', 10);
+  const pixel = m['offsite_conversion.fb_pixel_lead'] || 0;
+  const onsite = m['onsite_conversion.lead_grouped'] || 0;
+  if (pixel > 0) return pixel;
+  if (onsite > 0) return onsite;
+  return m['lead'] || 0;
 }
 
 /** Strip access_token from paging.next before sending to client. */

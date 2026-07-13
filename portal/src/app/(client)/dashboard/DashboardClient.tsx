@@ -22,6 +22,13 @@ interface Props {
   leadsSource?: 'meta' | 'sheet' | 'ghl';  // resolved server-side; drives Leads KPI source
   showBookings?: boolean;       // when true (and GHL is configured), show the 7th Bookings card
   showBookRate?: boolean;       // when true, the Bookings card also renders book rate as subtitle
+  // Resolved server-side, PER ACCOUNT (not one client-wide flag) — a client
+  // scoped to multiple ad accounts can have some synced and some not, so
+  // each account independently falls back to 'live' if it hasn't completed
+  // a sync yet, rather than one unsynced account silently zeroing out while
+  // the whole dashboard reads 'cached'. Keyed by bare account id (no act_
+  // prefix), matching `accountIds`. Missing/unknown keys default to 'live'.
+  dataSourceByAccount?: Record<string, 'live' | 'cached'>;
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -48,6 +55,20 @@ let _platform: 'meta' | 'google' = 'meta';
 // is sourced from the client's sheet_tab via /api/sheets/meta instead of
 // Meta's pixel actions. Per-row data stays Meta-attributed.
 let _useSheetForLeads = false;
+// Per-account: when an account's entry is 'cached', that account's fetches
+// are redirected to /api/meta/db/* — same query params, same response shape
+// — reading from the DB-backed sync (src/lib/metaSync.ts) instead of hitting
+// Meta live. Unlisted/unknown accounts default to 'live' so every existing
+// client's behavior is unchanged unless explicitly toggled (see
+// dashboard/page.tsx's per-account resolvedDataSourceByAccount resolver).
+// Deliberately per-account rather than one client-wide flag: a client
+// scoped to multiple ad accounts where only some have completed a sync must
+// not have the unsynced ones silently return empty data under a global
+// 'cached' flag — each account's fallback is independent.
+let _dataSourceByAccount: Record<string, 'live' | 'cached'> = {};
+function metaApiBase(accountId: string): string {
+  return _dataSourceByAccount[accountId] === 'cached' ? '/api/meta/db' : '/api/meta';
+}
 // Day-summed leads from the sheet, keyed by YYYY-MM-DD. Populated by
 // fetchMetaCampaigns when _useSheetForLeads is on. Used to override t.results
 // and trend data for the current date range.
@@ -960,7 +981,7 @@ async function fetchDcoAssets() {
         const merged = new Set<string>();
         await Promise.all(accountIds.map(async acc => {
           const filtering = JSON.stringify([{ field: 'campaign.id', operator: 'IN', value: visibleCampaignIds }]);
-          const u = `/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=ad_id&level=ad&time_range=${encodeURIComponent(timeRange)}&limit=500&filtering=${encodeURIComponent(filtering)}`;
+          const u = `${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=ad_id&level=ad&time_range=${encodeURIComponent(timeRange)}&limit=500&filtering=${encodeURIComponent(filtering)}`;
           let next: string | null = u;
           let safety = 25;
           while (next && safety-- > 0) {
@@ -979,7 +1000,7 @@ async function fetchDcoAssets() {
 
     let firstBreakdownError: string | null = null;
     const responses = await Promise.all(accountIds.map(async acc => {
-      const url = `/api/meta/asset-breakdown?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
+      const url = `${metaApiBase(acc)}/asset-breakdown?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
       try {
         const res = await fetch(url);
         const json = await res.json();
@@ -1072,7 +1093,7 @@ async function fetchStaticAssets() {
 
     let firstStaticError: string | null = null;
     const responses = await Promise.all(accountIds.map(async acc => {
-      const url = `/api/meta/creatives?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
+      const url = `${metaApiBase(acc)}/creatives?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}`;
       try {
         const res = await fetch(url);
         const json = await res.json();
@@ -1250,7 +1271,7 @@ async function fetchMetaCampaigns() {
     }
 
     const fetchOneAccount = async (accountId: string): Promise<any[]> => {
-      const statusRes = await fetch(`/api/meta/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}`);
+      const statusRes = await fetch(`${metaApiBase(accountId)}/${lvl.endpoint}?account_id=${encodeURIComponent(accountId)}`);
       const statusJson = await statusRes.json();
       if (statusJson.error) { throw new Error(humanizeMetaError(statusJson.error)); }
       const statusMap: Record<string,string>={};
@@ -1259,7 +1280,7 @@ async function fetchMetaCampaigns() {
       const byEntity: Record<string, any> = {};
       await runPooled(mainWindows, 4, async (w) => {
         const chunkRange = JSON.stringify({ since: w.s, until: w.u });
-        let url: string|null = `/api/meta/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(chunkRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+        let url: string|null = `${metaApiBase(accountId)}/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(chunkRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
         let isFirstPage = true;
         while (url) {
           const fetchUrl: string = isFirstPage ? url : `/api/meta/next-page?url=${encodeURIComponent(url)}`;
@@ -1357,7 +1378,7 @@ async function fetchMetaCampaigns() {
         const trendUnits: { acc: string; w: { s: string; u: string } }[] = [];
         for (const acc of accountIds) for (const w of windows) trendUnits.push({ acc, w });
         await runPooled(trendUnits, 4, async ({ acc, w }) => {
-          let tUrl: string|null = `/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+          let tUrl: string|null = `${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
           let tFirst=true;
           while (tUrl) {
             const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
@@ -1412,7 +1433,7 @@ async function fetchMetaCampaigns() {
           const compTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0 };
           let compHasAny = false;
           await Promise.all(accountIds.map(async acc => {
-            const ctotUrl=`/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('spend,reach,impressions,inline_link_clicks,actions')}&level=account&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&limit=10&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+            const ctotUrl=`${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('spend,reach,impressions,inline_link_clicks,actions')}&level=account&time_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&limit=10&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
             const ctotRes=await fetch(ctotUrl); const ctotJson=await ctotRes.json();
             if (!ctotJson.error&&ctotJson.data?.length>0) {
               const d=ctotJson.data[0]; const am: Record<string,number>={};
@@ -1445,7 +1466,7 @@ async function fetchMetaCampaigns() {
             const cUnits: { acc: string; w: { s: string; u: string } }[] = [];
             for (const acc of accountIds) for (const w of cWindows) cUnits.push({ acc, w });
             await runPooled(cUnits, 4, async ({ acc, w }) => {
-              let ctUrl: string|null=`/api/meta/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+              let ctUrl: string|null=`${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
               let ctFirst=true;
               while (ctUrl) {
                 const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;
@@ -1949,13 +1970,14 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, dataSourceByAccount = {} }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
   _leadsSource = leadsSource;
   _showBookings = showBookings;
   _showBookRate = showBookRate;
+  _dataSourceByAccount = dataSourceByAccount;
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);

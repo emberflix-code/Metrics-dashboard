@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter } from '@/lib/meta';
+import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter, resolveResultsFromActions } from '@/lib/meta';
 
 interface AssetFeedSpec {
   images?: { hash?: string; url?: string }[];
@@ -59,17 +59,6 @@ interface AdMeta {
   id?: string;
   name?: string;
   effective_status?: string;
-}
-
-function extractLeads(actions?: BreakdownRow['actions']): number {
-  if (!actions) return 0;
-  const m: Record<string, number> = {};
-  for (const a of actions) m[a.action_type] = parseInt(a.value || '0', 10);
-  const pixel = m['offsite_conversion.fb_pixel_lead'] || 0;
-  const onsite = m['onsite_conversion.lead_grouped'] || 0;
-  if (pixel > 0) return pixel;
-  if (onsite > 0) return onsite;
-  return m['lead'] || 0;
 }
 
 // In-memory cache keyed by (account_id, time_range, sorted ad_ids).
@@ -312,7 +301,7 @@ export async function GET(req: NextRequest) {
       const sp = parseFloat(r.spend || '0') || 0;
       const im = parseInt(r.impressions || '0', 10) || 0;
       const lc = parseInt(r.inline_link_clicks || '0', 10) || 0;
-      const ld = extractLeads(r.actions);
+      const ld = resolveResultsFromActions(r.actions);
       row.spend += sp; row.impressions += im; row.linkClicks += lc; row.results += ld;
       row._adIdSet.add(adId);
       const cur = row._perAd.get(adId) || { spend: 0, results: 0, impressions: 0, linkClicks: 0 };

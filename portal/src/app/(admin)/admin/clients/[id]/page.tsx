@@ -10,6 +10,7 @@ import GhlConfigForm from './GhlConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
 import ImpersonateButton from './ImpersonateButton';
+import SyncControlForm, { SyncStateRow } from './SyncControlForm';
 
 interface ClientDetail {
   id: string;
@@ -29,6 +30,16 @@ interface ClientDetail {
   show_book_rate: boolean;
   ghl_location_id: string;
   has_ghl_token: boolean;
+  data_source: 'live' | 'cached';
+}
+
+interface SyncStateDbRow {
+  account_id: string;
+  status: 'idle' | 'running' | 'error';
+  last_synced_at: string | null;
+  backfill_complete: boolean;
+  earliest_synced: string | null;
+  last_error: string | null;
 }
 
 interface AgencyAccount {
@@ -51,7 +62,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
     SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
            c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id,
-           (length(c.ghl_token_enc) > 0) AS has_ghl_token,
+           (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -76,6 +87,34 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
       agencyAccounts.push({ id, name: nameById.get(id) || '', bmLabel: bm.label });
     }
   }
+  const nameByAccountId = new Map(agencyAccounts.map(a => [a.id, a.name] as const));
+
+  // Sync status for whichever accounts this client can see (its own scope if
+  // set, else every agency account — same resolution as getClientConnection()).
+  const scopedAccountIds = client.ad_account_ids?.length > 0
+    ? client.ad_account_ids
+    : agencyAccounts.map(a => a.id);
+  const syncRows = scopedAccountIds.length > 0
+    ? await query<SyncStateDbRow>(
+        `SELECT account_id, status, last_synced_at, backfill_complete, earliest_synced, last_error
+         FROM agency_meta_sync_state
+         WHERE account_id = ANY($1)`,
+        [scopedAccountIds]
+      )
+    : [];
+  const syncRowByAccountId = new Map(syncRows.map(r => [r.account_id, r] as const));
+  const syncStates: SyncStateRow[] = scopedAccountIds.map(accountId => {
+    const row = syncRowByAccountId.get(accountId);
+    return {
+      accountId,
+      accountName: nameByAccountId.get(accountId) || '',
+      status: row?.status ?? 'idle',
+      lastSyncedAt: row?.last_synced_at ?? null,
+      backfillComplete: row?.backfill_complete ?? false,
+      earliestSynced: row?.earliest_synced ?? null,
+      lastError: row?.last_error ?? null,
+    };
+  });
 
   return (
     <div className="min-h-screen bg-slate-950 p-6">
@@ -111,6 +150,20 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             clientId={client.id}
             agencyAccounts={agencyAccounts}
             currentAccountIds={client.ad_account_ids ?? []}
+          />
+        </div>
+
+        {/* Data source & sync */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Data Source &amp; Sync</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Switch between live Meta API fetches and a locally-synced copy — useful for high-campaign-count
+            accounts that hit Meta&apos;s rate/row-cap limits on live loads.
+          </p>
+          <SyncControlForm
+            clientId={client.id}
+            initialDataSource={client.data_source ?? 'live'}
+            syncStates={syncStates}
           />
         </div>
 

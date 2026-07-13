@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 
 interface Props {
   clientId: string;
@@ -11,10 +11,14 @@ export default function AutoLoginLink({ clientId, initialToken }: Props) {
   const [token, setToken] = useState<string | null>(initialToken);
   const [loading, setLoading] = useState(false);
   const [copied, setCopied] = useState(false);
-
-  // Guard: Next.js SSRs client components once for hydration. `window` is
-  // undefined at that pass, so referencing it at render time crashes the page.
-  const origin = typeof window === 'undefined' ? '' : window.location.origin;
+  // `window.location.origin` is unavailable at SSR time (server renders an
+  // empty-string origin, i.e. a relative URL) but present on the client
+  // (absolute URL) — those two strings differ, which is a hydration
+  // mismatch, not just a crash. Render the same relative-URL fallback on
+  // both the server pass and the client's first pass, then swap to the
+  // real absolute URL only after mount.
+  const [origin, setOrigin] = useState('');
+  useEffect(() => setOrigin(window.location.origin), []);
   const url = token ? `${origin}/auto-login?token=${token}` : null;
 
   async function generate() {

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter } from '@/lib/meta';
+import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter, resolveResultsFromActions } from '@/lib/meta';
 
 // One row per ad's insights (raw from Meta).
 interface AdInsight {
@@ -72,17 +72,6 @@ interface CreativeRow {
   cpl: number;
   // Per-ad breakdown (drawer)
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
-}
-
-function extractLeads(actions?: AdInsight['actions']): number {
-  if (!actions) return 0;
-  const m: Record<string, number> = {};
-  for (const a of actions) m[a.action_type] = parseInt(a.value || '0', 10);
-  const pixel = m['offsite_conversion.fb_pixel_lead'] || 0;
-  const onsite = m['onsite_conversion.lead_grouped'] || 0;
-  if (pixel > 0) return pixel;
-  if (onsite > 0) return onsite;
-  return m['lead'] || 0;
 }
 
 /**
@@ -232,7 +221,7 @@ export async function GET(req: NextRequest) {
       : insightsChunkedRaw;
 
     // Sum metrics per ad_id across chunks. Actions arrays are concatenated
-    // then re-aggregated by action_type in extractLeads().
+    // then re-aggregated by action_type in resolveResultsFromActions().
     const insightByAdId = new Map<string, AdInsight>();
     for (const chunk of insightsChunked) {
       for (const row of chunk) {
@@ -297,7 +286,7 @@ export async function GET(req: NextRequest) {
       const impressions = parseInt(ins.impressions || '0', 10) || 0;
       const linkClicks = parseInt(ins.inline_link_clicks || '0', 10) || 0;
       const reach = parseInt(ins.reach || '0', 10) || 0;
-      const results = extractLeads(ins.actions);
+      const results = resolveResultsFromActions(ins.actions);
 
       const linkData = creative?.object_story_spec?.link_data;
       const videoData = creative?.object_story_spec?.video_data;

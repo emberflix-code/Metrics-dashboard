@@ -81,6 +81,116 @@ pool.query(`UPDATE clients SET leads_source = 'sheet' WHERE use_sheet_for_leads 
   } catch { /* surface via routes if it fails */ }
 })();
 
+// DB-backed Meta cache (see migration 011_meta_cache.sql for full context).
+// Per-client toggle: 'live' (default, unchanged) reads Meta live same as
+// today; 'cached' reads these tables instead, populated by an admin-
+// triggered sync (src/lib/metaSync.ts). Storage is per ad-account, not
+// per-client — campaign_filter is applied at read time.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NULL DEFAULT 'live'`).catch(() => {});
+
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS agency_meta_sync_state (
+        account_id           TEXT PRIMARY KEY,
+        status               TEXT NOT NULL DEFAULT 'idle',
+        last_synced_at       TIMESTAMPTZ,
+        last_success_until   TEXT,
+        earliest_synced      TEXT,
+        backfill_complete    BOOLEAN NOT NULL DEFAULT false,
+        last_error           TEXT,
+        last_run_started_at  TIMESTAMPTZ,
+        updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_entities (
+        account_id       TEXT NOT NULL,
+        level            TEXT NOT NULL,
+        entity_id        TEXT NOT NULL,
+        name             TEXT NOT NULL DEFAULT '',
+        campaign_id      TEXT,
+        campaign_name    TEXT,
+        adset_id         TEXT,
+        adset_name       TEXT,
+        effective_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+        updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (account_id, level, entity_id)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_entities_campaign ON meta_entities (account_id, campaign_id)`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_daily_insights (
+        account_id     TEXT NOT NULL,
+        level          TEXT NOT NULL,
+        entity_id      TEXT NOT NULL,
+        date           DATE NOT NULL,
+        campaign_id    TEXT NOT NULL DEFAULT '',
+        campaign_name  TEXT NOT NULL DEFAULT '',
+        adset_id       TEXT NOT NULL DEFAULT '',
+        adset_name     TEXT NOT NULL DEFAULT '',
+        ad_name        TEXT NOT NULL DEFAULT '',
+        reach          BIGINT NOT NULL DEFAULT 0,
+        impressions    BIGINT NOT NULL DEFAULT 0,
+        spend          NUMERIC(12,2) NOT NULL DEFAULT 0,
+        link_clicks    BIGINT NOT NULL DEFAULT 0,
+        results        BIGINT NOT NULL DEFAULT 0,
+        synced_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (account_id, level, entity_id, date)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_daily_insights_range ON meta_daily_insights (account_id, level, date)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_daily_insights_campaign ON meta_daily_insights (account_id, campaign_id, date)`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_creative_assets (
+        account_id               TEXT NOT NULL,
+        asset_key                TEXT NOT NULL,
+        type                     TEXT NOT NULL,
+        thumbnail                TEXT,
+        thumbnail_fetched_at     TIMESTAMPTZ,
+        video_source             TEXT,
+        video_source_fetched_at  TIMESTAMPTZ,
+        video_id                 TEXT,
+        body                     TEXT,
+        title                    TEXT,
+        updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (account_id, asset_key)
+      )
+    `);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_creative_asset_ad_map (
+        account_id    TEXT NOT NULL,
+        asset_key     TEXT NOT NULL,
+        ad_id         TEXT NOT NULL,
+        weight        NUMERIC(6,4) NOT NULL DEFAULT 1,
+        PRIMARY KEY (account_id, asset_key, ad_id),
+        FOREIGN KEY (account_id, asset_key) REFERENCES meta_creative_assets(account_id, asset_key) ON DELETE CASCADE
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_creative_asset_ad_map_ad ON meta_creative_asset_ad_map (account_id, ad_id)`);
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_asset_breakdown_daily (
+        account_id   TEXT NOT NULL,
+        asset_key    TEXT NOT NULL,
+        ad_id        TEXT NOT NULL,
+        date         DATE NOT NULL,
+        spend        NUMERIC(12,2) NOT NULL DEFAULT 0,
+        impressions  BIGINT NOT NULL DEFAULT 0,
+        link_clicks  BIGINT NOT NULL DEFAULT 0,
+        results      BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (account_id, asset_key, ad_id, date)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_asset_breakdown_daily_range ON meta_asset_breakdown_daily (account_id, date)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_asset_breakdown_daily_ad ON meta_asset_breakdown_daily (account_id, ad_id)`);
+  } catch { /* surface via routes if it fails */ }
+})();
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

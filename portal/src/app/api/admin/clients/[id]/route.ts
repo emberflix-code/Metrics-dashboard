@@ -6,6 +6,7 @@ import { encrypt } from '@/lib/crypto';
 import bcrypt from 'bcryptjs';
 
 const VALID_LEADS_SOURCES = new Set(['meta', 'sheet', 'ghl']);
+const VALID_DATA_SOURCES = new Set(['live', 'cached']);
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -83,6 +84,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (body.show_book_rate !== undefined) {
     await query('UPDATE clients SET show_book_rate = $1 WHERE id = $2', [!!body.show_book_rate, params.id]);
+  }
+
+  if (body.data_source !== undefined) {
+    const v = String(body.data_source).trim();
+    if (!VALID_DATA_SOURCES.has(v)) {
+      return NextResponse.json({ error: 'data_source must be one of: live, cached' }, { status: 400 });
+    }
+    await query('UPDATE clients SET data_source = $1 WHERE id = $2', [v, params.id]);
   }
 
   if (body.password !== undefined) {

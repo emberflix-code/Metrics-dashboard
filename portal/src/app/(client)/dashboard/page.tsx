@@ -24,6 +24,7 @@ interface ClientRow {
   show_bookings: boolean;
   show_book_rate: boolean;
   has_ghl_token: boolean;
+  data_source: 'live' | 'cached';
 }
 
 export default async function DashboardPage() {
@@ -58,7 +59,7 @@ export default async function DashboardPage() {
     `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
             c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
             c.leads_source, c.show_bookings, c.show_book_rate,
-            (length(c.ghl_token_enc) > 0) AS has_ghl_token
+            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -83,6 +84,27 @@ export default async function DashboardPage() {
       ? client.ad_account_ids
       : allAgencyAccountIds;
 
+  // Resolve data_source PER ACCOUNT, not as one client-wide flag: a client
+  // scoped to multiple ad accounts can have some accounts synced and others
+  // not (e.g. a region/umbrella client), and a single global 'cached' flag
+  // would silently zero out any unsynced sibling account instead of falling
+  // back to live for just that account. Same fallback bar as leads_source —
+  // only checks "has this specific account completed a sync ever," not
+  // per-request staleness, since the freshness bar is "yesterday's data is
+  // fine" and Meta's own attribution windows already make "stale" fuzzy.
+  const requestedDataSource = client?.data_source ?? 'live';
+  const dataSourceByAccount: Record<string, 'live' | 'cached'> = {};
+  if (requestedDataSource === 'cached' && accountIds.length > 0) {
+    const syncRows = await query<{ account_id: string }>(
+      `SELECT account_id FROM agency_meta_sync_state WHERE account_id = ANY($1) AND last_synced_at IS NOT NULL`,
+      [accountIds]
+    );
+    const syncedAccountIds = new Set(syncRows.map(r => r.account_id));
+    for (const accountId of accountIds) {
+      dataSourceByAccount[accountId] = syncedAccountIds.has(accountId) ? 'cached' : 'live';
+    }
+  }
+
   const impersonatedBy = session.user.impersonatedBy;
 
   return (
@@ -105,6 +127,7 @@ export default async function DashboardPage() {
         leadsSource={resolvedLeadsSource}
         showBookings={!!(client?.show_bookings && client?.has_ghl_token)}
         showBookRate={!!(client?.show_bookings && client?.show_book_rate && client?.has_ghl_token)}
+        dataSourceByAccount={dataSourceByAccount}
       />
     </>
   );
