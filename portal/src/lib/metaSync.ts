@@ -176,6 +176,21 @@ function floorDateFrom(yesterday: string): string {
   return fmtDate(dt);
 }
 
+function monthStart(dateStr: string): string {
+  const [y, m] = dateStr.split('-').map(Number);
+  return `${y}-${String(m).padStart(2, '0')}-01`;
+}
+
+// Total whole-plus-partial calendar months spanned by [floorDate, yesterday]
+// — the fixed denominator for "N of M months backfilled" progress display.
+// Pure date math, no query: recomputed the same way on every read, so it
+// can never drift from what the backfill loop below is actually walking.
+function monthsInRange(floorDate: string, yesterday: string): number {
+  const [fy, fm] = floorDate.split('-').map(Number);
+  const [yy, ym] = yesterday.split('-').map(Number);
+  return (yy - fy) * 12 + (ym - fm) + 1;
+}
+
 function chunkRange(since: string, until: string, chunkDays: number): { since: string; until: string }[] {
   const chunks: { since: string; until: string }[] = [];
   let cursor = since;
@@ -482,16 +497,34 @@ interface SyncState {
   earliest_synced: string | null;
   last_success_until: string | null;
   backfill_complete: boolean;
+  newest_synced: string | null;
   creatives_earliest_synced: string | null;
   creatives_backfill_complete: boolean;
+  creatives_newest_synced: string | null;
 }
 
-// Builds the same top-up (recent days, every run) / backfill (older history,
-// only until floorDate) range split syncInsights uses, generalized so
-// syncCreatives's independent creatives_* watermark can reuse it.
+// Builds the top-up (recent days, every run) / backfill range split
+// syncInsights uses, generalized so syncCreatives's independent creatives_*
+// watermark can reuse it.
+//
+// Backfill walks BACKWARD from `newestSynced` (defaulting to `yesterday` on
+// a fresh account) down toward `floorDate`, one calendar month at a time —
+// recent history becomes usable almost immediately instead of a 37-month
+// account sitting for hours with only ancient history synced and nothing
+// current (the actual failure mode this replaced: an account interrupted
+// repeatedly by rate limits/timeouts had ~9 months of 2023-2024 data and
+// nothing from the last two years, because the old oldest-first walk from
+// floorDate never got far before crashing again).
+//
+// Only ONE month is returned per call — the caller persists newestSynced
+// after each month completes and calls this again for the next one, so a
+// crash mid-account loses at most the current month's progress. `earliest_synced`/
+// `backfillComplete` keep their existing meaning (oldest point reached; whether
+// floorDate was reached) since the walk still eventually covers the same
+// [floorDate, yesterday] span — only the arrival order changes.
 function buildSyncRanges(
   floorDate: string, yesterday: string,
-  lastSuccessUntil: string | null, earliestSynced: string | null, backfillComplete: boolean
+  lastSuccessUntil: string | null, newestSynced: string | null, earliestSynced: string | null, backfillComplete: boolean
 ): { since: string; until: string; kind: 'topup' | 'backfill' }[] {
   const ranges: { since: string; until: string; kind: 'topup' | 'backfill' }[] = [];
   const topUpSince = lastSuccessUntil
@@ -500,15 +533,102 @@ function buildSyncRanges(
   if (daysBetween(topUpSince, yesterday) >= 0) ranges.push({ since: topUpSince, until: yesterday, kind: 'topup' });
 
   if (!backfillComplete) {
-    const backfillUntil = earliestSynced ? addDays(earliestSynced, -1) : addDays(topUpSince, -1);
-    if (daysBetween(floorDate, backfillUntil) >= 0) ranges.push({ since: floorDate, until: backfillUntil, kind: 'backfill' });
+    // Frontier: the newest day not yet confirmed backfilled.
+    //   - Fresh account (both null): start at yesterday itself (whole
+    //     current partial month first).
+    //   - Legacy account transitioning from the old oldest-first model
+    //     (newestSynced null, earliestSynced set): the old model's chunk
+    //     loop already walks its remaining range newest-first internally
+    //     (see the `.reverse()` in runRangeToCompletion), so
+    //     [earliestSynced, yesterday] is already synced — resume the new
+    //     cursor from there rather than restarting and re-fetching it.
+    //   - Steady state (newestSynced set): resume one day older than it.
+    const effectiveNewest = newestSynced ?? earliestSynced;
+    const frontier = effectiveNewest ? addDays(effectiveNewest, -1) : yesterday;
+    if (daysBetween(floorDate, frontier) >= 0) {
+      const monthSince = monthStart(frontier);
+      // Clamp the month's start to floorDate for the oldest bucket, which
+      // is a partial month (floorDateFrom pads a day inside the 37-month
+      // boundary, so it rarely lands on the 1st).
+      const since = daysBetween(floorDate, monthSince) > 0 ? monthSince : floorDate;
+      ranges.push({ since, until: frontier, kind: 'backfill' });
+    }
   }
   return ranges;
 }
 
+// Runs one "range" (a top-up span, or a single backfill month) through the
+// existing chunk/persist machinery: chunks it at CHUNK_DAYS, fetches each
+// chunk × level with bounded concurrency, and advances the persisted
+// watermark past the longest completed, gap-free PREFIX only — a mid-run
+// crash loses at most a few chunks, never the whole range (previously the
+// watermark was only written after every chunk in the whole 37-month range
+// had completed). Returns the new watermark value reached (or null if
+// nothing persisted) and whether the range's oldest chunk was reached
+// without any gap — i.e. whether this range can be considered fully done.
+async function runRangeToCompletion(
+  accountId: string, token: string, range: { since: string; until: string; kind: 'topup' | 'backfill' },
+  levels: ('campaign' | 'adset' | 'ad')[], campaignIds: string[],
+  onDaysSynced: (n: number) => void
+): Promise<{ persisted: string | null; reachedSince: boolean }> {
+  // Chunks are processed oldest-to-newest for backfill (walking the
+  // watermark backward within this one month) and in natural order for
+  // top-up; either way the chunk list must be sorted so "contiguous prefix
+  // completed" has a well-defined meaning under concurrent (out-of-order-
+  // finishing) execution.
+  const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
+  const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
+
+  // gapped[i] marks a chunk that completed but had a campaign silently
+  // skipped due to a persistent row cap (see
+  // fetchInsightsChunkWithRowCapFallback). The persisted prefix must stop AT
+  // (not past) the first gapped chunk, so the next sync's range restarts
+  // from there and retries it.
+  const completed = new Array(chunks.length).fill(false);
+  const gapped = new Array(chunks.length).fill(false);
+  let persistedIdx = -1;
+  let persistedValue: string | null = null;
+  let stoppedAtGap = false;
+
+  const persistUpTo = async (idx: number) => {
+    if (idx <= persistedIdx) return;
+    persistedIdx = idx;
+    const frontier = chunks[idx]; // the oldest (backfill) or newest (top-up) fully-completed chunk so far
+    persistedValue = range.kind === 'topup' ? frontier.until : frontier.since;
+    const column = range.kind === 'topup' ? 'last_success_until' : 'earliest_synced';
+    await query(`UPDATE agency_meta_sync_state SET ${column} = $2, updated_at = now() WHERE account_id = $1`, [accountId, persistedValue]);
+  };
+
+  const units: { level: 'campaign' | 'adset' | 'ad'; chunkIdx: number; chunk: { since: string; until: string } }[] = [];
+  for (let i = 0; i < chunks.length; i++) for (const level of levels) units.push({ level, chunkIdx: i, chunk: chunks[i] });
+  const levelsRemaining = new Array(chunks.length).fill(levels.length);
+
+  await runPooled(units, SYNC_CONCURRENCY, async ({ level, chunkIdx, chunk }) => {
+    const { hadGaps } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
+    if (hadGaps) gapped[chunkIdx] = true;
+    if (level === 'campaign') onDaysSynced(daysBetween(chunk.since, chunk.until) + 1);
+    levelsRemaining[chunkIdx]--;
+    if (levelsRemaining[chunkIdx] === 0) {
+      completed[chunkIdx] = true;
+      let cursor = persistedIdx + 1;
+      while (cursor < completed.length && completed[cursor] && !gapped[cursor]) cursor++;
+      if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
+      if (cursor < completed.length && completed[cursor] && gapped[cursor]) stoppedAtGap = true;
+    }
+  });
+
+  if (!stoppedAtGap && chunks.length > 0) {
+    let cursor = persistedIdx + 1;
+    while (cursor < completed.length && completed[cursor] && !gapped[cursor]) cursor++;
+    if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
+  }
+
+  return { persisted: persistedValue, reachedSince: chunks.length > 0 && !stoppedAtGap && completed.every(c => c) };
+}
+
 async function syncInsights(accountId: string, token: string): Promise<{ daysSynced: number; newEarliestDate: string | null }> {
   const [state] = await query<SyncState>(
-    `SELECT earliest_synced, last_success_until, backfill_complete, creatives_earliest_synced, creatives_backfill_complete FROM agency_meta_sync_state WHERE account_id = $1`,
+    `SELECT earliest_synced, last_success_until, backfill_complete, newest_synced, creatives_earliest_synced, creatives_backfill_complete, creatives_newest_synced FROM agency_meta_sync_state WHERE account_id = $1`,
     [accountId]
   );
 
@@ -517,106 +637,52 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
   const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
   const campaignIds = await campaignIdsForAccount(accountId);
 
-  // Forward top-up: re-pull the last 7 days (or from floorDate on first run)
-  // through yesterday, every run — Meta's attribution windows mutate recent
-  // days for up to 7 days after the fact, so cached numbers must not freeze
-  // before that window closes. Backward backfill continues from
-  // earliest_synced down to floorDate, kept as its own range (distinct from
-  // top-up, even on a first run where both happen to start at floorDate) so
-  // a first-ever sync's giant 37-month walk gets its own incremental
-  // watermark progress below, instead of being silently folded into the
-  // top-up range with no per-chunk persistence.
-  const ranges = buildSyncRanges(floorDate, yesterday, state?.last_success_until ?? null, state?.earliest_synced ?? null, state?.backfill_complete ?? false);
-
   let daysSynced = 0;
   let newEarliest = state?.earliest_synced || null;
+  let newestSynced = state?.newest_synced || null;
+  let backfillComplete = state?.backfill_complete ?? false;
+  let topUpDone = false;
 
-  for (const range of ranges) {
-    // Chunks are processed oldest-to-newest for backfill (walking the
-    // watermark backward) and in natural order for top-up; either way we
-    // need the chunk list sorted so "contiguous prefix completed" has a
-    // well-defined meaning under concurrent (out-of-order-finishing) execution.
-    const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
-    const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
+  // Forward top-up: re-pull the last 7 days (or from floorDate on first run)
+  // through yesterday, ONCE per sync run — Meta's attribution windows
+  // mutate recent days for up to 7 days after the fact, so cached numbers
+  // must not freeze before that window closes.
+  //
+  // Backward backfill walks ONE calendar month at a time, newest month
+  // first (see buildSyncRanges), looping here until the whole remaining
+  // history is covered (or a gap stops it) — still a single "Sync now"
+  // click's worth of work, just checkpointed at month boundaries instead of
+  // only ever at the very end, so admin-panel progress and a mid-run crash
+  // both resolve to "N of M months" instead of an opaque multi-hour black box.
+  let guard = BACKFILL_MONTHS + 2; // safety cap: at most this many month-iterations per call
+  while (guard-- > 0) {
+    const ranges = buildSyncRanges(floorDate, yesterday, state?.last_success_until ?? null, newestSynced, newEarliest, backfillComplete);
+    const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
+    const backfill = ranges.find(r => r.kind === 'backfill');
+    if (!topUp && !backfill) break;
 
-    // Tracks which chunk indices have finished (all 3 levels) so we can
-    // advance the persisted watermark past the longest completed PREFIX
-    // only — never past a chunk whose predecessor hasn't finished yet, even
-    // if it happens to complete first under concurrency. This is what makes
-    // a mid-run crash lose at most a few chunks of progress instead of the
-    // entire range (the bug this fixes: previously the watermark was only
-    // written after ALL chunks in a range — which could be ~375 chunks on a
-    // first-ever 37-month sync — had completed).
-    //
-    // gapped[i] marks a chunk that completed but had a campaign silently
-    // skipped due to a persistent row cap (see
-    // fetchInsightsChunkWithRowCapFallback). The persisted prefix must stop
-    // AT (not past) the first gapped chunk, so a future sync's backfill
-    // range naturally starts from there again instead of the gap being
-    // permanently skipped past and never retried.
-    const completed = new Array(chunks.length).fill(false);
-    const gapped = new Array(chunks.length).fill(false);
-    let persistedIdx = -1; // last index (into `chunks`) whose watermark has been persisted
-    let stoppedAtGap = false;
-
-    const persistUpTo = async (idx: number) => {
-      if (idx <= persistedIdx) return;
-      persistedIdx = idx;
-      const frontier = chunks[idx]; // the oldest (backfill) or newest (top-up) fully-completed chunk so far
-      if (range.kind === 'topup') {
-        await query(`UPDATE agency_meta_sync_state SET last_success_until = $2, updated_at = now() WHERE account_id = $1`, [accountId, frontier.until]);
-      } else {
-        newEarliest = frontier.since;
-        await query(`UPDATE agency_meta_sync_state SET earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, newEarliest]);
-      }
-    };
-
-    const units: { level: 'campaign' | 'adset' | 'ad'; chunkIdx: number; chunk: { since: string; until: string } }[] = [];
-    for (let i = 0; i < chunks.length; i++) for (const level of levels) units.push({ level, chunkIdx: i, chunk: chunks[i] });
-
-    // Count of levels remaining before a chunk counts as "fully done".
-    const levelsRemaining = new Array(chunks.length).fill(levels.length);
-
-    await runPooled(units, SYNC_CONCURRENCY, async ({ level, chunkIdx, chunk }) => {
-      const { hadGaps } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
-      if (hadGaps) gapped[chunkIdx] = true;
-      if (level === 'campaign') {
-        daysSynced += daysBetween(chunk.since, chunk.until) + 1;
-      }
-      levelsRemaining[chunkIdx]--;
-      if (levelsRemaining[chunkIdx] === 0) {
-        completed[chunkIdx] = true;
-        // Advance persistedIdx past the longest contiguous completed,
-        // NOT-gapped prefix starting right after what's already persisted.
-        // Stop (and don't persist) at the first gapped chunk so the next
-        // sync's backfill range restarts from there and retries it.
-        let cursor = persistedIdx + 1;
-        while (cursor < completed.length && completed[cursor] && !gapped[cursor]) cursor++;
-        if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
-        if (cursor < completed.length && completed[cursor] && gapped[cursor]) stoppedAtGap = true;
-      }
-    });
-
-    // Range finished (or all reachable chunks did) — persist through the
-    // longest gap-free prefix one more time in case the loop above's
-    // cursor advancement missed a final contiguous run (e.g. the very last
-    // chunk to complete was mid-prefix). Never persists past a gapped chunk.
-    if (!stoppedAtGap && chunks.length > 0) {
-      let cursor = persistedIdx + 1;
-      while (cursor < completed.length && completed[cursor] && !gapped[cursor]) cursor++;
-      if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
+    if (topUp) {
+      topUpDone = true;
+      await runRangeToCompletion(accountId, token, topUp, levels, campaignIds, n => { daysSynced += n; });
     }
-  }
+    if (!backfill) continue; // nothing left to backfill this run
+    const result = await runRangeToCompletion(accountId, token, backfill, levels, campaignIds, n => { daysSynced += n; });
+    if (result.persisted) newEarliest = result.persisted;
 
-  // Backfill is complete once we've reached floorDate with earliest_synced
-  // actually advanced all the way there — which happens only if no chunk
-  // along the way was forced to skip a campaign due to a persistent row cap
-  // (see the gap-stopping logic above). An account younger than 37 months
-  // naturally returns empty (not skipped) chunks near the floor, which is
-  // still a legitimate "no more history" signal, unaffected by this gate.
-  const reachedFloor = ranges.some(r => r.kind === 'backfill' && r.since === floorDate) && newEarliest === floorDate;
-  if (reachedFloor) {
-    await query(`UPDATE agency_meta_sync_state SET backfill_complete = true, earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
+    // A month only counts as backfilled (newest_synced advances past it) if
+    // it completed with NO gaps — otherwise the next sync must retry this
+    // same month from its own gap point, not silently skip past it.
+    if (result.reachedSince) {
+      newestSynced = backfill.since === floorDate ? floorDate : addDays(backfill.since, -1);
+      await query(`UPDATE agency_meta_sync_state SET newest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, newestSynced]);
+      if (backfill.since === floorDate) {
+        backfillComplete = true;
+        newEarliest = floorDate;
+        await query(`UPDATE agency_meta_sync_state SET backfill_complete = true, earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
+      }
+    } else {
+      break; // gap encountered — stop here, retry this month on the next sync
+    }
   }
 
   return { daysSynced, newEarliestDate: newEarliest };
@@ -717,7 +783,7 @@ interface BreakdownRow {
   image_asset?: { hash?: string }; video_asset?: { video_id?: string };
 }
 
-async function syncCreatives(accountId: string, token: string, ranges: { since: string; until: string; kind: 'topup' | 'backfill' }[], floorDate: string): Promise<void> {
+async function syncCreatives(accountId: string, token: string, floorDate: string, yesterday: string): Promise<void> {
   // 1) Ads + their creative metadata — derive asset identity per ad.
   const adsUrl = new URL(`${GRAPH}/act_${accountId}/ads`);
   adsUrl.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
@@ -857,18 +923,17 @@ async function syncCreatives(accountId: string, token: string, ranges: { since: 
     } catch { /* leave stored video source as-is */ }
   }
 
-  // 3) DCO per-asset-per-day breakdown (image_asset / video_asset). Walks the
-  // same top-up (recent days, every run) / backfill (older history, only
-  // until floorDate is reached) split as syncInsights — repeat "Sync now"
-  // clicks used to always re-walk the full 37-month range here, which is
-  // both slow and needlessly overwrites already-final days.
+  // 3) DCO per-asset-per-day breakdown (image_asset / video_asset). Walks
+  // the same top-up (recent days, every run) / month-chunked recent-first
+  // backfill split as syncInsights (see buildSyncRanges / runRangeToCompletion) —
+  // repeat "Sync now" clicks used to always re-walk the full 37-month range
+  // here, which is both slow and needlessly overwrote already-final days.
   const breakdownTypes: ('image_asset' | 'video_asset')[] = ['image_asset', 'video_asset'];
-  let newCreativesEarliest: string | null = null;
 
-  for (const range of ranges) {
+  const runBreakdownRange = async (range: { since: string; until: string; kind: 'topup' | 'backfill' }): Promise<{ persisted: string | null; reachedSince: boolean }> => {
     const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
     const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
-    if (chunks.length === 0) continue;
+    if (chunks.length === 0) return { persisted: null, reachedSince: false };
 
     // completed[i] flips true once BOTH breakdown types finish for chunk i;
     // the persisted watermark only advances past a gap-free completed
@@ -877,13 +942,14 @@ async function syncCreatives(accountId: string, token: string, ranges: { since: 
     const completed = new Array(chunks.length).fill(false);
     const typesRemaining = new Array(chunks.length).fill(breakdownTypes.length);
     let persistedIdx = -1;
+    let persistedValue: string | null = null;
 
     const persistUpTo = async (idx: number) => {
       if (idx <= persistedIdx) return;
       persistedIdx = idx;
       if (range.kind === 'backfill') {
-        newCreativesEarliest = chunks[idx].since;
-        await query(`UPDATE agency_meta_sync_state SET creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, newCreativesEarliest]);
+        persistedValue = chunks[idx].since;
+        await query(`UPDATE agency_meta_sync_state SET creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, persistedValue]);
       }
     };
 
@@ -960,15 +1026,48 @@ async function syncCreatives(accountId: string, token: string, ranges: { since: 
         if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
       }
     });
-  }
 
-  // Creatives backfill is complete once a backward range actually reached
-  // floorDate — same reachedFloor gate as syncInsights, so a younger account
-  // (naturally running out of history before 37 months) still counts as
-  // "done" while a persistent-failure gap does not silently get skipped.
-  const reachedFloor = ranges.some(r => r.kind === 'backfill' && r.since === floorDate) && newCreativesEarliest === floorDate;
-  if (reachedFloor) {
-    await query(`UPDATE agency_meta_sync_state SET creatives_backfill_complete = true, creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
+    return { persisted: persistedValue, reachedSince: chunks.length > 0 && completed.every(c => c) };
+  };
+
+  const [creativesState] = await query<{ creatives_earliest_synced: string | null; creatives_backfill_complete: boolean; creatives_newest_synced: string | null; last_success_until: string | null }>(
+    `SELECT creatives_earliest_synced, creatives_backfill_complete, creatives_newest_synced, last_success_until FROM agency_meta_sync_state WHERE account_id = $1`,
+    [accountId]
+  );
+  let creativesEarliest = creativesState?.creatives_earliest_synced ?? null;
+  let creativesNewest = creativesState?.creatives_newest_synced ?? null;
+  let creativesBackfillComplete = creativesState?.creatives_backfill_complete ?? false;
+  let topUpDone = false;
+
+  // Same month-at-a-time, recent-first loop as syncInsights (see there for
+  // full rationale) — own watermark (creatives_*), since creatives hit a
+  // different Meta endpoint and can finish backfilling at a different pace.
+  let guard = BACKFILL_MONTHS + 2;
+  while (guard-- > 0) {
+    const ranges = buildSyncRanges(floorDate, yesterday, creativesState?.last_success_until ?? null, creativesNewest, creativesEarliest, creativesBackfillComplete);
+    const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
+    const backfill = ranges.find(r => r.kind === 'backfill');
+    if (!topUp && !backfill) break;
+
+    if (topUp) {
+      topUpDone = true;
+      await runBreakdownRange(topUp);
+    }
+    if (!backfill) continue;
+    const result = await runBreakdownRange(backfill);
+    if (result.persisted) creativesEarliest = result.persisted;
+
+    if (result.reachedSince) {
+      creativesNewest = backfill.since === floorDate ? floorDate : addDays(backfill.since, -1);
+      await query(`UPDATE agency_meta_sync_state SET creatives_newest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, creativesNewest]);
+      if (backfill.since === floorDate) {
+        creativesBackfillComplete = true;
+        creativesEarliest = floorDate;
+        await query(`UPDATE agency_meta_sync_state SET creatives_backfill_complete = true, creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
+      }
+    } else {
+      break; // gap encountered — stop here, retry this month on the next sync
+    }
   }
 }
 
@@ -989,20 +1088,7 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
     // Meta rejects with "(#3018) start date ... cannot be beyond 37 months",
     // the same boundary floorDateFrom() already pads a day inside of.
     const floorDate = floorDateFrom(yesterday);
-    const [creativesState] = await query<{ creatives_earliest_synced: string | null; creatives_backfill_complete: boolean; last_success_until: string | null }>(
-      `SELECT creatives_earliest_synced, creatives_backfill_complete, last_success_until FROM agency_meta_sync_state WHERE account_id = $1`,
-      [accountId]
-    );
-    // Own watermark (creatives_*), not the insights one — the two backfills
-    // progress independently since they hit different Meta endpoints and can
-    // finish at different times.
-    const creativeRanges = buildSyncRanges(
-      floorDate, yesterday,
-      creativesState?.last_success_until ?? null, // reuse insights' last_success_until as the top-up anchor — both need "recent days," no reason to track it twice
-      creativesState?.creatives_earliest_synced ?? null,
-      creativesState?.creatives_backfill_complete ?? false
-    );
-    await syncCreatives(accountId, token, creativeRanges, floorDate);
+    await syncCreatives(accountId, token, floorDate, yesterday);
 
     await finishSync(accountId, { success: true });
     return { accountId, entitiesUpserted, daysSynced, newEarliestDate, error: null };
@@ -1011,6 +1097,52 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
     await finishSync(accountId, { success: false, error: message });
     return { accountId, entitiesUpserted: 0, daysSynced: 0, newEarliestDate: null, error: message };
   }
+}
+
+export interface BackfillProgress {
+  monthsTotal: number;
+  monthsDone: number;
+  complete: boolean;
+}
+
+// Admin-panel progress display, combining insights + creatives into one
+// number (the slower of the two) so an admin sees a single "N of M months"
+// figure rather than two that can disagree — per-type detail isn't needed
+// at this altitude, just "how much usable history exists yet." Computed
+// from the persisted watermark columns only (no live Meta call), using the
+// server's own clock for `yesterday` — a day or two of timezone slop
+// doesn't matter for a month-granularity progress bar, unlike the sync
+// engine itself which needs the account's exact timezone for date_range
+// correctness.
+export function computeBackfillProgress(state: {
+  newest_synced: string | null; earliest_synced: string | null; backfill_complete: boolean;
+  creatives_newest_synced: string | null; creatives_earliest_synced: string | null; creatives_backfill_complete: boolean;
+}): BackfillProgress {
+  const yesterday = fmtDate(new Date(Date.now() - 86400000));
+  const floorDate = floorDateFrom(yesterday);
+  const monthsTotal = monthsInRange(floorDate, yesterday);
+
+  const monthsDoneFor = (newestSynced: string | null, earliestSynced: string | null, backfillComplete: boolean): number => {
+    if (backfillComplete) return monthsTotal;
+    // Steady state (new model): newest_synced walks from yesterday down to
+    // floorDate — months strictly newer than its frontier are done.
+    if (newestSynced) return Math.min(monthsTotal, monthsInRange(newestSynced, yesterday));
+    // Legacy accounts mid-transition: newest_synced hasn't been set yet by
+    // a sync run under the new code, but earliest_synced may already
+    // reflect real progress from the old oldest-first model. That range
+    // ([earliest_synced, yesterday]) is exactly what the old model's chunk
+    // loop actually walks newest-first within its remaining span (see the
+    // `.reverse()` in runRangeToCompletion) — so it's already the newest N
+    // months, safe to count as done until the next sync run initializes
+    // newest_synced for real.
+    return earliestSynced ? Math.min(monthsTotal, monthsInRange(earliestSynced, yesterday)) : 0;
+  };
+
+  const insightsDone = monthsDoneFor(state.newest_synced, state.earliest_synced, state.backfill_complete);
+  const creativesDone = monthsDoneFor(state.creatives_newest_synced, state.creatives_earliest_synced, state.creatives_backfill_complete);
+  const monthsDone = Math.min(insightsDone, creativesDone);
+
+  return { monthsTotal, monthsDone, complete: state.backfill_complete && state.creatives_backfill_complete };
 }
 
 export async function syncClientAccounts(clientId: string): Promise<SyncAccountResult[]> {

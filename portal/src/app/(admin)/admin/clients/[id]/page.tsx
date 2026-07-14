@@ -11,6 +11,7 @@ import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
 import ImpersonateButton from './ImpersonateButton';
 import SyncControlForm, { SyncStateRow } from './SyncControlForm';
+import { computeBackfillProgress } from '@/lib/metaSync';
 
 interface ClientDetail {
   id: string;
@@ -39,6 +40,10 @@ interface SyncStateDbRow {
   last_synced_at: string | null;
   backfill_complete: boolean;
   earliest_synced: string | null;
+  newest_synced: string | null;
+  creatives_backfill_complete: boolean;
+  creatives_earliest_synced: string | null;
+  creatives_newest_synced: string | null;
   last_error: string | null;
 }
 
@@ -96,7 +101,8 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
     : agencyAccounts.map(a => a.id);
   const syncRows = scopedAccountIds.length > 0
     ? await query<SyncStateDbRow>(
-        `SELECT account_id, status, last_synced_at, backfill_complete, earliest_synced, last_error
+        `SELECT account_id, status, last_synced_at, backfill_complete, earliest_synced, newest_synced,
+                creatives_backfill_complete, creatives_earliest_synced, creatives_newest_synced, last_error
          FROM agency_meta_sync_state
          WHERE account_id = ANY($1)`,
         [scopedAccountIds]
@@ -105,14 +111,24 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   const syncRowByAccountId = new Map(syncRows.map(r => [r.account_id, r] as const));
   const syncStates: SyncStateRow[] = scopedAccountIds.map(accountId => {
     const row = syncRowByAccountId.get(accountId);
+    const progress = computeBackfillProgress({
+      newest_synced: row?.newest_synced ?? null,
+      earliest_synced: row?.earliest_synced ?? null,
+      backfill_complete: row?.backfill_complete ?? false,
+      creatives_newest_synced: row?.creatives_newest_synced ?? null,
+      creatives_earliest_synced: row?.creatives_earliest_synced ?? null,
+      creatives_backfill_complete: row?.creatives_backfill_complete ?? false,
+    });
     return {
       accountId,
       accountName: nameByAccountId.get(accountId) || '',
       status: row?.status ?? 'idle',
       lastSyncedAt: row?.last_synced_at ?? null,
-      backfillComplete: row?.backfill_complete ?? false,
+      backfillComplete: progress.complete,
       earliestSynced: row?.earliest_synced ?? null,
       lastError: row?.last_error ?? null,
+      monthsTotal: progress.monthsTotal,
+      monthsDone: progress.monthsDone,
     };
   });
 

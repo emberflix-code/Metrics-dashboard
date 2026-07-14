@@ -12,6 +12,8 @@ export interface SyncStateRow {
   backfillComplete: boolean;
   earliestSynced: string | null;
   lastError: string | null;
+  monthsTotal: number;
+  monthsDone: number;
 }
 
 interface Props {
@@ -135,9 +137,26 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
             </div>
             <div className="mt-1 text-xs text-slate-500 space-y-0.5">
               <div>Last synced: {mounted ? relativeTime(s.lastSyncedAt) : '—'}</div>
-              <div>
-                Backfill: {s.backfillComplete ? `complete through ${s.earliestSynced ?? '—'}` : (s.earliestSynced ? `in progress, reached ${s.earliestSynced}` : 'not started')}
+              <div className="mt-1.5">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-slate-400">
+                    {s.backfillComplete
+                      ? `Full history synced (${s.monthsTotal} of ${s.monthsTotal} months)`
+                      : `${s.monthsDone} of ${s.monthsTotal} months backfilled`}
+                  </span>
+                </div>
+                <div className="mt-1 h-1.5 rounded-full bg-slate-700/60 overflow-hidden">
+                  <div
+                    className="h-full bg-blue-500 rounded-full transition-[width]"
+                    style={{ width: `${Math.round(100 * s.monthsDone / Math.max(1, s.monthsTotal))}%` }}
+                  />
+                </div>
               </div>
+              {!s.backfillComplete && (
+                <p className="text-[11px] text-slate-500">
+                  Most recent months sync first, so current performance data is usable quickly — older history fills in behind it over subsequent syncs.
+                </p>
+              )}
               {s.lastError && <div className="text-rose-400">Error: {s.lastError}</div>}
             </div>
           </div>
@@ -155,9 +174,10 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
         </button>
         {syncing && (
           <p className="mt-2 text-xs text-slate-500">
-            This can take several minutes on the first run (full history backfill). Navigating away won&apos;t
-            cancel it — the sync keeps running server-side; re-clicking while it&apos;s in progress is safe and
-            will just report &ldquo;already in progress&rdquo;.
+            Each click continues the backfill from the most recent month backward, checkpointing progress one month
+            at a time — this can take a while on a large account&apos;s first run. Navigating away won&apos;t cancel it —
+            the sync keeps running server-side; re-clicking while it&apos;s in progress is safe and will just report
+            &ldquo;already in progress&rdquo;.
           </p>
         )}
         {syncError && <p className="mt-2 text-xs text-rose-400">{syncError}</p>}

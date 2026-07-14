@@ -109,6 +109,15 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
     // every sync (expensive, and needlessly overwrites already-final data).
     await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS creatives_earliest_synced TEXT`).catch(() => {});
     await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS creatives_backfill_complete BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+    // Recent-first, month-chunked backfill watermark. Backfill used to walk
+    // floorDate -> yesterday (oldest-first), so a large account interrupted
+    // partway through could sit for hours with only ancient history synced
+    // and nothing recent — exactly what happened to a 58k-entity account.
+    // newest_synced tracks the frontier of the new backward-from-yesterday
+    // walk; earliest_synced/backfill_complete keep their existing meaning
+    // (oldest point reached; whether floorDate was reached) unchanged.
+    await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS newest_synced TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS creatives_newest_synced TEXT`).catch(() => {});
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meta_entities (
