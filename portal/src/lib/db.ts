@@ -103,6 +103,12 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
         updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Separate watermark for the creatives/DCO-breakdown backfill — distinct
+    // from the insights watermark above (earliest_synced/backfill_complete)
+    // because creatives used to always re-walk the full 37-month range on
+    // every sync (expensive, and needlessly overwrites already-final data).
+    await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS creatives_earliest_synced TEXT`).catch(() => {});
+    await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS creatives_backfill_complete BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meta_entities (

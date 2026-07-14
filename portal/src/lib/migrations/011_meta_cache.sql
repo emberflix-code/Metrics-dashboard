@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS agency_meta_sync_state (
   last_success_until   TEXT,
   earliest_synced      TEXT,
   backfill_complete    BOOLEAN NOT NULL DEFAULT false,
+  -- Separate watermark for the creatives/DCO-breakdown backfill (distinct
+  -- range-tracking from the insights watermark above) — lets repeat syncs
+  -- only top up recent days instead of re-walking the full 37-month range.
+  creatives_earliest_synced   TEXT,
+  creatives_backfill_complete BOOLEAN NOT NULL DEFAULT false,
   last_error           TEXT,
   last_run_started_at  TIMESTAMPTZ,
   updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()

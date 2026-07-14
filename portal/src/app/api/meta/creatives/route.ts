@@ -480,11 +480,17 @@ export async function GET(req: NextRequest) {
     // Fetch sharper image URLs for any asset grouped by image_hash. Meta's /adimages
     // endpoint returns `url` (full-res, permanent) for each hash in one batched call per
     // account. This replaces the blurry 64x64 thumbnail we get from /ads?fields=creative.
+    // Carousel slides (CASE 1) key on the bare image_hash, unprefixed — include those too,
+    // or slides stay stuck on Meta's blurry ~64x64 slide.picture preview forever.
+    const isHash = (h: string) => /^[a-f0-9]{20,}$/i.test(h); // sanity: Meta hashes are long hex
     const imageHashes = Array.from(new Set(
-      rows
-        .filter(r => r.assetKey.startsWith('image:'))
-        .map(r => r.assetKey.slice('image:'.length))
-        .filter(h => /^[a-f0-9]{20,}$/i.test(h)) // sanity: Meta hashes are long hex
+      rows.flatMap(r => {
+        if (r.assetKey.startsWith('image:')) {
+          const h = r.assetKey.slice('image:'.length);
+          return isHash(h) ? [h] : [];
+        }
+        return r.type === 'carousel-slide' && isHash(r.assetKey) ? [r.assetKey] : [];
+      })
     ));
     // For creatives where Meta didn't return image_hash (DCO/Advantage+ ads use asset_feed_spec
     // instead of a single image_hash on the parent creative), fetch the spec to extract the
@@ -540,6 +546,9 @@ export async function GET(req: NextRequest) {
           if (r.assetKey.startsWith('image:')) {
             const hash = r.assetKey.slice('image:'.length);
             const better = hashToUrl.get(hash);
+            if (better) r.thumbnail = better;
+          } else if (r.type === 'carousel-slide') {
+            const better = hashToUrl.get(r.assetKey);
             if (better) r.thumbnail = better;
           }
         }

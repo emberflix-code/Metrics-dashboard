@@ -474,11 +474,33 @@ interface SyncState {
   earliest_synced: string | null;
   last_success_until: string | null;
   backfill_complete: boolean;
+  creatives_earliest_synced: string | null;
+  creatives_backfill_complete: boolean;
+}
+
+// Builds the same top-up (recent days, every run) / backfill (older history,
+// only until floorDate) range split syncInsights uses, generalized so
+// syncCreatives's independent creatives_* watermark can reuse it.
+function buildSyncRanges(
+  floorDate: string, yesterday: string,
+  lastSuccessUntil: string | null, earliestSynced: string | null, backfillComplete: boolean
+): { since: string; until: string; kind: 'topup' | 'backfill' }[] {
+  const ranges: { since: string; until: string; kind: 'topup' | 'backfill' }[] = [];
+  const topUpSince = lastSuccessUntil
+    ? (daysBetween(floorDate, addDays(lastSuccessUntil, -7)) > 0 ? addDays(lastSuccessUntil, -7) : floorDate)
+    : floorDate;
+  if (daysBetween(topUpSince, yesterday) >= 0) ranges.push({ since: topUpSince, until: yesterday, kind: 'topup' });
+
+  if (!backfillComplete) {
+    const backfillUntil = earliestSynced ? addDays(earliestSynced, -1) : addDays(topUpSince, -1);
+    if (daysBetween(floorDate, backfillUntil) >= 0) ranges.push({ since: floorDate, until: backfillUntil, kind: 'backfill' });
+  }
+  return ranges;
 }
 
 async function syncInsights(accountId: string, token: string): Promise<{ daysSynced: number; newEarliestDate: string | null }> {
   const [state] = await query<SyncState>(
-    `SELECT earliest_synced, last_success_until, backfill_complete FROM agency_meta_sync_state WHERE account_id = $1`,
+    `SELECT earliest_synced, last_success_until, backfill_complete, creatives_earliest_synced, creatives_backfill_complete FROM agency_meta_sync_state WHERE account_id = $1`,
     [accountId]
   );
 
@@ -487,27 +509,16 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
   const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
   const campaignIds = await campaignIdsForAccount(accountId);
 
-  const ranges: { since: string; until: string; kind: 'topup' | 'backfill' }[] = [];
-
   // Forward top-up: re-pull the last 7 days (or from floorDate on first run)
   // through yesterday, every run — Meta's attribution windows mutate recent
   // days for up to 7 days after the fact, so cached numbers must not freeze
-  // before that window closes. Clamp to floorDate so this never reaches
-  // earlier than the account's configured history floor.
-  const topUpSince = state?.last_success_until
-    ? (daysBetween(floorDate, addDays(state.last_success_until, -7)) > 0 ? addDays(state.last_success_until, -7) : floorDate)
-    : floorDate;
-  if (daysBetween(topUpSince, yesterday) >= 0) ranges.push({ since: topUpSince, until: yesterday, kind: 'topup' });
-
-  // Backward backfill: continue from earliest_synced down to floorDate. Kept
-  // as its own range (distinct from top-up, even on a first run where both
-  // happen to start at floorDate) so a first-ever sync's giant 37-month walk
-  // gets its own incremental watermark progress below, instead of being
-  // silently folded into the top-up range with no per-chunk persistence.
-  if (!state?.backfill_complete) {
-    const backfillUntil = state?.earliest_synced ? addDays(state.earliest_synced, -1) : addDays(topUpSince, -1);
-    if (daysBetween(floorDate, backfillUntil) >= 0) ranges.push({ since: floorDate, until: backfillUntil, kind: 'backfill' });
-  }
+  // before that window closes. Backward backfill continues from
+  // earliest_synced down to floorDate, kept as its own range (distinct from
+  // top-up, even on a first run where both happen to start at floorDate) so
+  // a first-ever sync's giant 37-month walk gets its own incremental
+  // watermark progress below, instead of being silently folded into the
+  // top-up range with no per-chunk persistence.
+  const ranges = buildSyncRanges(floorDate, yesterday, state?.last_success_until ?? null, state?.earliest_synced ?? null, state?.backfill_complete ?? false);
 
   let daysSynced = 0;
   let newEarliest = state?.earliest_synced || null;
@@ -698,7 +709,7 @@ interface BreakdownRow {
   image_asset?: { hash?: string }; video_asset?: { video_id?: string };
 }
 
-async function syncCreatives(accountId: string, token: string, since: string, until: string): Promise<void> {
+async function syncCreatives(accountId: string, token: string, ranges: { since: string; until: string; kind: 'topup' | 'backfill' }[], floorDate: string): Promise<void> {
   // 1) Ads + their creative metadata — derive asset identity per ad.
   const adsUrl = new URL(`${GRAPH}/act_${accountId}/ads`);
   adsUrl.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
@@ -763,9 +774,22 @@ async function syncCreatives(accountId: string, token: string, since: string, un
   }
 
   // 2) Image/video full-res enrichment — same batching as the live routes.
-  const imageHashes = Array.from(new Set(
-    Array.from(assetsByKey.keys()).filter(k => k.startsWith('image:')).map(k => k.slice('image:'.length)).filter(h => /^[a-f0-9]{20,}$/i.test(h))
-  ));
+  // Two key shapes carry a real Meta image hash: "image:<hash>" (CASE 3,
+  // single-image ads) and a bare "<hash>" (carousel slides — deriveAssets
+  // uses slide.image_hash directly, unprefixed, to match the live route's
+  // asset identity exactly). Both are eligible for the /adimages full-res
+  // lookup; without the bare-hash branch, carousel slides were permanently
+  // stuck on Meta's blurry ~64x64 slide.picture preview.
+  const hashToAssetKey = new Map<string, string>();
+  for (const key of Array.from(assetsByKey.keys())) {
+    if (key.startsWith('image:')) {
+      const hash = key.slice('image:'.length);
+      if (/^[a-f0-9]{20,}$/i.test(hash)) hashToAssetKey.set(hash, key);
+    } else if (/^[a-f0-9]{20,}$/i.test(key)) {
+      hashToAssetKey.set(key, key);
+    }
+  }
+  const imageHashes = Array.from(hashToAssetKey.keys());
   if (imageHashes.length > 0) {
     try {
       const u = new URL(`${GRAPH}/act_${accountId}/adimages`);
@@ -776,10 +800,11 @@ async function syncCreatives(accountId: string, token: string, since: string, un
       const json = await res.json() as { data?: { hash?: string; url?: string; permalink_url?: string }[] };
       for (const img of json.data || []) {
         const better = img.url || img.permalink_url;
-        if (img.hash && better) {
+        const assetKey = img.hash ? hashToAssetKey.get(img.hash) : undefined;
+        if (assetKey && better) {
           await query(
             `UPDATE meta_creative_assets SET thumbnail = $3, thumbnail_fetched_at = now(), updated_at = now() WHERE account_id = $1 AND asset_key = $2`,
-            [accountId, `image:${img.hash}`, better]
+            [accountId, assetKey, better]
           );
         }
       }
@@ -824,74 +849,119 @@ async function syncCreatives(accountId: string, token: string, since: string, un
     } catch { /* leave stored video source as-is */ }
   }
 
-  // 3) DCO per-asset-per-day breakdown (image_asset / video_asset).
-  const chunks = chunkRange(since, until, CHUNK_DAYS);
+  // 3) DCO per-asset-per-day breakdown (image_asset / video_asset). Walks the
+  // same top-up (recent days, every run) / backfill (older history, only
+  // until floorDate is reached) split as syncInsights — repeat "Sync now"
+  // clicks used to always re-walk the full 37-month range here, which is
+  // both slow and needlessly overwrites already-final days.
   const breakdownTypes: ('image_asset' | 'video_asset')[] = ['image_asset', 'video_asset'];
-  const units: { breakdown: 'image_asset' | 'video_asset'; chunk: { since: string; until: string } }[] = [];
-  for (const b of breakdownTypes) for (const c of chunks) units.push({ breakdown: b, chunk: c });
+  let newCreativesEarliest: string | null = null;
 
-  await runPooled(units, SYNC_CONCURRENCY, async ({ breakdown, chunk }) => {
-    const u = new URL(`${GRAPH}/act_${accountId}/insights`);
-    u.searchParams.set('level', 'ad');
-    u.searchParams.set('breakdowns', breakdown);
-    u.searchParams.set('fields', 'ad_id,spend,impressions,inline_link_clicks,actions');
-    u.searchParams.set('time_range', JSON.stringify(chunk));
-    u.searchParams.set('time_increment', '1');
-    u.searchParams.set('limit', '500');
-    u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
-    u.searchParams.set('access_token', token);
-    let rows: BreakdownRow[] = [];
-    try { rows = await fetchMetaWithRetry<BreakdownRow>(u); } catch { return; }
+  for (const range of ranges) {
+    const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
+    const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
+    if (chunks.length === 0) continue;
 
-    interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number }
-    // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
-    // can return the same (asset, ad, day) combination more than once within
-    // a single breakdown fetch (e.g. across attribution-window buckets), and
-    // a batched multi-row upsert can't touch the same conflict target twice
-    // in one statement ("ON CONFLICT DO UPDATE command cannot affect row a
-    // second time"), unlike the old row-by-row loop where each write was its
-    // own statement and simply overwrote the previous one.
-    const preparedByKey = new Map<string, PreparedBreakdown>();
-    for (const r of rows) {
-      const assetHash = breakdown === 'image_asset' ? r.image_asset?.hash : r.video_asset?.video_id;
-      const assetKey = breakdown === 'image_asset' ? (assetHash ? `image:${assetHash}` : null) : (assetHash ? `video:${assetHash}` : null);
-      if (!assetKey || !r.ad_id || !r.date_start) continue;
-      const key = `${assetKey}|${r.ad_id}|${r.date_start}`;
-      const spend = parseFloat(r.spend || '0') || 0;
-      const impressions = parseInt(r.impressions || '0', 10) || 0;
-      const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
-      const results = resolveResultsFromActions(r.actions);
-      const existing = preparedByKey.get(key);
-      if (existing) {
-        existing.spend += spend;
-        existing.impressions += impressions;
-        existing.linkClicks += linkClicks;
-        existing.results += results;
-      } else {
-        preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results });
+    // completed[i] flips true once BOTH breakdown types finish for chunk i;
+    // the persisted watermark only advances past a gap-free completed
+    // prefix, same rationale as syncInsights (a mid-run crash loses at most
+    // a few chunks, not the whole range).
+    const completed = new Array(chunks.length).fill(false);
+    const typesRemaining = new Array(chunks.length).fill(breakdownTypes.length);
+    let persistedIdx = -1;
+
+    const persistUpTo = async (idx: number) => {
+      if (idx <= persistedIdx) return;
+      persistedIdx = idx;
+      if (range.kind === 'backfill') {
+        newCreativesEarliest = chunks[idx].since;
+        await query(`UPDATE agency_meta_sync_state SET creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, newCreativesEarliest]);
       }
-    }
-    const prepared = Array.from(preparedByKey.values());
+    };
 
-    // Batched upsert — this is the highest-volume write in the whole sync
-    // (per asset × per ad × per day), the main source of the row-by-row
-    // Postgres log flood this batching pass fixes.
-    for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
-      await query(
-        `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results)
-         SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results
-         FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[])
-           AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results)
-         ON CONFLICT (account_id, asset_key, ad_id, date) DO UPDATE SET
-           spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results`,
-        [
-          accountId,
-          batch.map(p => p.assetKey), batch.map(p => p.adId), batch.map(p => p.date),
-          batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results),
-        ]
-      );
-    }
-  });
+    const units: { breakdown: 'image_asset' | 'video_asset'; chunkIdx: number; chunk: { since: string; until: string } }[] = [];
+    for (let i = 0; i < chunks.length; i++) for (const b of breakdownTypes) units.push({ breakdown: b, chunkIdx: i, chunk: chunks[i] });
+
+    await runPooled(units, SYNC_CONCURRENCY, async ({ breakdown, chunkIdx, chunk }) => {
+      const u = new URL(`${GRAPH}/act_${accountId}/insights`);
+      u.searchParams.set('level', 'ad');
+      u.searchParams.set('breakdowns', breakdown);
+      u.searchParams.set('fields', 'ad_id,spend,impressions,inline_link_clicks,actions');
+      u.searchParams.set('time_range', JSON.stringify(chunk));
+      u.searchParams.set('time_increment', '1');
+      u.searchParams.set('limit', '500');
+      u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
+      u.searchParams.set('access_token', token);
+      let rows: BreakdownRow[] = [];
+      try { rows = await fetchMetaWithRetry<BreakdownRow>(u); } catch { /* leave chunk incomplete, retried on the next sync */ }
+
+      interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number }
+      // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
+      // can return the same (asset, ad, day) combination more than once within
+      // a single breakdown fetch (e.g. across attribution-window buckets), and
+      // a batched multi-row upsert can't touch the same conflict target twice
+      // in one statement ("ON CONFLICT DO UPDATE command cannot affect row a
+      // second time"), unlike the old row-by-row loop where each write was its
+      // own statement and simply overwrote the previous one.
+      const preparedByKey = new Map<string, PreparedBreakdown>();
+      for (const r of rows) {
+        const assetHash = breakdown === 'image_asset' ? r.image_asset?.hash : r.video_asset?.video_id;
+        const assetKey = breakdown === 'image_asset' ? (assetHash ? `image:${assetHash}` : null) : (assetHash ? `video:${assetHash}` : null);
+        if (!assetKey || !r.ad_id || !r.date_start) continue;
+        const key = `${assetKey}|${r.ad_id}|${r.date_start}`;
+        const spend = parseFloat(r.spend || '0') || 0;
+        const impressions = parseInt(r.impressions || '0', 10) || 0;
+        const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
+        const results = resolveResultsFromActions(r.actions);
+        const existing = preparedByKey.get(key);
+        if (existing) {
+          existing.spend += spend;
+          existing.impressions += impressions;
+          existing.linkClicks += linkClicks;
+          existing.results += results;
+        } else {
+          preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results });
+        }
+      }
+      const prepared = Array.from(preparedByKey.values());
+
+      // Batched upsert — this is the highest-volume write in the whole sync
+      // (per asset × per ad × per day), the main source of the row-by-row
+      // Postgres log flood this batching pass fixes.
+      for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
+        await query(
+          `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results)
+           SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results
+           FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[])
+             AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results)
+           ON CONFLICT (account_id, asset_key, ad_id, date) DO UPDATE SET
+             spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results`,
+          [
+            accountId,
+            batch.map(p => p.assetKey), batch.map(p => p.adId), batch.map(p => p.date),
+            batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results),
+          ]
+        );
+      }
+
+      typesRemaining[chunkIdx]--;
+      if (typesRemaining[chunkIdx] === 0) {
+        completed[chunkIdx] = true;
+        let cursor = persistedIdx + 1;
+        while (cursor < completed.length && completed[cursor]) cursor++;
+        if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
+      }
+    });
+  }
+
+  // Creatives backfill is complete once a backward range actually reached
+  // floorDate — same reachedFloor gate as syncInsights, so a younger account
+  // (naturally running out of history before 37 months) still counts as
+  // "done" while a persistent-failure gap does not silently get skipped.
+  const reachedFloor = ranges.some(r => r.kind === 'backfill' && r.since === floorDate) && newCreativesEarliest === floorDate;
+  if (reachedFloor) {
+    await query(`UPDATE agency_meta_sync_state SET creatives_backfill_complete = true, creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
+  }
 }
 
 // ── Public entry points ──────────────────────────────────────────────────
@@ -910,8 +980,21 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
     // days back` calculation — that duplicate arithmetic landed on a date
     // Meta rejects with "(#3018) start date ... cannot be beyond 37 months",
     // the same boundary floorDateFrom() already pads a day inside of.
-    const creativeSince = floorDateFrom(yesterday);
-    await syncCreatives(accountId, token, creativeSince, yesterday);
+    const floorDate = floorDateFrom(yesterday);
+    const [creativesState] = await query<{ creatives_earliest_synced: string | null; creatives_backfill_complete: boolean; last_success_until: string | null }>(
+      `SELECT creatives_earliest_synced, creatives_backfill_complete, last_success_until FROM agency_meta_sync_state WHERE account_id = $1`,
+      [accountId]
+    );
+    // Own watermark (creatives_*), not the insights one — the two backfills
+    // progress independently since they hit different Meta endpoints and can
+    // finish at different times.
+    const creativeRanges = buildSyncRanges(
+      floorDate, yesterday,
+      creativesState?.last_success_until ?? null, // reuse insights' last_success_until as the top-up anchor — both need "recent days," no reason to track it twice
+      creativesState?.creatives_earliest_synced ?? null,
+      creativesState?.creatives_backfill_complete ?? false
+    );
+    await syncCreatives(accountId, token, creativeRanges, floorDate);
 
     await finishSync(accountId, { success: true });
     return { accountId, entitiesUpserted, daysSynced, newEarliestDate, error: null };
