@@ -39,11 +39,17 @@ async function tokenForAccountId(accountId: string): Promise<string> {
   return decrypt(rows[0].token_enc);
 }
 
-// Meta's "too many rows" row-cap error (error_subcode 1487534) is NOT
-// transient (Meta marks it is_transient: false) — retrying with backoff
-// never helps, the only fix is a narrower request. Callers that can retry
-// with a smaller date range (see syncInsightsChunk) catch this specifically;
-// everything else just fails the sync run same as any other hard error.
+// Meta's "too many rows" row-cap error (error_subcode 1487534) and its
+// "request timed out" error (error_subcode 1504018, error_user_msg "Please
+// try a smaller date range, fetch less data, or use async jobs") are both
+// NOT transient (Meta marks is_transient: false) — retrying with backoff
+// never helps, the only fix is a narrower request. Both surface the same
+// underlying problem (one request asking for too much at once) and share
+// the same fix (halve the campaign batch), so both are classified together
+// here. Callers that can retry with a smaller batch (see
+// fetchInsightsChunkWithRowCapFallback) catch this specifically; everything
+// else just fails the sync run same as any other hard error.
+const TOO_MUCH_DATA_SUBCODES = new Set([1487534, 1504018]);
 class RowCapError extends Error {
   constructor(message: string) { super(message); this.name = 'RowCapError'; }
 }
@@ -99,7 +105,9 @@ async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true): Pr
       const scrubbed = String(next).replace(/access_token=[^&]+/, 'access_token=REDACTED');
       console.error('[META-SYNC-ERR]', JSON.stringify({ url: scrubbed, error: json.error, page: isFirstPage ? 'first' : 'mid' }));
       if (isFirstPage) {
-        if (json.error.error_subcode === 1487534) throw new RowCapError(json.error.message || 'Too many rows');
+        if (json.error.error_subcode !== undefined && TOO_MUCH_DATA_SUBCODES.has(json.error.error_subcode)) {
+          throw new RowCapError(json.error.message || 'Too many rows');
+        }
         throw new Error(json.error.message || 'Meta API error');
       }
       return out; // mid-pagination failure: keep what we have, same posture as the live routes
