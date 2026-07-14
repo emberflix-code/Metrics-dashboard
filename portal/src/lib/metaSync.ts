@@ -406,22 +406,41 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
     adsetId: string; adsetName: string; adName: string;
     reach: number; impressions: number; spend: number; linkClicks: number; results: number;
   }
-  const prepared: Prepared[] = [];
+  // Keyed by `${entityId}|${date}` and summed on collision — the row-cap
+  // fallback can halve a campaign batch and re-fetch, and campaign batches
+  // are not guaranteed disjoint across retries, so the same (entity, day)
+  // can plausibly appear twice within one chunk's rows. A batched multi-row
+  // upsert can't touch the same conflict target twice in one statement, so
+  // any duplicate must be collapsed before building the batch (unlike the
+  // old row-by-row loop, where each write was its own statement).
+  const preparedByKey = new Map<string, Prepared>();
   for (const r of rows) {
     const entityId = level === 'campaign' ? r.campaign_id : level === 'adset' ? r.adset_id : r.ad_id;
     if (!entityId || !r.date_start) continue;
-    prepared.push({
-      entityId, date: r.date_start,
-      campaignId: r.campaign_id || '', campaignName: r.campaign_name || '',
-      adsetId: r.adset_id || '', adsetName: r.adset_name || '',
-      adName: r.ad_name || '',
-      reach: parseInt(r.reach || '0', 10) || 0,
-      impressions: parseInt(r.impressions || '0', 10) || 0,
-      spend: parseFloat(r.spend || '0') || 0,
-      linkClicks: parseInt(r.inline_link_clicks || '0', 10) || 0,
-      results: resolveResultsFromActions(r.actions),
-    });
+    const key = `${entityId}|${r.date_start}`;
+    const reach = parseInt(r.reach || '0', 10) || 0;
+    const impressions = parseInt(r.impressions || '0', 10) || 0;
+    const spend = parseFloat(r.spend || '0') || 0;
+    const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
+    const results = resolveResultsFromActions(r.actions);
+    const existing = preparedByKey.get(key);
+    if (existing) {
+      existing.reach += reach;
+      existing.impressions += impressions;
+      existing.spend += spend;
+      existing.linkClicks += linkClicks;
+      existing.results += results;
+    } else {
+      preparedByKey.set(key, {
+        entityId, date: r.date_start,
+        campaignId: r.campaign_id || '', campaignName: r.campaign_name || '',
+        adsetId: r.adset_id || '', adsetName: r.adset_name || '',
+        adName: r.ad_name || '',
+        reach, impressions, spend, linkClicks, results,
+      });
+    }
   }
+  const prepared = Array.from(preparedByKey.values());
 
   // Batched upsert via unnest() — same rationale as syncEntities: row-by-row
   // writes on a wide account (thousands of rows per chunk × hundreds of
@@ -825,19 +844,34 @@ async function syncCreatives(accountId: string, token: string, since: string, un
     try { rows = await fetchMetaWithRetry<BreakdownRow>(u); } catch { return; }
 
     interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number }
-    const prepared: PreparedBreakdown[] = [];
+    // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
+    // can return the same (asset, ad, day) combination more than once within
+    // a single breakdown fetch (e.g. across attribution-window buckets), and
+    // a batched multi-row upsert can't touch the same conflict target twice
+    // in one statement ("ON CONFLICT DO UPDATE command cannot affect row a
+    // second time"), unlike the old row-by-row loop where each write was its
+    // own statement and simply overwrote the previous one.
+    const preparedByKey = new Map<string, PreparedBreakdown>();
     for (const r of rows) {
       const assetHash = breakdown === 'image_asset' ? r.image_asset?.hash : r.video_asset?.video_id;
       const assetKey = breakdown === 'image_asset' ? (assetHash ? `image:${assetHash}` : null) : (assetHash ? `video:${assetHash}` : null);
       if (!assetKey || !r.ad_id || !r.date_start) continue;
-      prepared.push({
-        assetKey, adId: r.ad_id, date: r.date_start,
-        spend: parseFloat(r.spend || '0') || 0,
-        impressions: parseInt(r.impressions || '0', 10) || 0,
-        linkClicks: parseInt(r.inline_link_clicks || '0', 10) || 0,
-        results: resolveResultsFromActions(r.actions),
-      });
+      const key = `${assetKey}|${r.ad_id}|${r.date_start}`;
+      const spend = parseFloat(r.spend || '0') || 0;
+      const impressions = parseInt(r.impressions || '0', 10) || 0;
+      const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
+      const results = resolveResultsFromActions(r.actions);
+      const existing = preparedByKey.get(key);
+      if (existing) {
+        existing.spend += spend;
+        existing.impressions += impressions;
+        existing.linkClicks += linkClicks;
+        existing.results += results;
+      } else {
+        preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results });
+      }
     }
+    const prepared = Array.from(preparedByKey.values());
 
     // Batched upsert — this is the highest-volume write in the whole sync
     // (per asset × per ad × per day), the main source of the row-by-row
