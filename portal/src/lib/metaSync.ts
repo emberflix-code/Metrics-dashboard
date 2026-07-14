@@ -872,7 +872,11 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
     const { daysSynced, newEarliestDate } = await syncInsights(accountId, token);
 
     const yesterday = await yesterdayForAccount(accountId, token);
-    const creativeSince = addDays(yesterday, -Math.round(BACKFILL_MONTHS * 30.4));
+    // Reuse floorDateFrom() rather than a separate `BACKFILL_MONTHS * 30.4
+    // days back` calculation — that duplicate arithmetic landed on a date
+    // Meta rejects with "(#3018) start date ... cannot be beyond 37 months",
+    // the same boundary floorDateFrom() already pads a day inside of.
+    const creativeSince = floorDateFrom(yesterday);
     await syncCreatives(accountId, token, creativeSince, yesterday);
 
     await finishSync(accountId, { success: true });
