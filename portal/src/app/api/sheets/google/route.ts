@@ -36,6 +36,7 @@ export async function GET() {
     return NextResponse.json({ rows, mode, tabsFetched, failedTabs });
   } catch (err) {
     if (err instanceof SheetError) {
+      console.error('[SHEET-ERR]', JSON.stringify({ clientSheetTab: client.google_sheet_tab, code: err.code, message: err.message }));
       return NextResponse.json({ error: err.message }, { status: err.status });
     }
     const message = err instanceof Error ? err.message : 'Unknown error';

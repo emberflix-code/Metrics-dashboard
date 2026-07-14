@@ -38,13 +38,42 @@ export class SheetError extends Error {
     | 'NOT_PUBLIC'
     | 'MISSING_COLUMNS'
     | 'UPSTREAM_5XX'
-    | 'EMPTY_TAB_SPEC';
+    | 'EMPTY_TAB_SPEC'
+    | 'TAB_NOT_FOUND';
   status: number;
   constructor(code: SheetError['code'], message: string, status = 502) {
     super(message);
     this.code = code;
     this.status = status;
   }
+}
+
+// Google's gviz CSV export does NOT error when `sheet=<name>` fails to
+// resolve — it silently falls back to the spreadsheet's first/default tab
+// (gid=0) and returns HTTP 200 with that tab's data, indistinguishable in
+// shape from a correct response. This bit a real client: a renamed tab
+// ("Alloy West Las Vegas" → "Alloy Personal Training West Las Vegas, NV")
+// left every request for the old name silently serving an unrelated
+// client's numbers for weeks with no error anywhere. Since there's no
+// signal in the response itself, verify indirectly: strip common noise
+// words from the requested tab name and require the remaining distinctive
+// words to appear in at least one returned campaign name. False negatives
+// (a real tab whose campaigns don't happen to mention the location) are
+// safe — this only widens what's accepted, never narrows a legitimate tab
+// out. A completely wrong tab (different location's campaigns throughout)
+// reliably fails this check.
+const NOISE_WORDS = new Set(['gmn', 'alloy', 'personal', 'training', 'the', 'and']);
+function significantWords(s: string): string[] {
+  return s
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(w => w.length > 1 && !NOISE_WORDS.has(w));
+}
+function tabLikelyMatches(tabName: string, rows: { campaign: string }[]): boolean {
+  const wanted = significantWords(tabName);
+  if (wanted.length === 0) return true; // nothing distinctive to check against
+  const campaignWords = new Set(rows.flatMap(r => significantWords(r.campaign)));
+  return wanted.some(w => campaignWords.has(w));
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────
@@ -146,6 +175,15 @@ async function fetchOneTabCsv(sheetId: string, tabName: string): Promise<SheetRo
       linkClicks: Math.round(parseNum(r[cLinkClicks] ?? '')),
     });
   }
+
+  if (rows.length > 0 && !tabLikelyMatches(tabName, rows)) {
+    throw new SheetError(
+      'TAB_NOT_FOUND',
+      `Sheet tab "${tabName}" did not resolve to matching data (Google silently serves the default tab for an unknown name) — check the tab still exists under this exact name.`,
+      404
+    );
+  }
+
   _csvCache.set(cacheKey, { expires: Date.now() + TTL_MS, rows });
   return rows;
 }

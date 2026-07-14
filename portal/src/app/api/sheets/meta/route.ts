@@ -41,6 +41,11 @@ export async function GET() {
     return NextResponse.json({ rows, enabled: true, mode, tabsFetched, failedTabs });
   } catch (err) {
     if (err instanceof SheetError) {
+      // TAB_NOT_FOUND in particular fails silent-wrong-data-wise on the
+      // client side (DashboardClient falls back to Meta's own lead count
+      // with no visible banner — see renderCards) — log loudly here since
+      // this is the only place the failure is otherwise observable.
+      console.error('[SHEET-ERR]', JSON.stringify({ clientSheetTab: client.sheet_tab, code: err.code, message: err.message }));
       return NextResponse.json({ error: err.message, enabled: true }, { status: err.status });
     }
     const message = err instanceof Error ? err.message : 'Unknown error';
