@@ -27,6 +27,15 @@ const SYNC_CONCURRENCY = 2; // lower than the client's 4 — one sync run issues
 // per click on the very largest accounts (it resumes exactly where it left
 // off next time, same as any other interrupted month).
 const INSIGHTS_BACKFILL_BUDGET_MS = 3 * 60_000;
+// syncEntities runs FIRST in syncAccount, ahead of insights/creatives — on
+// a huge account its own paginated campaign/adset/ad fetches can hit the
+// same rate-limit wall and, without a budget of its own, consume the
+// entire sync run before the other two steps ever get a turn (this
+// actually happened: 18+ minutes with zero creatives progress, traced to
+// a single stuck /adsets page retry). Kept shorter than the insights/
+// creatives budget since entity data is small next to daily insight rows
+// and doesn't need as much room.
+const ENTITIES_BUDGET_MS = 90_000;
 
 export interface SyncAccountResult {
   accountId: string;
@@ -74,12 +83,19 @@ class RowCapError extends Error {
 // bit and try again," and the live dashboard's humanizeMetaError() already
 // documents code 17 as "recoverable, retryable" — this sync module can
 // afford to actually wait instead of surfacing it to a user immediately.
-async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true): Promise<T[]> {
+async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true, deadline?: number): Promise<T[]> {
   const out: T[] = [];
   let next: string | null = url.toString();
   let safety = 50;
   let isFirstPage = true;
   while (next && safety-- > 0) {
+    // A single page's own rate-limit retry can burn up to ~5 minutes (6
+    // attempts, 20s×attempt backoff) — on a huge account's paginated
+    // /adsets or /ads call, dozens of pages hitting this back-to-back can
+    // consume an entire sync run before syncInsights/syncCreatives ever
+    // get a turn. Stop paginating (keep what's collected) once the
+    // deadline passes, same posture as any other mid-pagination failure.
+    if (deadline !== undefined && Date.now() > deadline && !isFirstPage) break;
     let json: { data?: T[]; error?: { message?: string; code?: number; error_subcode?: number; error_user_title?: string }; paging?: { next?: string } } | undefined;
     let networkErr: unknown;
     const MAX_ATTEMPTS = 6;
@@ -284,6 +300,7 @@ function chunkArrayGeneric<T>(arr: T[], size: number): T[][] {
 
 async function syncEntities(accountId: string, token: string): Promise<number> {
   let upserted = 0;
+  const deadline = Date.now() + ENTITIES_BUDGET_MS;
   const levels: { level: 'campaign' | 'adset' | 'ad'; path: string; fields: string }[] = [
     { level: 'campaign', path: 'campaigns', fields: 'id,name,effective_status' },
     { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name}' },
@@ -295,7 +312,7 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
     u.searchParams.set('limit', '500');
     u.searchParams.set('filtering', JSON.stringify([{ field: 'effective_status', operator: 'IN', value: ALL_STATUSES }]));
     u.searchParams.set('access_token', token);
-    const rows = await fetchMetaWithRetry<EntityRow>(u);
+    const rows = await fetchMetaWithRetry<EntityRow>(u, true, deadline);
     const valid = rows.filter(r => !!r.id);
 
     // Batched upsert via unnest() — one round-trip per DB_BATCH_SIZE rows
