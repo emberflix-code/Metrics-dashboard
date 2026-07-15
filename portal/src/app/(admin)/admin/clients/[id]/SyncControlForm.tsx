@@ -186,6 +186,8 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
   const [expandedAccountId, setExpandedAccountId] = useState<string | null>(null);
+  const [syncingCreativesFor, setSyncingCreativesFor] = useState<string | null>(null);
+  const [creativesSyncError, setCreativesSyncError] = useState<string | null>(null);
 
   async function handleSourceChange(next: DataSource) {
     setDataSource(next);
@@ -218,6 +220,28 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
       setSyncError('Network error — sync may still be running server-side.');
     }
     setSyncing(false);
+  }
+
+  async function handleSyncCreativesOnly(accountId: string) {
+    setSyncingCreativesFor(accountId);
+    setCreativesSyncError(null);
+    try {
+      const res = await fetch(`/api/admin/clients/${clientId}/sync-creatives`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: accountId }),
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        setCreativesSyncError(data.error || 'Sync failed');
+      } else {
+        window.location.reload();
+        return;
+      }
+    } catch {
+      setCreativesSyncError('Network error — sync may still be running server-side.');
+    }
+    setSyncingCreativesFor(null);
   }
 
   return (
@@ -283,13 +307,27 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
                 </p>
               )}
               {s.lastError && <div className="text-rose-400">Error: {s.lastError}</div>}
-              <button
-                type="button"
-                onClick={() => setExpandedAccountId(expandedAccountId === s.accountId ? null : s.accountId)}
-                className="text-blue-400 hover:text-blue-300 text-[11px] font-medium"
-              >
-                {expandedAccountId === s.accountId ? 'Hide data coverage' : 'Show data coverage'}
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setExpandedAccountId(expandedAccountId === s.accountId ? null : s.accountId)}
+                  className="text-blue-400 hover:text-blue-300 text-[11px] font-medium"
+                >
+                  {expandedAccountId === s.accountId ? 'Hide data coverage' : 'Show data coverage'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSyncCreativesOnly(s.accountId)}
+                  disabled={syncingCreativesFor === s.accountId || s.status === 'running'}
+                  className="text-blue-400 hover:text-blue-300 disabled:opacity-50 text-[11px] font-medium"
+                  title="Syncs only ad images/videos and their per-asset metrics for the Creatives tab — skips campaign/insight data entirely, so it isn't slowed down by a large account's insights backfill."
+                >
+                  {syncingCreativesFor === s.accountId ? 'Syncing creatives…' : 'Sync creatives only'}
+                </button>
+              </div>
+              {creativesSyncError && syncingCreativesFor === null && (
+                <p className="text-[11px] text-rose-400">{creativesSyncError}</p>
+              )}
               {expandedAccountId === s.accountId && <CoverageTimeline clientId={clientId} accountId={s.accountId} />}
             </div>
           </div>

@@ -36,6 +36,10 @@ const INSIGHTS_BACKFILL_BUDGET_MS = 3 * 60_000;
 // creatives budget since entity data is small next to daily insight rows
 // and doesn't need as much room.
 const ENTITIES_BUDGET_MS = 90_000;
+// Creatives-only sync (admin-triggered, no entities/insights sharing the
+// request) can afford a much larger budget than the 3-minute slice it gets
+// inside the combined "Sync now" — it's the only thing running.
+const CREATIVES_ONLY_BUDGET_MS = 10 * 60_000;
 
 export interface SyncAccountResult {
   accountId: string;
@@ -850,7 +854,7 @@ interface BreakdownRow {
   image_asset?: { hash?: string }; video_asset?: { video_id?: string };
 }
 
-async function syncCreatives(accountId: string, token: string, floorDate: string, yesterday: string): Promise<void> {
+async function syncCreatives(accountId: string, token: string, floorDate: string, yesterday: string, budgetMs: number = INSIGHTS_BACKFILL_BUDGET_MS): Promise<void> {
   // 1) Ads + their creative metadata — derive asset identity per ad.
   const adsUrl = new URL(`${GRAPH}/act_${accountId}/ads`);
   adsUrl.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
@@ -1111,7 +1115,7 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
   // (creatives_*), since creatives hit a different Meta endpoint and can
   // finish backfilling at a different pace.
   let guard = BACKFILL_MONTHS + 2;
-  const deadline = Date.now() + INSIGHTS_BACKFILL_BUDGET_MS;
+  const deadline = Date.now() + budgetMs;
   while (guard-- > 0) {
     const ranges = buildSyncRanges(floorDate, yesterday, creativesState?.last_success_until ?? null, creativesNewest, creativesEarliest, creativesBackfillComplete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
@@ -1207,6 +1211,29 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
     const message = err instanceof Error ? err.message : 'Sync failed';
     await finishSync(accountId, { success: false, error: message });
     return { accountId, entitiesUpserted: 0, daysSynced: 0, newEarliestDate: null, error: message };
+  }
+}
+
+// Creatives-only sync — skips entities and insights entirely so creatives
+// gets the ENTIRE run's worth of time instead of only whatever's left over
+// after entities (90s budget) and insights (3min budget) have already had
+// their turns. Useful when an admin specifically wants the Creatives tab to
+// catch up on a large account where the combined "Sync now" keeps letting
+// entities/insights eat most of the budget before creatives starts.
+export async function syncAccountCreativesOnly(accountId: string): Promise<{ error: string | null }> {
+  const claimed = await claimSync(accountId);
+  if (!claimed) return { error: 'Sync already in progress' };
+  try {
+    const token = await tokenForAccountId(accountId);
+    const yesterday = await yesterdayForAccount(accountId, token);
+    const floorDate = floorDateFrom(yesterday);
+    await syncCreatives(accountId, token, floorDate, yesterday, CREATIVES_ONLY_BUDGET_MS);
+    await finishSync(accountId, { success: true });
+    return { error: null };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Creatives sync failed';
+    await finishSync(accountId, { success: false, error: message });
+    return { error: message };
   }
 }
 
