@@ -216,10 +216,19 @@ function chunkRange(since: string, until: string, chunkDays: number): { since: s
 }
 
 // Bounded-concurrency runner — same shape as runPooled() in DashboardClient.tsx.
-async function runPooled<T>(items: T[], limit: number, worker: (item: T) => Promise<void>): Promise<void> {
+// `deadline` (epoch ms) lets a caller with a time budget stop PICKING UP new
+// items once it passes — in-flight work still finishes, so no partial write
+// is left dangling, but no new (potentially very slow) unit starts. Needed
+// because a single unit here can itself be an expensive multi-minute call
+// on a huge account (see fetchInsightsChunkWithRowCapFallback's per-batch
+// rate-limit retries) — checking a time budget only BETWEEN whole months
+// (see syncInsights/syncCreatives) isn't fine-grained enough to bound a
+// month whose own chunks are individually slow.
+async function runPooled<T>(items: T[], limit: number, worker: (item: T) => Promise<void>, deadline?: number): Promise<void> {
   let idx = 0;
   const runners = Array.from({ length: Math.min(limit, items.length) }, async () => {
     while (idx < items.length) {
+      if (deadline !== undefined && Date.now() > deadline) return;
       const my = idx++;
       await worker(items[my]);
       await new Promise(r => setTimeout(r, 250));
@@ -403,11 +412,20 @@ interface RowCapFallbackResult {
   hadGaps: boolean;
 }
 
-async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[]): Promise<RowCapFallbackResult> {
+async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<RowCapFallbackResult> {
   const out: InsightRow[] = [];
   let hadGaps = false;
   const batches = chunkArray(campaignIds, CAMPAIGN_BATCH_SIZE);
   for (const batch of batches) {
+    // A huge account can have hundreds of sequential batches per chunk,
+    // each potentially burning minutes in fetchMetaWithRetry's own
+    // rate-limit backoff — without this check, one chunk on one account
+    // could overshoot the caller's time budget by tens of minutes even
+    // though runPooled itself stops picking up NEW chunks at the deadline
+    // (this loop is a single already-in-flight unit runPooled can't see
+    // inside of). Treat whatever's left as a gap, same as any other
+    // skipped batch, so it's retried on the next sync.
+    if (deadline !== undefined && Date.now() > deadline) { hadGaps = true; break; }
     try {
       out.push(...await fetchInsightsChunk(accountId, token, level, since, until, batch));
     } catch (err) {
@@ -416,7 +434,7 @@ async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: st
         const mid = Math.ceil(batch.length / 2);
         const halves = [batch.slice(0, mid), batch.slice(mid)];
         for (const half of halves) {
-          const sub = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, half);
+          const sub = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, half, deadline);
           out.push(...sub.rows);
           if (sub.hadGaps) hadGaps = true;
         }
@@ -442,8 +460,8 @@ async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: st
   return { rows: out, hadGaps };
 }
 
-async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[]): Promise<{ written: number; hadGaps: boolean }> {
-  const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds);
+async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
+  const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
 
   interface Prepared {
     entityId: string; date: string; campaignId: string; campaignName: string;
@@ -590,7 +608,7 @@ function buildSyncRanges(
 async function runRangeToCompletion(
   accountId: string, token: string, range: { since: string; until: string; kind: 'topup' | 'backfill' },
   levels: ('campaign' | 'adset' | 'ad')[], campaignIds: string[],
-  onDaysSynced: (n: number) => void
+  onDaysSynced: (n: number) => void, deadline?: number
 ): Promise<{ persisted: string | null; reachedSince: boolean }> {
   // Chunks are processed oldest-to-newest for backfill (walking the
   // watermark backward within this one month) and in natural order for
@@ -625,7 +643,7 @@ async function runRangeToCompletion(
   const levelsRemaining = new Array(chunks.length).fill(levels.length);
 
   await runPooled(units, SYNC_CONCURRENCY, async ({ level, chunkIdx, chunk }) => {
-    const { hadGaps } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
+    const { hadGaps } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds, deadline);
     if (hadGaps) gapped[chunkIdx] = true;
     if (level === 'campaign') onDaysSynced(daysBetween(chunk.since, chunk.until) + 1);
     levelsRemaining[chunkIdx]--;
@@ -636,7 +654,7 @@ async function runRangeToCompletion(
       if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
       if (cursor < completed.length && completed[cursor] && gapped[cursor]) stoppedAtGap = true;
     }
-  });
+  }, deadline);
 
   if (!stoppedAtGap && chunks.length > 0) {
     let cursor = persistedIdx + 1;
@@ -676,7 +694,7 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
   // only ever at the very end, so admin-panel progress and a mid-run crash
   // both resolve to "N of M months" instead of an opaque multi-hour black box.
   let guard = BACKFILL_MONTHS + 2; // safety cap: at most this many month-iterations per call
-  const startedAt = Date.now();
+  const deadline = Date.now() + INSIGHTS_BACKFILL_BUDGET_MS;
   while (guard-- > 0) {
     const ranges = buildSyncRanges(floorDate, yesterday, state?.last_success_until ?? null, newestSynced, newEarliest, backfillComplete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
@@ -691,8 +709,14 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
     // Stop backfilling (after top-up, which always gets to run first) once
     // the time budget is spent — leaves creatives room to run in the same
     // "Sync now" click instead of insights alone eating the whole request.
-    if (Date.now() - startedAt > INSIGHTS_BACKFILL_BUDGET_MS) break;
-    const result = await runRangeToCompletion(accountId, token, backfill, levels, campaignIds, n => { daysSynced += n; });
+    // The deadline is also passed INTO the range call below (not just
+    // checked here between months) — on a huge account a single month's
+    // own chunks can each take minutes (hundreds of campaign-batches,
+    // each potentially burning through rate-limit retries), so checking
+    // only between whole months isn't fine-grained enough to actually
+    // bound one that's already running long.
+    if (Date.now() > deadline) break;
+    const result = await runRangeToCompletion(accountId, token, backfill, levels, campaignIds, n => { daysSynced += n; }, deadline);
     if (result.persisted) newEarliest = result.persisted;
 
     // A month only counts as backfilled (newest_synced advances past it) if
@@ -707,7 +731,7 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
         await query(`UPDATE agency_meta_sync_state SET backfill_complete = true, earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
       }
     } else {
-      break; // gap encountered — stop here, retry this month on the next sync
+      break; // gap or time-budget cutoff — stop here, retry/resume this month on the next sync
     }
   }
 
@@ -956,7 +980,7 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
   // here, which is both slow and needlessly overwrote already-final days.
   const breakdownTypes: ('image_asset' | 'video_asset')[] = ['image_asset', 'video_asset'];
 
-  const runBreakdownRange = async (range: { since: string; until: string; kind: 'topup' | 'backfill' }): Promise<{ persisted: string | null; reachedSince: boolean }> => {
+  const runBreakdownRange = async (range: { since: string; until: string; kind: 'topup' | 'backfill' }, deadline?: number): Promise<{ persisted: string | null; reachedSince: boolean }> => {
     const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
     const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
     if (chunks.length === 0) return { persisted: null, reachedSince: false };
@@ -1051,7 +1075,7 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
         while (cursor < completed.length && completed[cursor]) cursor++;
         if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
       }
-    });
+    }, deadline);
 
     return { persisted: persistedValue, reachedSince: chunks.length > 0 && completed.every(c => c) };
   };
@@ -1070,7 +1094,7 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
   // (creatives_*), since creatives hit a different Meta endpoint and can
   // finish backfilling at a different pace.
   let guard = BACKFILL_MONTHS + 2;
-  const startedAt = Date.now();
+  const deadline = Date.now() + INSIGHTS_BACKFILL_BUDGET_MS;
   while (guard-- > 0) {
     const ranges = buildSyncRanges(floorDate, yesterday, creativesState?.last_success_until ?? null, creativesNewest, creativesEarliest, creativesBackfillComplete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
@@ -1082,8 +1106,11 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
       await runBreakdownRange(topUp);
     }
     if (!backfill) continue;
-    if (Date.now() - startedAt > INSIGHTS_BACKFILL_BUDGET_MS) break;
-    const result = await runBreakdownRange(backfill);
+    // Deadline passed into the range call itself, not just checked between
+    // months — see syncInsights's identical comment for why that matters
+    // on a huge account.
+    if (Date.now() > deadline) break;
+    const result = await runBreakdownRange(backfill, deadline);
     if (result.persisted) creativesEarliest = result.persisted;
 
     if (result.reachedSince) {
@@ -1095,7 +1122,7 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
         await query(`UPDATE agency_meta_sync_state SET creatives_backfill_complete = true, creatives_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
       }
     } else {
-      break; // gap encountered — stop here, retry this month on the next sync
+      break; // gap or time-budget cutoff — stop here, retry/resume this month on the next sync
     }
   }
 }
