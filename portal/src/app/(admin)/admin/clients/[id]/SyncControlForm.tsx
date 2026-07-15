@@ -94,6 +94,11 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
 
   return (
     <div className="mt-2 space-y-2">
+      <p className="text-[11px] text-slate-500">
+        One box per calendar month, oldest (left) to most recent (right) — hover a box for exactly what&apos;s
+        synced. A month needs BOTH performance numbers (spend/leads/etc.) and creative data (ad images/videos +
+        their per-asset metrics) to count as full; having only one of the two shows as partial.
+      </p>
       <div className="flex gap-px rounded overflow-hidden border border-slate-700/60">
         {months.map(m => {
           const hasInsights = m.insightsRows > 0;
@@ -103,19 +108,26 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
             : hasInsights || hasCreatives
               ? 'bg-amber-500/70'
               : 'bg-slate-700/40';
+          const missing = hasInsights && hasCreatives
+            ? 'nothing missing'
+            : hasInsights
+              ? 'missing creative data (ad images/videos + per-asset metrics)'
+              : hasCreatives
+                ? 'missing performance numbers (spend/leads/etc.)'
+                : 'no data synced yet';
           return (
             <div
               key={m.month}
               className={`flex-1 h-4 ${color}`}
-              title={`${m.month}: insights ${m.insightsRows}d, creatives ${m.creativesRows}d`}
+              title={`${m.month}\nPerformance numbers: ${m.insightsRows} of the month's days\nCreative data: ${m.creativesRows} of the month's days\n${missing}`}
             />
           );
         })}
       </div>
       <div className="flex items-center gap-3 text-[10px] text-slate-500">
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500/70 inline-block" /> full</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500/70 inline-block" /> partial</span>
-        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-700/40 inline-block" /> none</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500/70 inline-block" /> full — performance + creative data both present</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500/70 inline-block" /> partial — only one of the two</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-700/40 inline-block" /> none synced</span>
       </div>
 
       <div className="pt-1 border-t border-slate-700/40">
