@@ -28,9 +28,16 @@ export async function POST(req: NextRequest, { params }: { params: { id: string 
   if (!/^\d{4}-\d{2}-\d{2}$/.test(since) || !/^\d{4}-\d{2}-\d{2}$/.test(until) || since > until) {
     return NextResponse.json({ error: 'since/until must be YYYY-MM-DD with since <= until' }, { status: 400 });
   }
+  // Defaults to insights-only (matches the original behavior) — pass
+  // { creatives: true } to also (or only) sync DCO assets/breakdown for
+  // this range.
+  const types = {
+    insights: body.types?.insights !== false,
+    creatives: !!body.types?.creatives,
+  };
 
   try {
-    const result = await syncAccountRange(accountId, since, until);
+    const result = await syncAccountRange(accountId, since, until, types);
     if (result.error) return NextResponse.json({ ok: false, error: result.error }, { status: 500 });
     return NextResponse.json({ ok: true, daysSynced: result.daysSynced });
   } catch (err: unknown) {

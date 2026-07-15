@@ -854,7 +854,18 @@ interface BreakdownRow {
   image_asset?: { hash?: string }; video_asset?: { video_id?: string };
 }
 
-async function syncCreatives(accountId: string, token: string, floorDate: string, yesterday: string, budgetMs: number = INSIGHTS_BACKFILL_BUDGET_MS): Promise<void> {
+async function syncCreatives(
+  accountId: string, token: string, floorDate: string, yesterday: string,
+  budgetMs: number = INSIGHTS_BACKFILL_BUDGET_MS,
+  // When set, skips the watermark-driven top-up/backfill walk entirely and
+  // syncs the DCO breakdown for exactly this range — used by
+  // syncAccountRange for an admin-targeted gap-fill. Does NOT read or
+  // write creatives_newest_synced/creatives_earliest_synced/
+  // creatives_backfill_complete, same rationale as syncAccountRange's own
+  // insights path: a targeted fill can't be confused for normal backfill
+  // progress.
+  explicitRange?: { since: string; until: string }
+): Promise<void> {
   // 1) Ads + their creative metadata — derive asset identity per ad.
   const adsUrl = new URL(`${GRAPH}/act_${accountId}/ads`);
   adsUrl.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
@@ -1100,6 +1111,15 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
 
     return { persisted: persistedValue, reachedSince: chunks.length > 0 && completed.every(c => c) };
   };
+
+  if (explicitRange) {
+    // 'topup' kind: chunks process in natural (ascending) order and
+    // persistUpTo never fires for it — exactly what an admin-targeted
+    // range needs (no watermark writes, order doesn't matter for a single
+    // explicit range).
+    await runBreakdownRange({ since: explicitRange.since, until: explicitRange.until, kind: 'topup' }, Date.now() + budgetMs);
+    return;
+  }
 
   const [creativesState] = await query<{ creatives_earliest_synced: string | null; creatives_backfill_complete: boolean; creatives_newest_synced: string | null; last_success_until: string | null }>(
     `SELECT creatives_earliest_synced, creatives_backfill_complete, creatives_newest_synced, last_success_until FROM agency_meta_sync_state WHERE account_id = $1`,
@@ -1350,19 +1370,29 @@ function monthsBackFrom(floorDate: string, yesterday: string): { since: string; 
 // earliest_synced/backfill_complete — those stay owned by the sequential
 // walk in syncInsights/syncCreatives, so a targeted gap-fill can't
 // interfere with (or be confused for) normal backfill progress.
-export async function syncAccountRange(accountId: string, since: string, until: string): Promise<{ daysSynced: number; error: string | null }> {
+export async function syncAccountRange(
+  accountId: string, since: string, until: string,
+  types: { insights?: boolean; creatives?: boolean } = { insights: true }
+): Promise<{ daysSynced: number; error: string | null }> {
   const claimed = await claimSync(accountId);
   if (!claimed) return { daysSynced: 0, error: 'Sync already in progress' };
   try {
     const token = await tokenForAccountId(accountId);
-    const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
-    const campaignIds = await campaignIdsForAccount(accountId);
     let daysSynced = 0;
-    for (const chunk of chunkRange(since, until, CHUNK_DAYS)) {
-      for (const level of levels) {
-        const { written } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
-        if (level === 'campaign') daysSynced += written > 0 ? daysBetween(chunk.since, chunk.until) + 1 : 0;
+    if (types.insights) {
+      const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
+      const campaignIds = await campaignIdsForAccount(accountId);
+      for (const chunk of chunkRange(since, until, CHUNK_DAYS)) {
+        for (const level of levels) {
+          const { written } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
+          if (level === 'campaign') daysSynced += written > 0 ? daysBetween(chunk.since, chunk.until) + 1 : 0;
+        }
       }
+    }
+    if (types.creatives) {
+      const yesterday = await yesterdayForAccount(accountId, token);
+      const floorDate = floorDateFrom(yesterday);
+      await syncCreatives(accountId, token, floorDate, yesterday, CREATIVES_ONLY_BUDGET_MS, { since, until });
     }
     await finishSync(accountId, { success: true });
     return { daysSynced, error: null };

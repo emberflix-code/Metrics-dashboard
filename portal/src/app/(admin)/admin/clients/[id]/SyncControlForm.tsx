@@ -48,6 +48,8 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
   const [error, setError] = useState<string | null>(null);
   const [since, setSince] = useState('');
   const [until, setUntil] = useState('');
+  const [fillInsights, setFillInsights] = useState(true);
+  const [fillCreatives, setFillCreatives] = useState(false);
   const [filling, setFilling] = useState(false);
   const [fillError, setFillError] = useState<string | null>(null);
   const [fillDone, setFillDone] = useState<string | null>(null);
@@ -77,7 +79,7 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
       const res = await fetch(`/api/admin/clients/${clientId}/sync-range`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ account_id: accountId, since, until }),
+        body: JSON.stringify({ account_id: accountId, since, until, types: { insights: fillInsights, creatives: fillCreatives } }),
       });
       const data = await res.json();
       if (!data.ok) setFillError(data.error || 'Sync failed');
@@ -142,10 +144,18 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
             type="date" value={until} onChange={e => setUntil(e.target.value)}
             className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200"
           />
+          <label className="flex items-center gap-1 text-[11px] text-slate-400">
+            <input type="checkbox" checked={fillInsights} onChange={e => setFillInsights(e.target.checked)} />
+            Performance
+          </label>
+          <label className="flex items-center gap-1 text-[11px] text-slate-400">
+            <input type="checkbox" checked={fillCreatives} onChange={e => setFillCreatives(e.target.checked)} />
+            Creative data
+          </label>
           <button
             type="button"
             onClick={handleFillGap}
-            disabled={filling || !since || !until}
+            disabled={filling || !since || !until || (!fillInsights && !fillCreatives)}
             className="px-2.5 py-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-xs font-medium rounded transition-colors"
           >
             {filling ? 'Syncing…' : 'Sync this range'}
