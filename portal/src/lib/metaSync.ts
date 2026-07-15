@@ -16,6 +16,17 @@ const ATTRIBUTION_WINDOWS = '["7d_click","1d_view","1d_ev"]';
 const BACKFILL_MONTHS = 37; // matches the dashboard's own "Maximum" preset cap
 const CHUNK_DAYS = 3; // smallest chunk size already proven safe against Omega's row-cap failures
 const SYNC_CONCURRENCY = 2; // lower than the client's 4 — one sync run issues far more total requests than a single page load
+// Insights' month-by-month backfill loop used to have no time limit of its
+// own — on a huge account (Omega: ~8,000 campaigns) each month can take
+// several minutes, so insights alone could consume an entire "Sync now"
+// request and creatives (separate assets/thumbnails/DCO metrics) never got
+// a turn, even after the fix that lets each step fail independently — a
+// long-running loop that never throws isn't caught by that fix. Capping
+// insights' own wall-clock budget guarantees creatives runs every "Sync
+// now" click, at the cost of insights sometimes doing less backfill work
+// per click on the very largest accounts (it resumes exactly where it left
+// off next time, same as any other interrupted month).
+const INSIGHTS_BACKFILL_BUDGET_MS = 3 * 60_000;
 
 export interface SyncAccountResult {
   accountId: string;
@@ -665,6 +676,7 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
   // only ever at the very end, so admin-panel progress and a mid-run crash
   // both resolve to "N of M months" instead of an opaque multi-hour black box.
   let guard = BACKFILL_MONTHS + 2; // safety cap: at most this many month-iterations per call
+  const startedAt = Date.now();
   while (guard-- > 0) {
     const ranges = buildSyncRanges(floorDate, yesterday, state?.last_success_until ?? null, newestSynced, newEarliest, backfillComplete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
@@ -676,6 +688,10 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
       await runRangeToCompletion(accountId, token, topUp, levels, campaignIds, n => { daysSynced += n; });
     }
     if (!backfill) continue; // nothing left to backfill this run
+    // Stop backfilling (after top-up, which always gets to run first) once
+    // the time budget is spent — leaves creatives room to run in the same
+    // "Sync now" click instead of insights alone eating the whole request.
+    if (Date.now() - startedAt > INSIGHTS_BACKFILL_BUDGET_MS) break;
     const result = await runRangeToCompletion(accountId, token, backfill, levels, campaignIds, n => { daysSynced += n; });
     if (result.persisted) newEarliest = result.persisted;
 
@@ -1050,9 +1066,11 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
   let topUpDone = false;
 
   // Same month-at-a-time, recent-first loop as syncInsights (see there for
-  // full rationale) — own watermark (creatives_*), since creatives hit a
-  // different Meta endpoint and can finish backfilling at a different pace.
+  // full rationale, including the time-budget cap) — own watermark
+  // (creatives_*), since creatives hit a different Meta endpoint and can
+  // finish backfilling at a different pace.
   let guard = BACKFILL_MONTHS + 2;
+  const startedAt = Date.now();
   while (guard-- > 0) {
     const ranges = buildSyncRanges(floorDate, yesterday, creativesState?.last_success_until ?? null, creativesNewest, creativesEarliest, creativesBackfillComplete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
@@ -1064,6 +1082,7 @@ async function syncCreatives(accountId: string, token: string, floorDate: string
       await runBreakdownRange(topUp);
     }
     if (!backfill) continue;
+    if (Date.now() - startedAt > INSIGHTS_BACKFILL_BUDGET_MS) break;
     const result = await runBreakdownRange(backfill);
     if (result.persisted) creativesEarliest = result.persisted;
 
