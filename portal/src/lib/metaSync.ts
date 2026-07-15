@@ -1087,22 +1087,60 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
   if (!claimed) {
     return { accountId, entitiesUpserted: 0, daysSynced: 0, newEarliestDate: null, error: 'Sync already in progress' };
   }
+
+  let entitiesUpserted = 0;
+  let daysSynced = 0;
+  let newEarliestDate: string | null = null;
+  let firstError: string | null = null;
+
   try {
     const token = await tokenForAccountId(accountId);
-    const entitiesUpserted = await syncEntities(accountId, token);
-    const { daysSynced, newEarliestDate } = await syncInsights(accountId, token);
 
-    const yesterday = await yesterdayForAccount(accountId, token);
-    // Reuse floorDateFrom() rather than a separate `BACKFILL_MONTHS * 30.4
-    // days back` calculation — that duplicate arithmetic landed on a date
-    // Meta rejects with "(#3018) start date ... cannot be beyond 37 months",
-    // the same boundary floorDateFrom() already pads a day inside of.
-    const floorDate = floorDateFrom(yesterday);
-    await syncCreatives(accountId, token, floorDate, yesterday);
+    // Each step runs independently — a huge account (Omega: ~58k entities,
+    // ~8k campaigns) can exhaust its rate-limit budget partway through
+    // insights alone, and insights previously ran to full exhaustion (or a
+    // thrown error) before creatives ever got a turn. That left creatives
+    // — separate assets/thumbnails/DCO metrics, not derivable from insights
+    // — completely unsynced (0 rows) after dozens of "Sync now" clicks, even
+    // though insights was making real progress each time. Now every step
+    // gets a chance on every run, so a slow account's Creatives tab starts
+    // filling in instead of waiting behind an insights backfill that may
+    // never fully finish in one sitting.
+    try {
+      entitiesUpserted = await syncEntities(accountId, token);
+    } catch (err: unknown) {
+      firstError = firstError ?? (err instanceof Error ? err.message : 'Entity sync failed');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'entities', error: firstError }));
+    }
 
-    await finishSync(accountId, { success: true });
-    return { accountId, entitiesUpserted, daysSynced, newEarliestDate, error: null };
+    try {
+      const result = await syncInsights(accountId, token);
+      daysSynced = result.daysSynced;
+      newEarliestDate = result.newEarliestDate;
+    } catch (err: unknown) {
+      firstError = firstError ?? (err instanceof Error ? err.message : 'Insights sync failed');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'insights', error: firstError }));
+    }
+
+    try {
+      const yesterday = await yesterdayForAccount(accountId, token);
+      // Reuse floorDateFrom() rather than a separate `BACKFILL_MONTHS * 30.4
+      // days back` calculation — that duplicate arithmetic landed on a date
+      // Meta rejects with "(#3018) start date ... cannot be beyond 37 months",
+      // the same boundary floorDateFrom() already pads a day inside of.
+      const floorDate = floorDateFrom(yesterday);
+      await syncCreatives(accountId, token, floorDate, yesterday);
+    } catch (err: unknown) {
+      firstError = firstError ?? (err instanceof Error ? err.message : 'Creatives sync failed');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'creatives', error: firstError }));
+    }
+
+    await finishSync(accountId, { success: !firstError, error: firstError ?? undefined });
+    return { accountId, entitiesUpserted, daysSynced, newEarliestDate, error: firstError };
   } catch (err: unknown) {
+    // Only token resolution reaches here now — the three sync steps above
+    // catch their own failures so partial progress from earlier steps is
+    // never lost, but without a token none of them can run at all.
     const message = err instanceof Error ? err.message : 'Sync failed';
     await finishSync(accountId, { success: false, error: message });
     return { accountId, entitiesUpserted: 0, daysSynced: 0, newEarliestDate: null, error: message };
