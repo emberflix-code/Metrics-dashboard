@@ -400,22 +400,32 @@ async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: st
     try {
       out.push(...await fetchInsightsChunk(accountId, token, level, since, until, batch));
     } catch (err) {
-      if (!(err instanceof RowCapError) || batch.length === 1) {
-        if (err instanceof RowCapError) {
-          console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, level, since, until, campaignId: batch[0], error: 'row cap persists at single-campaign granularity, skipping' }));
-          hadGaps = true;
-          continue;
+      if (err instanceof RowCapError && batch.length > 1) {
+        // Halve the batch and retry each half individually.
+        const mid = Math.ceil(batch.length / 2);
+        const halves = [batch.slice(0, mid), batch.slice(mid)];
+        for (const half of halves) {
+          const sub = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, half);
+          out.push(...sub.rows);
+          if (sub.hadGaps) hadGaps = true;
         }
-        throw err;
+        continue;
       }
-      // Halve the batch and retry each half individually.
-      const mid = Math.ceil(batch.length / 2);
-      const halves = [batch.slice(0, mid), batch.slice(mid)];
-      for (const half of halves) {
-        const sub = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, half);
-        out.push(...sub.rows);
-        if (sub.hadGaps) hadGaps = true;
-      }
+      // Any other hard failure for this one campaign-batch (row cap that
+      // persists down to a single campaign, or a rate-limit/network error
+      // that exhausted fetchMetaWithRetry's own retries) — treat as a gap
+      // and move on to the next batch, rather than letting it propagate
+      // and crash the whole chunk. A single stubborn batch out of hundreds
+      // (a huge account like Omega can have 7,900+ campaigns, ~400
+      // batches per chunk at CAMPAIGN_BATCH_SIZE=20) used to take down the
+      // entire month's watermark-persist progress with it — real data from
+      // every other batch in the chunk still landed in the DB via
+      // syncInsightsChunk's writes, but the watermark could never advance
+      // past a chunk that threw, since the exception killed the runPooled
+      // Promise.all before that chunk's persistUpTo ever ran.
+      const reason = err instanceof RowCapError ? 'row cap persists at single-campaign granularity' : (err instanceof Error ? err.message : 'unknown error');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, level, since, until, campaignId: batch[0], batchSize: batch.length, error: `skipping batch after failure: ${reason}` }));
+      hadGaps = true;
     }
   }
   return { rows: out, hadGaps };
