@@ -1155,6 +1155,96 @@ export function computeBackfillProgress(state: {
   return { monthsTotal, monthsDone, complete: state.backfill_complete && state.creatives_backfill_complete };
 }
 
+export interface MonthCoverage {
+  month: string; // "YYYY-MM"
+  since: string; // this month's actual date range within [floorDate, yesterday]
+  until: string;
+  insightsRows: number;
+  creativesRows: number;
+}
+
+// Ground-truth coverage, read directly from the fact tables rather than the
+// watermark — the watermark only advances past a GAP-FREE month, but a
+// gapped month can still have partial real data (see the exception-
+// swallows-persist-progress fix), and an admin auditing "what do we
+// actually have" should see that partial data, not just "not done yet".
+// Used by the admin panel's coverage timeline; not used by the sync engine
+// itself (which still relies on the cheaper watermark columns to decide
+// where to resume, per computeBackfillProgress's own comment on why).
+export async function getMonthlyCoverage(accountId: string): Promise<MonthCoverage[]> {
+  const yesterday = fmtDate(new Date(Date.now() - 86400000));
+  const floorDate = floorDateFrom(yesterday);
+  const months = monthsBackFrom(floorDate, yesterday); // oldest-first for a natural left-to-right timeline
+
+  const [insightsRows, creativesRows] = await Promise.all([
+    query<{ month: string; n: string }>(
+      `SELECT to_char(date_trunc('month', date), 'YYYY-MM') AS month, count(DISTINCT date)::text AS n
+       FROM meta_daily_insights WHERE account_id = $1 AND level = 'campaign' AND date BETWEEN $2 AND $3
+       GROUP BY 1`,
+      [accountId, floorDate, yesterday]
+    ),
+    query<{ month: string; n: string }>(
+      `SELECT to_char(date_trunc('month', date), 'YYYY-MM') AS month, count(DISTINCT date)::text AS n
+       FROM meta_asset_breakdown_daily WHERE account_id = $1 AND date BETWEEN $2 AND $3
+       GROUP BY 1`,
+      [accountId, floorDate, yesterday]
+    ),
+  ]);
+  const insightsByMonth = new Map(insightsRows.map(r => [r.month, parseInt(r.n, 10)]));
+  const creativesByMonth = new Map(creativesRows.map(r => [r.month, parseInt(r.n, 10)]));
+
+  return months.map(({ since, until }) => {
+    const month = since.slice(0, 7);
+    return { month, since, until, insightsRows: insightsByMonth.get(month) ?? 0, creativesRows: creativesByMonth.get(month) ?? 0 };
+  });
+}
+
+// Same calendar-month bucketing buildSyncRanges uses internally, exposed
+// oldest-first (buildSyncRanges itself only ever needs the single next
+// month, newest-first, so this full ordered list lives here instead).
+function monthsBackFrom(floorDate: string, yesterday: string): { since: string; until: string }[] {
+  const out: { since: string; until: string }[] = [];
+  let cursor = yesterday;
+  while (daysBetween(floorDate, cursor) >= 0) {
+    const rawStart = monthStart(cursor);
+    const since = daysBetween(floorDate, rawStart) > 0 ? rawStart : floorDate;
+    out.push({ since, until: cursor });
+    if (since === floorDate) break;
+    cursor = addDays(since, -1);
+  }
+  return out.reverse();
+}
+
+// On-demand sync for an admin-specified date range, independent of the
+// watermark-driven sequential walk — lets an admin fill a specific known
+// gap (visible in the coverage timeline) without waiting for the normal
+// backfill to reach it. Does NOT read or write newest_synced/
+// earliest_synced/backfill_complete — those stay owned by the sequential
+// walk in syncInsights/syncCreatives, so a targeted gap-fill can't
+// interfere with (or be confused for) normal backfill progress.
+export async function syncAccountRange(accountId: string, since: string, until: string): Promise<{ daysSynced: number; error: string | null }> {
+  const claimed = await claimSync(accountId);
+  if (!claimed) return { daysSynced: 0, error: 'Sync already in progress' };
+  try {
+    const token = await tokenForAccountId(accountId);
+    const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
+    const campaignIds = await campaignIdsForAccount(accountId);
+    let daysSynced = 0;
+    for (const chunk of chunkRange(since, until, CHUNK_DAYS)) {
+      for (const level of levels) {
+        const { written } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
+        if (level === 'campaign') daysSynced += written > 0 ? daysBetween(chunk.since, chunk.until) + 1 : 0;
+      }
+    }
+    await finishSync(accountId, { success: true });
+    return { daysSynced, error: null };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Range sync failed';
+    await finishSync(accountId, { success: false, error: message });
+    return { daysSynced: 0, error: message };
+  }
+}
+
 export async function syncClientAccounts(clientId: string): Promise<SyncAccountResult[]> {
   const [client] = await query<{ ad_account_ids: string[] | null }>(
     `SELECT ad_account_ids FROM clients WHERE id = $1`,

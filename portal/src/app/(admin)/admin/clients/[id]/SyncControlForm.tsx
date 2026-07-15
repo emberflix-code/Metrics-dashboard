@@ -34,6 +34,118 @@ function relativeTime(iso: string | null): string {
   return `${days}d ago`;
 }
 
+interface MonthCoverage {
+  month: string;
+  since: string;
+  until: string;
+  insightsRows: number;
+  creativesRows: number;
+}
+
+function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId: string }) {
+  const [months, setMonths] = useState<MonthCoverage[] | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [since, setSince] = useState('');
+  const [until, setUntil] = useState('');
+  const [filling, setFilling] = useState(false);
+  const [fillError, setFillError] = useState<string | null>(null);
+  const [fillDone, setFillDone] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(`/api/admin/clients/${clientId}/sync-coverage?account_id=${accountId}`);
+        const data = await res.json();
+        if (cancelled) return;
+        if (!data.ok) setError(data.error || 'Failed to load coverage');
+        else setMonths(data.months);
+      } catch {
+        if (!cancelled) setError('Network error loading coverage');
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [clientId, accountId]);
+
+  async function handleFillGap() {
+    setFilling(true);
+    setFillError(null);
+    setFillDone(null);
+    try {
+      const res = await fetch(`/api/admin/clients/${clientId}/sync-range`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: accountId, since, until }),
+      });
+      const data = await res.json();
+      if (!data.ok) setFillError(data.error || 'Sync failed');
+      else setFillDone(`Synced ${data.daysSynced} day(s). Refresh to see updated coverage.`);
+    } catch {
+      setFillError('Network error — sync may still be running server-side.');
+    }
+    setFilling(false);
+  }
+
+  if (loading) return <p className="text-[11px] text-slate-500 mt-2">Loading coverage…</p>;
+  if (error) return <p className="text-[11px] text-rose-400 mt-2">{error}</p>;
+  if (!months || months.length === 0) return null;
+
+  return (
+    <div className="mt-2 space-y-2">
+      <div className="flex gap-px rounded overflow-hidden border border-slate-700/60">
+        {months.map(m => {
+          const hasInsights = m.insightsRows > 0;
+          const hasCreatives = m.creativesRows > 0;
+          const color = hasInsights && hasCreatives
+            ? 'bg-emerald-500/70'
+            : hasInsights || hasCreatives
+              ? 'bg-amber-500/70'
+              : 'bg-slate-700/40';
+          return (
+            <div
+              key={m.month}
+              className={`flex-1 h-4 ${color}`}
+              title={`${m.month}: insights ${m.insightsRows}d, creatives ${m.creativesRows}d`}
+            />
+          );
+        })}
+      </div>
+      <div className="flex items-center gap-3 text-[10px] text-slate-500">
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-emerald-500/70 inline-block" /> full</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-amber-500/70 inline-block" /> partial</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-sm bg-slate-700/40 inline-block" /> none</span>
+      </div>
+
+      <div className="pt-1 border-t border-slate-700/40">
+        <p className="text-[11px] text-slate-500 mb-1.5">Fill a specific date range on demand (doesn&apos;t affect the normal backfill order):</p>
+        <div className="flex items-center gap-2 flex-wrap">
+          <input
+            type="date" value={since} onChange={e => setSince(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200"
+          />
+          <span className="text-slate-500 text-xs">to</span>
+          <input
+            type="date" value={until} onChange={e => setUntil(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-slate-200"
+          />
+          <button
+            type="button"
+            onClick={handleFillGap}
+            disabled={filling || !since || !until}
+            className="px-2.5 py-1 bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-white text-xs font-medium rounded transition-colors"
+          >
+            {filling ? 'Syncing…' : 'Sync this range'}
+          </button>
+        </div>
+        {fillError && <p className="mt-1 text-[11px] text-rose-400">{fillError}</p>}
+        {fillDone && <p className="mt-1 text-[11px] text-emerald-400">{fillDone}</p>}
+      </div>
+    </div>
+  );
+}
+
 function statusBadge(status: SyncStateRow['status']) {
   const styles: Record<SyncStateRow['status'], string> = {
     idle: 'bg-slate-700/60 text-slate-300',
@@ -61,6 +173,7 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
   // client pass, then swap to the real relative time only after mount.
   const [mounted, setMounted] = useState(false);
   useEffect(() => setMounted(true), []);
+  const [expandedAccountId, setExpandedAccountId] = useState<string | null>(null);
 
   async function handleSourceChange(next: DataSource) {
     setDataSource(next);
@@ -158,6 +271,14 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
                 </p>
               )}
               {s.lastError && <div className="text-rose-400">Error: {s.lastError}</div>}
+              <button
+                type="button"
+                onClick={() => setExpandedAccountId(expandedAccountId === s.accountId ? null : s.accountId)}
+                className="text-blue-400 hover:text-blue-300 text-[11px] font-medium"
+              >
+                {expandedAccountId === s.accountId ? 'Hide data coverage' : 'Show data coverage'}
+              </button>
+              {expandedAccountId === s.accountId && <CoverageTimeline clientId={clientId} accountId={s.accountId} />}
             </div>
           </div>
         ))}
