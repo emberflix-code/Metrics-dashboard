@@ -880,9 +880,53 @@ async function syncCreatives(
   // sharing one image hash within a single ad), rather than the later
   // write silently overwriting the earlier one's weight.
   const adMapByPair = new Map<string, { assetKey: string; adId: string; weight: number }>();
+  const derivedByAdId = new Map<string, AssetDerived[]>();
   for (const ad of ads) {
     if (!ad.id) continue;
-    for (const derived of deriveAssets(ad.id, ad.creative)) {
+    derivedByAdId.set(ad.id, deriveAssets(ad.id, ad.creative));
+  }
+
+  // Ports the live route's asset_feed_spec promotion (see creatives/route.ts
+  // "thumbOnlyRows" handling). CASE 4 thumb:-keyed assets (DCO/Advantage+
+  // ads that expose only creative.thumbnail_url, no single image_hash on
+  // the parent creative) were previously left on Meta's tiny 64x64 preview
+  // permanently -- the /adimages full-res lookup below only ever scanned
+  // image:-prefixed and bare-hash (carousel) keys, never thumb: ones, so
+  // this whole asset class silently never got a full-res upgrade. Fetching
+  // the creative's asset_feed_spec recovers the real image_hash Meta
+  // doesn't expose on the top-level creative for these ad types.
+  const creativeIdByAdId = new Map<string, string>();
+  for (const ad of ads) if (ad.id && ad.creative?.id) creativeIdByAdId.set(ad.id, ad.creative.id);
+  const thumbOnlyCreativeIds = new Set<string>();
+  for (const [adId, derivedList] of Array.from(derivedByAdId.entries())) {
+    if (derivedList.some(d => d.assetKey.startsWith('thumb:'))) {
+      const cid = creativeIdByAdId.get(adId);
+      if (cid) thumbOnlyCreativeIds.add(cid);
+    }
+  }
+  if (thumbOnlyCreativeIds.size > 0) {
+    const hashByCreativeId = new Map<string, string>();
+    await Promise.all(Array.from(thumbOnlyCreativeIds).map(async cid => {
+      try {
+        const u = `${GRAPH}/${cid}?fields=asset_feed_spec&access_token=${token}`;
+        const res = await fetch(u);
+        const json = await res.json() as { asset_feed_spec?: { images?: { hash?: string }[] } };
+        const firstHash = json.asset_feed_spec?.images?.[0]?.hash;
+        if (firstHash && /^[a-f0-9]{20,}$/i.test(firstHash)) hashByCreativeId.set(cid, firstHash);
+      } catch { /* leave those ads' assets as thumb: */ }
+    }));
+    if (hashByCreativeId.size > 0) {
+      for (const [adId, derivedList] of Array.from(derivedByAdId.entries())) {
+        const cid = creativeIdByAdId.get(adId);
+        const hash = cid ? hashByCreativeId.get(cid) : undefined;
+        if (!hash) continue;
+        for (const d of derivedList) if (d.assetKey.startsWith('thumb:')) d.assetKey = `image:${hash}`;
+      }
+    }
+  }
+
+  for (const derivedList of Array.from(derivedByAdId.values())) {
+    for (const derived of derivedList) {
       const existing = assetsByKey.get(derived.assetKey);
       if (!existing) assetsByKey.set(derived.assetKey, derived);
       else if (!existing.thumbnail && derived.thumbnail) existing.thumbnail = derived.thumbnail;
