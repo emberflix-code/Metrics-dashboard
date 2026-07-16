@@ -874,6 +874,54 @@ async function syncCreatives(
   adsUrl.searchParams.set('access_token', token);
   const ads = await fetchMetaWithRetry<AdCreativeResp>(adsUrl);
 
+  // Backfill pass: the ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED filter
+  // above misses ads that are now DELETED/ARCHIVED — on a long-running
+  // account (Omega: running since 2023) that's most of its history, so
+  // real spend/leads had no matching thumbnail/title metadata at all
+  // (confirmed: 16 of 26 assets with real spend for one client's date
+  // range had zero metadata row). Rather than widening the filtered fetch
+  // itself (which would re-fetch thousands of ads Meta already returned
+  // above, every single sync), look up ONLY the specific ad_ids that
+  // already have real breakdown/insight history but no asset-map entry
+  // yet, and fetch just those by ID directly (a plain ?ids= lookup has no
+  // status filter at all, so DELETED/ARCHIVED ads resolve fine) — a
+  // one-time cost per ad, not a growing one every sync.
+  // Capped low and time-boxed — this backfill pass competes with the rest
+  // of syncCreatives (and, in the combined "Sync now", with entities/
+  // insights too) for the same run's budget. The LEFT JOIN naturally
+  // shrinks on its own each sync as resolved ads gain a map entry, so a
+  // small bite every run converges over time without ever dominating one.
+  const AD_METADATA_BACKFILL_LIMIT = 500;
+  const AD_METADATA_BACKFILL_BUDGET_MS = 45_000;
+  const oldAdIdRows = await query<{ ad_id: string }>(
+    `SELECT DISTINCT bd.ad_id
+     FROM meta_asset_breakdown_daily bd
+     LEFT JOIN meta_creative_asset_ad_map m ON m.account_id = bd.account_id AND m.ad_id = bd.ad_id
+     WHERE bd.account_id = $1 AND m.ad_id IS NULL
+     LIMIT ${AD_METADATA_BACKFILL_LIMIT}`,
+    [accountId]
+  );
+  const backfillAdIds = oldAdIdRows.map(r => r.ad_id);
+  if (backfillAdIds.length > 0) {
+    const backfillDeadline = Date.now() + AD_METADATA_BACKFILL_BUDGET_MS;
+    const AD_LOOKUP_CHUNK = 50;
+    for (const chunk of chunkArrayGeneric(backfillAdIds, AD_LOOKUP_CHUNK)) {
+      if (Date.now() > backfillDeadline) break;
+      try {
+        const u = new URL(`${GRAPH}/`);
+        u.searchParams.set('ids', chunk.join(','));
+        u.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as Record<string, AdCreativeResp | { error?: unknown }>;
+        for (const id of chunk) {
+          const entry = json[id];
+          if (entry && !('error' in entry) && (entry as AdCreativeResp).id) ads.push(entry as AdCreativeResp);
+        }
+      } catch { /* leave these ads without metadata this run, retried next sync since they still won't have a map entry */ }
+    }
+  }
+
   const assetsByKey = new Map<string, AssetDerived & { thumbnail: string | null }>();
   // Keyed by `${assetKey} ${adId}` — sums weight when the same ad
   // references the same asset more than once (e.g. two carousel slides
