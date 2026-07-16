@@ -182,7 +182,7 @@ function statusBadge(status: SyncStateRow['status']) {
   return <span className={`px-2 py-0.5 rounded text-[11px] font-medium ${styles[status]}`}>{labels[status]}</span>;
 }
 
-export default function SyncControlForm({ clientId, initialDataSource, syncStates }: Props) {
+export default function SyncControlForm({ clientId, initialDataSource, syncStates: initialSyncStates }: Props) {
   const [dataSource, setDataSource] = useState<DataSource>(initialDataSource);
   const [savingSource, setSavingSource] = useState(false);
   const [savedSource, setSavedSource] = useState(false);
@@ -198,6 +198,29 @@ export default function SyncControlForm({ clientId, initialDataSource, syncState
   const [expandedAccountId, setExpandedAccountId] = useState<string | null>(null);
   const [syncingCreativesFor, setSyncingCreativesFor] = useState<string | null>(null);
   const [creativesSyncError, setCreativesSyncError] = useState<string | null>(null);
+  const [syncStates, setSyncStates] = useState<SyncStateRow[]>(initialSyncStates);
+
+  // Auto-refresh while any account is actively running (server-triggered
+  // via "Sync now" clicking window.location.reload(), or another admin/tab
+  // kicking one off) — polls a lightweight status-only endpoint instead of
+  // reloading the whole page, so the "Running…" badge flips to Idle/Error
+  // live without the admin needing to remember to refresh.
+  useEffect(() => {
+    const anyRunning = syncStates.some(s => s.status === 'running');
+    if (!anyRunning) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`/api/admin/clients/${clientId}/sync-status`);
+        const data = await res.json();
+        if (!data.ok) return;
+        setSyncStates(prev => prev.map(s => {
+          const updated = data.syncStates.find((r: { accountId: string }) => r.accountId === s.accountId);
+          return updated ? { ...s, ...updated } : s;
+        }));
+      } catch { /* skip this poll, try again next interval */ }
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [clientId, syncStates]);
 
   async function handleSourceChange(next: DataSource) {
     setDataSource(next);
