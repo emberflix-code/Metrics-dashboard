@@ -100,8 +100,19 @@ export async function GET(req: NextRequest) {
     const videos = new Map<string, AssetSummary & { _adIdSet: Set<string> }>();
 
     for (const r of breakdownRows) {
+      // meta_creative_assets is only populated for ads captured by
+      // syncCreatives's ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED-filtered
+      // /ads fetch, but meta_asset_breakdown_daily is fed by a status-
+      // unfiltered breakdown-insights call — so a long-running account can
+      // have real spend/results here for an asset whose metadata was never
+      // captured (its only ads are since DELETED/ARCHIVED). The live route
+      // (asset-breakdown/route.ts) never drops these — it discovers ad_ids
+      // straight from the breakdown call and always renders a row, just
+      // with thumbnail: null (surfaced via the existing `hidden` flag
+      // below, same as any other no-preview asset). Previously this silently
+      // skipped the row entirely, undercounting spend/leads on the
+      // Creatives tab for any account old enough to have archived ads.
       const asset = assetByKey.get(r.asset_key);
-      if (!asset) continue;
       const isVideo = r.asset_key.startsWith('video:');
       const bucket = isVideo ? videos : images;
       let row = bucket.get(r.asset_key);
@@ -109,12 +120,12 @@ export async function GET(req: NextRequest) {
         row = {
           assetKey: r.asset_key,
           type: isVideo ? 'video' : 'image',
-          thumbnail: asset.thumbnail,
-          videoSource: asset.video_source,
-          videoId: asset.video_id,
-          body: asset.body,
-          title: asset.title,
-          name: asset.title,
+          thumbnail: asset?.thumbnail ?? null,
+          videoSource: asset?.video_source ?? null,
+          videoId: asset?.video_id ?? null,
+          body: asset?.body ?? null,
+          title: asset?.title ?? null,
+          name: asset?.title ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0,
           adCount: 0, adIds: [], ads: [], hidden: false,
