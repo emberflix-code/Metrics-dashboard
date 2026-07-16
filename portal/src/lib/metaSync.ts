@@ -904,6 +904,16 @@ async function syncCreatives(
       if (cid) thumbOnlyCreativeIds.add(cid);
     }
   }
+  // Old asset_key values a promotion moves ads AWAY from this run — a
+  // previous sync (before this fix existed, or before Meta exposed the
+  // hash) already wrote a "thumb:..." row + ad-map entries for these ads.
+  // Promoting assetKey in-memory here does NOT touch that old row, so
+  // without explicit cleanup the same ad ends up double-mapped to both the
+  // stale thumb: key and the new image:<hash> key (double-counted spend/
+  // leads, and the dashboard groups by whichever row it meets first — the
+  // stale low-res one, in practice). Collected here and deleted after the
+  // new rows are written below.
+  const promotedFromKeys = new Set<string>();
   if (thumbOnlyCreativeIds.size > 0) {
     const hashByCreativeId = new Map<string, string>();
     await Promise.all(Array.from(thumbOnlyCreativeIds).map(async cid => {
@@ -920,7 +930,12 @@ async function syncCreatives(
         const cid = creativeIdByAdId.get(adId);
         const hash = cid ? hashByCreativeId.get(cid) : undefined;
         if (!hash) continue;
-        for (const d of derivedList) if (d.assetKey.startsWith('thumb:')) d.assetKey = `image:${hash}`;
+        for (const d of derivedList) {
+          if (d.assetKey.startsWith('thumb:')) {
+            promotedFromKeys.add(d.assetKey);
+            d.assetKey = `image:${hash}`;
+          }
+        }
       }
     }
   }
@@ -970,6 +985,21 @@ async function syncCreatives(
        FROM unnest($2::text[], $3::text[], $4::numeric[]) AS t(asset_key, ad_id, weight)
        ON CONFLICT (account_id, asset_key, ad_id) DO UPDATE SET weight = EXCLUDED.weight`,
       [accountId, batch.map(m => m.assetKey), batch.map(m => m.adId), batch.map(m => m.weight)]
+    );
+  }
+
+  // Clean up stale rows left behind by a promotion (see promotedFromKeys
+  // above) — an earlier sync run wrote these under the old thumb: key
+  // before this run's asset_feed_spec lookup recovered the real hash. The
+  // ad-map's FK ON DELETE CASCADE (meta_creative_asset_ad_map references
+  // meta_creative_assets) handles the ad-map rows automatically once the
+  // asset row is gone. Without this, the same ad stays double-mapped to
+  // both the old thumb: key and the new image:<hash> key forever (double-
+  // counted spend/leads, dashboard grouping picks the stale low-res row).
+  if (promotedFromKeys.size > 0) {
+    await query(
+      `DELETE FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2::text[])`,
+      [accountId, Array.from(promotedFromKeys)]
     );
   }
 
