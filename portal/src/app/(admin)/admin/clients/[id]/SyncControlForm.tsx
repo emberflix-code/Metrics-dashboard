@@ -42,6 +42,47 @@ interface MonthCoverage {
   creativesRows: number;
 }
 
+// Same preset labels as the client dashboard's own date-range picker
+// (DashboardClient.tsx's DP_PRESETS/_dpPresetRange), reimplemented in plain
+// browser-local time rather than account timezone — this is an admin-only
+// sync tool operating on whole days, not a client-facing KPI view, so the
+// account's exact timezone offset doesn't matter here the way it does for
+// "which day did this lead land on." Floors at yesterday to match the same
+// "today's data isn't final yet" convention used everywhere else.
+const SYNC_RANGE_PRESETS = [
+  { label: 'Yesterday', key: 'yesterday' },
+  { label: 'Last 7 days', key: 'last_7d' },
+  { label: 'Last 30 days', key: 'last_30d' },
+  { label: 'This month', key: 'this_month' },
+  { label: 'Last month', key: 'last_month' },
+] as const;
+
+function fmtLocalDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function syncRangePreset(key: string): { since: string; until: string } | null {
+  const now = new Date();
+  const yesterday = new Date(now);
+  yesterday.setDate(yesterday.getDate() - 1);
+  switch (key) {
+    case 'yesterday': return { since: fmtLocalDate(yesterday), until: fmtLocalDate(yesterday) };
+    case 'last_7d': { const s = new Date(yesterday); s.setDate(s.getDate() - 6); return { since: fmtLocalDate(s), until: fmtLocalDate(yesterday) }; }
+    case 'last_30d': { const s = new Date(yesterday); s.setDate(s.getDate() - 29); return { since: fmtLocalDate(s), until: fmtLocalDate(yesterday) }; }
+    case 'this_month': {
+      const s = new Date(now.getFullYear(), now.getMonth(), 1);
+      const u = yesterday < s ? s : yesterday; // clamp: on the 1st, yesterday is last month
+      return { since: fmtLocalDate(s), until: fmtLocalDate(u) };
+    }
+    case 'last_month': {
+      const s = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+      const e = new Date(now.getFullYear(), now.getMonth(), 0);
+      return { since: fmtLocalDate(s), until: fmtLocalDate(e) };
+    }
+    default: return null;
+  }
+}
+
 function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId: string }) {
   const [months, setMonths] = useState<MonthCoverage[] | null>(null);
   const [loading, setLoading] = useState(true);
@@ -134,6 +175,26 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
 
       <div className="pt-1 border-t border-slate-700/40">
         <p className="text-[11px] text-slate-500 mb-1.5">Fill a specific date range on demand (doesn&apos;t affect the normal backfill order):</p>
+        <div className="flex items-center gap-1.5 flex-wrap mb-2">
+          {SYNC_RANGE_PRESETS.map(p => {
+            const range = syncRangePreset(p.key);
+            const active = !!range && since === range.since && until === range.until;
+            return (
+              <button
+                key={p.key}
+                type="button"
+                onClick={() => { if (range) { setSince(range.since); setUntil(range.until); } }}
+                className={`px-2 py-1 rounded text-[11px] font-medium border transition-colors ${
+                  active
+                    ? 'bg-blue-600 border-blue-500 text-white'
+                    : 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-600 hover:text-slate-200'
+                }`}
+              >
+                {p.label}
+              </button>
+            );
+          })}
+        </div>
         <div className="flex items-center gap-2 flex-wrap">
           <input
             type="date" value={since} onChange={e => setSince(e.target.value)}
