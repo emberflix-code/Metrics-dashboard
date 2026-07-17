@@ -129,6 +129,11 @@ let _dcoShowHidden = false;
 // When true, show only assets with at least one result (lead). On by default
 // because most users care about what's converting, not what's just spending.
 let _dcoOnlyWithResults = true;
+// When true, show ONLY hidden (no-thumbnail) assets — the inverse of the
+// normal default. Forces _dcoShowHidden on implicitly (see renderDcoAssets)
+// so this can be toggled directly from a collapsed state without a second
+// click, mirroring "Has results only"'s own single-click convenience.
+let _dcoOnlyNoThumbnail = false;
 // The lead/result count from the top KPI card — populated by renderCards so
 // the Creatives tab can compare against the per-asset totals and surface a
 // mismatch note when the delta is meaningful (e.g. cross-account placements
@@ -819,7 +824,12 @@ function renderDcoAssets() {
 
   // Hidden-by-default filter: cross-account / no-thumbnail sub-$1 assets.
   const hiddenCount = images.filter(r => r.hidden).length + videos.filter(r => r.hidden).length;
-  if (!_dcoShowHidden) {
+  if (_dcoOnlyNoThumbnail) {
+    // Isolate exactly the no-thumbnail set — implies "show hidden" (there'd
+    // be nothing to isolate otherwise) regardless of that toggle's own state.
+    images = images.filter(r => r.hidden);
+    videos = videos.filter(r => r.hidden);
+  } else if (!_dcoShowHidden) {
     images = images.filter(r => !r.hidden);
     videos = videos.filter(r => !r.hidden);
   }
@@ -2345,6 +2355,16 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                       renderDcoAssets();
                     }}
                   >Has results only</button>
+                  <button
+                    id="dco-only-no-thumbnail-btn"
+                    className="sort-btn"
+                    title="Show only assets with no preview image — useful for spotting which ones still need a thumbnail synced"
+                    onClick={(e) => {
+                      _dcoOnlyNoThumbnail = !_dcoOnlyNoThumbnail;
+                      (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _dcoOnlyNoThumbnail);
+                      renderDcoAssets();
+                    }}
+                  >No thumbnail only</button>
                 </div>
               </div>
               <p className="text-[11px] text-slate-500 mt-1 mb-1">
