@@ -7,6 +7,7 @@ import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
 import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
+import CpaConfigForm from './CpaConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
 import ImpersonateButton from './ImpersonateButton';
@@ -32,6 +33,16 @@ interface ClientDetail {
   ghl_location_id: string;
   has_ghl_token: boolean;
   data_source: 'live' | 'cached';
+  cpa_sheet_id: string;
+  cpa_sheet_tab: string;
+  show_cpa: boolean;
+  retainer_mode: 'flat' | 'monthly';
+  retainer_flat_amount: number;
+}
+
+interface RetainerRow {
+  month: string; // "YYYY-MM"
+  amount: number;
 }
 
 interface SyncStateDbRow {
@@ -68,6 +79,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
+           c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -76,6 +88,12 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   `, [params.id]);
 
   if (!client) redirect('/admin');
+
+  const retainerDbRows = await query<{ month: string; amount: string }>(
+    `SELECT to_char(month, 'YYYY-MM') AS month, amount FROM client_retainers WHERE client_id = $1 ORDER BY month DESC`,
+    [client.id]
+  );
+  const retainers: RetainerRow[] = retainerDbRows.map(r => ({ month: r.month, amount: Number(r.amount) }));
 
   // Build a unified list of accounts across all BM connections so the admin
   // can assign accounts from any BM to this client.
@@ -218,6 +236,23 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentLocationId={client.ghl_location_id ?? ''}
             currentShowBookings={client.show_bookings ?? false}
             currentShowBookRate={client.show_book_rate ?? false}
+          />
+        </div>
+
+        {/* CPA — acquisitions sheet + retainer */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">CPA — Acquisitions &amp; Retainer</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Connect a Google Sheet of leads (won leads count as acquisitions) and set the monthly retainer to show a CPA KPI card: (Meta spend + prorated retainer) &divide; won leads.
+          </p>
+          <CpaConfigForm
+            clientId={client.id}
+            currentSheetId={client.cpa_sheet_id ?? ''}
+            currentSheetTab={client.cpa_sheet_tab ?? ''}
+            currentShowCpa={client.show_cpa ?? false}
+            currentRetainerMode={client.retainer_mode ?? 'flat'}
+            currentRetainerFlatAmount={client.retainer_flat_amount ?? 0}
+            currentRetainers={retainers}
           />
         </div>
 

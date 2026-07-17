@@ -22,6 +22,7 @@ interface Props {
   leadsSource?: 'meta' | 'sheet' | 'ghl';  // resolved server-side; drives Leads KPI source
   showBookings?: boolean;       // when true (and GHL is configured), show the 7th Bookings card
   showBookRate?: boolean;       // when true, the Bookings card also renders book rate as subtitle
+  showCpa?: boolean;            // when true (and a CPA sheet is configured), show the CPA KPI card
   // Resolved server-side, PER ACCOUNT (not one client-wide flag) — a client
   // scoped to multiple ad accounts can have some synced and some not, so
   // each account independently falls back to 'live' if it hasn't completed
@@ -87,6 +88,20 @@ let _showBookings = false;
 let _showBookRate = false;
 let _ghlBookingsByDay: Record<string, number> | null = null;
 let _ghlBookingsByCampaignId: Record<string, number> | null = null;
+
+// CPA KPI card. Won-lead counts come from the client's acquisitions sheet,
+// bucketed by day like the sheet-leads/GHL-bookings state above. Retainer is
+// a single prorated number for the currently-fetched [since, until] range
+// (server computes the proration; the client just sums it into cost), so it
+// gets refetched alongside the day-bucketed rows whenever the range changes
+// rather than being cached independently.
+let _showCpa = false;
+let _cpaAcquisitionsByDay: Record<string, number> | null = null;
+let _cpaRetainerForRange = 0;
+// Won-lead names + day, kept alongside the day-count map above so clicking
+// the CPA card can list who counted as an acquisition without a second
+// fetch. Only populated with rows where won === true.
+let _cpaWonLeads: { day: string; name: string }[] = [];
 
 // Creative breakdown state — one row per asset, populated by /api/meta/creatives
 interface CreativeRow {
@@ -507,7 +522,7 @@ function renderCards(t: any, selCount=0) {
   // enabled show_bookings AND we have GHL data. When show_book_rate is also
   // on, the Bookings card's `delta` slot renders the book rate (bookings /
   // leads × 100) as a subtitle rather than a separate card.
-  const cards: { label: string; value: string; icon: string; color: string; delta: string }[] = [
+  const cards: { label: string; value: string; icon: string; color: string; delta: string; onClick?: string }[] = [
     {label:'Amount Spent', value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
     {label:'Impressions',  value:fmt(t.impressions),icon:'eye',                  color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
     {label:'Link Clicks',  value:fmt(t.linkClicks), icon:'mouse-pointer-click',  color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
@@ -535,12 +550,28 @@ function renderCards(t: any, selCount=0) {
     }
     cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:subtitle});
   }
-  const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20'};
-  const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400',teal:'text-teal-400'};
+  if (_showCpa && _cpaAcquisitionsByDay && _platform === 'meta') {
+    let acquisitions = 0;
+    try {
+      const { since, until } = getDateRange();
+      for (const [day, count] of Object.entries(_cpaAcquisitionsByDay)) {
+        if (day >= since && day <= until) acquisitions += count;
+      }
+    } catch { /* leave at 0 */ }
+    const cost = t.spent + _cpaRetainerForRange;
+    const cpaValue = acquisitions > 0 ? fmtUsd(cost / acquisitions) : '—';
+    cards.push({
+      label:'CPA', value:cpaValue, icon:'user-check', color:'sky',
+      delta:`<span class="text-slate-500 text-[11px]">${fmt(acquisitions)} won${acquisitions>0?' · click to view':''}</span>`,
+      onClick: acquisitions>0 ? '_openCpaModal()' : undefined,
+    });
+  }
+  const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20',sky:'from-sky-500/20 to-sky-500/5 border-sky-500/20'};
+  const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400',teal:'text-teal-400',sky:'text-sky-400'};
   const selBadge = selCount>0 ? `<span class="text-[10px] text-blue-400 font-normal normal-case">${selCount} selected</span>` : '';
   const grid = document.getElementById('cards-grid');
   if (grid) grid.innerHTML = cards.map((c,i)=>`
-    <div class="bg-gradient-to-br ${colors[c.color]} border rounded-xl px-4 py-3 fade-up fade-up-${i+1}">
+    <div class="bg-gradient-to-br ${colors[c.color]} border rounded-xl px-4 py-3 fade-up fade-up-${i+1} ${c.onClick?'cursor-pointer hover:brightness-125 transition-[filter]':''}" ${c.onClick?`onclick="window.${c.onClick}"`:''}>
       <div class="flex items-center justify-between mb-2">
         <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">${c.label}${i===0?selBadge:''}</span>
         <i data-lucide="${c.icon}" class="w-4 h-4 ${iconColors[c.color]}"></i>
@@ -1223,6 +1254,49 @@ async function fetchGhlBookingsForClient(since: string, until: string): Promise<
   }
 }
 
+// CPA acquisitions fetch — mirrors fetchGhlBookingsForClient. The route
+// clips rows to [since, until] server-side and returns the retainer already
+// prorated for that same range, so this just has to bucket won leads by day.
+async function fetchCpaAcquisitionsForClient(since: string, until: string): Promise<void> {
+  if (!_showCpa) {
+    _cpaAcquisitionsByDay = null;
+    _cpaRetainerForRange = 0;
+    _cpaWonLeads = [];
+    return;
+  }
+  try {
+    const url = `/api/sheets/acquisitions?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
+    const res = await fetch(url);
+    const json = await res.json() as {
+      rows?: { day: string; won: boolean; name: string }[];
+      enabled?: boolean;
+      retainer?: number;
+      error?: string;
+    };
+    if (!json.enabled || !json.rows) {
+      _cpaAcquisitionsByDay = null;
+      _cpaRetainerForRange = 0;
+      _cpaWonLeads = [];
+      return;
+    }
+    const byDay: Record<string, number> = {};
+    const wonLeads: { day: string; name: string }[] = [];
+    for (const r of json.rows) {
+      if (!r.won) continue;
+      byDay[r.day] = (byDay[r.day] || 0) + 1;
+      wonLeads.push({ day: r.day, name: r.name || '(no name)' });
+    }
+    wonLeads.sort((a, b) => b.day.localeCompare(a.day));
+    _cpaAcquisitionsByDay = byDay;
+    _cpaRetainerForRange = json.retainer || 0;
+    _cpaWonLeads = wonLeads;
+  } catch {
+    _cpaAcquisitionsByDay = null;
+    _cpaRetainerForRange = 0;
+    _cpaWonLeads = [];
+  }
+}
+
 // ── fetchMetaCampaigns ────────────────────────────────────────────────────────
 async function fetchMetaCampaigns() {
   showLoadingBar();
@@ -1241,6 +1315,9 @@ async function fetchMetaCampaigns() {
     // Fire the GHL bookings fetch in parallel too. Needs the resolved date
     // range so it can't piggyback on the sheet promise's earlier call site.
     const ghlPromise = fetchGhlBookingsForClient(since, until);
+    // Same reasoning for CPA acquisitions — needs since/until to clip rows
+    // and prorate the retainer server-side.
+    const cpaPromise = fetchCpaAcquisitionsForClient(since, until);
 
     if (_platform === 'google') {
       await loadGoogleSheetData(since, until);
@@ -1506,6 +1583,7 @@ async function fetchMetaCampaigns() {
     // paint, not a flash.
     await sheetPromise;
     await ghlPromise;
+    await cpaPromise;
 
     // If the sheet override is on, also rewrite the comparison series so
     // delta arrows and the comparison trend reflect sheet leads, not Meta's.
@@ -1977,16 +2055,52 @@ if (typeof window !== 'undefined') {
       if (modal && !modal.classList.contains('hidden')) (window as any)._closeCreative();
     }
   });
+
+  // CPA card click → list of won leads in the current date range.
+  (window as any)._openCpaModal = () => {
+    const modal = document.getElementById('cpa-modal');
+    const body = document.getElementById('cpa-modal-body');
+    if (!modal || !body) return;
+    if (_cpaWonLeads.length === 0) {
+      body.innerHTML = `<p class="text-sm text-slate-400">No won leads in the selected date range.</p>`;
+    } else {
+      body.innerHTML = `
+        <p class="text-xs text-slate-500 mb-3">${_cpaWonLeads.length} won lead${_cpaWonLeads.length===1?'':'s'} in the selected date range</p>
+        <ul class="divide-y divide-slate-800">
+          ${_cpaWonLeads.map(l => `
+            <li class="py-2.5 flex items-center justify-between gap-3">
+              <span class="text-sm text-white">${l.name}</span>
+              <span class="text-xs text-slate-500 font-mono">${_dpDisplay(l.day)}</span>
+            </li>`).join('')}
+        </ul>`;
+    }
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  };
+
+  (window as any)._closeCpaModal = () => {
+    const modal = document.getElementById('cpa-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('cpa-modal');
+      if (modal && !modal.classList.contains('hidden')) (window as any)._closeCpaModal();
+    }
+  });
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, dataSourceByAccount = {} }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, dataSourceByAccount = {} }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
   _leadsSource = leadsSource;
   _showBookings = showBookings;
   _showBookRate = showBookRate;
+  _showCpa = showCpa;
   _dataSourceByAccount = dataSourceByAccount;
 
   useEffect(() => {
@@ -2405,6 +2519,19 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
             <button onClick={()=>(window as any)._closeCreative?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
           </div>
           <div id="creative-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
+        </div>
+      </div>
+
+      {/* CPA Won Leads Modal */}
+      <div id="cpa-modal" className="hidden fixed inset-0 z-[210]" style={{background:'rgba(0,0,0,.7)',backdropFilter:'blur(4px)'}} onClick={(e)=>{ if(e.target===e.currentTarget) (window as any)._closeCpaModal?.(); }} onKeyDown={(e)=>{ if(e.key==='Escape') (window as any)._closeCpaModal?.(); }}>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-[95vw] max-w-[560px] max-h-[80vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <i data-lucide="user-check" className="w-4 h-4 text-sky-400"></i> Won leads
+            </h3>
+            <button onClick={()=>(window as any)._closeCpaModal?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+          </div>
+          <div id="cpa-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
         </div>
       </div>
 

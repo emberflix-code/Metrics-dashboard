@@ -25,6 +25,8 @@ interface ClientRow {
   show_book_rate: boolean;
   has_ghl_token: boolean;
   data_source: 'live' | 'cached';
+  show_cpa: boolean;
+  cpa_sheet_tab: string;
 }
 
 export default async function DashboardPage() {
@@ -59,7 +61,8 @@ export default async function DashboardPage() {
     `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
             c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
             c.leads_source, c.show_bookings, c.show_book_rate,
-            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source
+            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
+            c.show_cpa, c.cpa_sheet_tab
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -127,6 +130,7 @@ export default async function DashboardPage() {
         leadsSource={resolvedLeadsSource}
         showBookings={!!(client?.show_bookings && client?.has_ghl_token)}
         showBookRate={!!(client?.show_bookings && client?.show_book_rate && client?.has_ghl_token)}
+        showCpa={!!(client?.show_cpa && client?.cpa_sheet_tab)}
         dataSourceByAccount={dataSourceByAccount}
       />
     </>

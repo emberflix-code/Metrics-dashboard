@@ -206,6 +206,31 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
   } catch { /* surface via routes if it fails */ }
 })();
 
+// CPA card: acquisitions come from a per-client "won leads" Google Sheet
+// (same public-CSV pattern as sheet_id/sheet_tab), cost is Meta spend for the
+// range plus a prorated retainer. retainer_mode picks which retainer number
+// applies: 'flat' uses retainer_flat_amount for every month; 'monthly' looks
+// up client_retainers per calendar month, defaulting to 0 for months with no
+// row (rather than falling back to the flat amount, which could silently mix
+// an old flat-rate era with a new monthly-rate era).
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS cpa_sheet_id TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS cpa_sheet_tab TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_cpa BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS retainer_mode TEXT NOT NULL DEFAULT 'flat'`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS retainer_flat_amount NUMERIC(12,2) NOT NULL DEFAULT 0`).catch(() => {});
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS client_retainers (
+        client_id  UUID NOT NULL,
+        month      DATE NOT NULL,
+        amount     NUMERIC(12,2) NOT NULL DEFAULT 0,
+        PRIMARY KEY (client_id, month)
+      )
+    `);
+  } catch { /* surface via routes if it fails */ }
+})();
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

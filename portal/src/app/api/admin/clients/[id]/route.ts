@@ -7,6 +7,8 @@ import bcrypt from 'bcryptjs';
 
 const VALID_LEADS_SOURCES = new Set(['meta', 'sheet', 'ghl']);
 const VALID_DATA_SOURCES = new Set(['live', 'cached']);
+const VALID_RETAINER_MODES = new Set(['flat', 'monthly']);
+const MONTH_RE = /^\d{4}-\d{2}$/;
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
   const session = await getServerSession(authOptions);
@@ -84,6 +86,57 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (body.show_book_rate !== undefined) {
     await query('UPDATE clients SET show_book_rate = $1 WHERE id = $2', [!!body.show_book_rate, params.id]);
+  }
+
+  if (body.cpa_sheet_id !== undefined) {
+    await query('UPDATE clients SET cpa_sheet_id = $1 WHERE id = $2', [String(body.cpa_sheet_id).trim(), params.id]);
+  }
+
+  if (body.cpa_sheet_tab !== undefined) {
+    await query('UPDATE clients SET cpa_sheet_tab = $1 WHERE id = $2', [String(body.cpa_sheet_tab).trim(), params.id]);
+  }
+
+  if (body.show_cpa !== undefined) {
+    await query('UPDATE clients SET show_cpa = $1 WHERE id = $2', [!!body.show_cpa, params.id]);
+  }
+
+  if (body.retainer_mode !== undefined) {
+    const v = String(body.retainer_mode).trim();
+    if (!VALID_RETAINER_MODES.has(v)) {
+      return NextResponse.json({ error: 'retainer_mode must be one of: flat, monthly' }, { status: 400 });
+    }
+    await query('UPDATE clients SET retainer_mode = $1 WHERE id = $2', [v, params.id]);
+  }
+
+  if (body.retainer_flat_amount !== undefined) {
+    const n = Number(body.retainer_flat_amount);
+    if (!Number.isFinite(n) || n < 0) {
+      return NextResponse.json({ error: 'retainer_flat_amount must be a non-negative number' }, { status: 400 });
+    }
+    await query('UPDATE clients SET retainer_flat_amount = $1 WHERE id = $2', [n, params.id]);
+  }
+
+  // Monthly retainer rows: [{ month: "2026-07", amount: 3000 }, ...]. Upserts
+  // every entry given; does not delete rows omitted from the array, so the
+  // admin form can send just the month(s) it changed rather than the full
+  // history each time.
+  if (body.retainers !== undefined) {
+    if (!Array.isArray(body.retainers)) {
+      return NextResponse.json({ error: 'retainers must be an array' }, { status: 400 });
+    }
+    for (const r of body.retainers) {
+      const month = String(r?.month ?? '').trim();
+      const amount = Number(r?.amount);
+      if (!MONTH_RE.test(month) || !Number.isFinite(amount) || amount < 0) {
+        return NextResponse.json({ error: `Invalid retainer entry: ${JSON.stringify(r)}` }, { status: 400 });
+      }
+      await query(
+        `INSERT INTO client_retainers (client_id, month, amount)
+         VALUES ($1, to_date($2, 'YYYY-MM'), $3)
+         ON CONFLICT (client_id, month) DO UPDATE SET amount = EXCLUDED.amount`,
+        [params.id, month, amount]
+      );
+    }
   }
 
   if (body.data_source !== undefined) {
