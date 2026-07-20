@@ -231,6 +231,13 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS retainer_flat_amount NU
   } catch { /* surface via routes if it fails */ }
 })();
 
+// Perceptual-hash dedup: Meta's image_hash hashes uploaded file bytes, not
+// pixel content, so the same photo re-uploaded twice gets two different
+// asset_key rows/cards. phash is a 64-bit difference-hash computed once per
+// image asset at sync time (see metaSync.ts), letting the DB-cache creatives
+// routes merge near-identical rows into one card. See src/lib/phash.ts.
+pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS phash TEXT`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

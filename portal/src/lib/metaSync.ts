@@ -1,6 +1,7 @@
 import { query } from './db';
 import { decrypt } from './crypto';
 import { resolveResultsFromActions } from './meta';
+import { computePhash } from './phash';
 
 // Session-free Meta → Postgres sync for the DB-backed dashboard cache.
 // Mirrors getClientConnection()'s token resolution but without a session —
@@ -40,6 +41,13 @@ const ENTITIES_BUDGET_MS = 90_000;
 // request) can afford a much larger budget than the 3-minute slice it gets
 // inside the combined "Sync now" — it's the only thing running.
 const CREATIVES_ONLY_BUDGET_MS = 10 * 60_000;
+// Perceptual-hash backfill for image assets (see 014_creative_asset_phash.sql)
+// — capped and time-boxed like AD_METADATA_BACKFILL_*. Competes for the same
+// run's budget as everything else in syncCreatives, but the WHERE phash IS
+// NULL query naturally shrinks each sync as rows get hashed, so a small bite
+// every run converges without ever dominating one.
+const PHASH_BACKFILL_LIMIT = 300;
+const PHASH_BACKFILL_BUDGET_MS = 45_000;
 
 export interface SyncAccountResult {
   accountId: string;
@@ -1125,6 +1133,37 @@ async function syncCreatives(
         }
       }
     } catch { /* leave stored video source as-is */ }
+  }
+
+  // 1b) Perceptual-hash backfill for image assets -- lets read-time grouping
+  // merge two asset_key rows that are the same visual photo uploaded twice
+  // under different Meta image_hash values (Meta hashes uploaded file bytes,
+  // not pixel content; see 014_creative_asset_phash.sql). Runs after the
+  // full-res thumbnail enrichment above so it always hashes the best
+  // available image, not a stale low-res one. try/catch per row: one broken
+  // or unreachable thumbnail URL must not abort the batch or the rest of
+  // the sync.
+  const phashCandidates = await query<{ asset_key: string; thumbnail: string }>(
+    `SELECT asset_key, thumbnail FROM meta_creative_assets
+     WHERE account_id = $1 AND type = 'image' AND phash IS NULL AND thumbnail IS NOT NULL
+     LIMIT ${PHASH_BACKFILL_LIMIT}`,
+    [accountId]
+  );
+  if (phashCandidates.length > 0) {
+    const phashDeadline = Date.now() + PHASH_BACKFILL_BUDGET_MS;
+    for (const row of phashCandidates) {
+      if (Date.now() > phashDeadline) break;
+      try {
+        const res = await fetch(row.thumbnail);
+        if (!res.ok) continue;
+        const bytes = Buffer.from(await res.arrayBuffer());
+        const hash = await computePhash(bytes);
+        await query(
+          `UPDATE meta_creative_assets SET phash = $3 WHERE account_id = $1 AND asset_key = $2`,
+          [accountId, row.asset_key, hash]
+        );
+      } catch { /* leave phash NULL, retried next sync since it still won't match */ }
+    }
   }
 
   // 3) DCO per-asset-per-day breakdown (image_asset / video_asset). Walks

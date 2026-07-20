@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
+import { clusterByPerceptualHash } from '@/lib/phash';
 
 interface AssetSummary {
   assetKey: string;
@@ -84,11 +85,21 @@ export async function GET(req: NextRequest) {
     }
 
     const assetKeys = Array.from(new Set(breakdownRows.map(r => r.asset_key)));
-    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null }>(
-      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null }>(
+      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
       [accountId, assetKeys]
     );
     const assetByKey = new Map(assetRows.map(a => [a.asset_key, a] as const));
+
+    // Two asset_key rows can be the same visual photo uploaded twice under
+    // different Meta image_hash values (see 014_creative_asset_phash.sql) --
+    // fold those onto one canonical card instead of showing duplicates.
+    // Video assets never get a phash (sync only hashes type='image' rows),
+    // so they never cluster -- bucket routing below stays keyed off the
+    // original asset_key's "video:" prefix regardless of this remap.
+    const canonicalKeyOf = clusterByPerceptualHash(
+      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash }))
+    );
 
     const adMetaRows = await query<{ entity_id: string; name: string; effective_status: string }>(
       `SELECT entity_id, name, effective_status FROM meta_entities WHERE account_id = $1 AND level = 'ad' AND entity_id = ANY($2)`,
@@ -112,26 +123,30 @@ export async function GET(req: NextRequest) {
       // below, same as any other no-preview asset). Previously this silently
       // skipped the row entirely, undercounting spend/leads on the
       // Creatives tab for any account old enough to have archived ads.
-      const asset = assetByKey.get(r.asset_key);
       const isVideo = r.asset_key.startsWith('video:');
       const bucket = isVideo ? videos : images;
-      let row = bucket.get(r.asset_key);
+      const canonicalKey = canonicalKeyOf.get(r.asset_key) || r.asset_key;
+      let row = bucket.get(canonicalKey);
       if (!row) {
+        // Display fields come from the canonical asset's own row, not
+        // whichever original asset_key this loop iteration happened to hit
+        // first — deterministic regardless of breakdownRows ordering.
+        const canonicalAsset = assetByKey.get(canonicalKey) ?? assetByKey.get(r.asset_key);
         row = {
-          assetKey: r.asset_key,
+          assetKey: canonicalKey,
           type: isVideo ? 'video' : 'image',
-          thumbnail: asset?.thumbnail ?? null,
-          videoSource: asset?.video_source ?? null,
-          videoId: asset?.video_id ?? null,
-          body: asset?.body ?? null,
-          title: asset?.title ?? null,
-          name: asset?.title ?? null,
+          thumbnail: canonicalAsset?.thumbnail ?? null,
+          videoSource: canonicalAsset?.video_source ?? null,
+          videoId: canonicalAsset?.video_id ?? null,
+          body: canonicalAsset?.body ?? null,
+          title: canonicalAsset?.title ?? null,
+          name: canonicalAsset?.title ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0,
           adCount: 0, adIds: [], ads: [], hidden: false,
           _adIdSet: new Set<string>(),
         };
-        bucket.set(r.asset_key, row);
+        bucket.set(canonicalKey, row);
       }
       const spend = parseFloat(r.spend) || 0;
       const impressions = parseInt(r.impressions, 10) || 0;

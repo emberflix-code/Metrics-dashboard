@@ -17,7 +17,8 @@
     "pg": "^8.20.0",
     "react": "^18",
     "react-dom": "^18",
-    "resend": "^6.10.0"
+    "resend": "^6.10.0",
+    "sharp": "^0.35.3"
   },
   "devDependencies": {
     "@types/node": "^20",

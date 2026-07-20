@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
+import { clusterByPerceptualHash } from '@/lib/phash';
 
 interface CreativeRow {
   assetKey: string;
@@ -85,11 +86,18 @@ export async function GET(req: NextRequest) {
     const assetKeys = Array.from(new Set(mapRows.map(r => r.asset_key)));
     if (assetKeys.length === 0) return NextResponse.json({ data: [] });
 
-    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null }>(
-      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null }>(
+      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
       [accountId, assetKeys]
     );
     const assetByKey = new Map(assetRows.map(a => [a.asset_key, a] as const));
+
+    // Two asset_key rows can be the same visual photo uploaded twice under
+    // different Meta image_hash values (see 014_creative_asset_phash.sql) --
+    // fold those onto one canonical card instead of showing duplicates.
+    const canonicalKeyOf = clusterByPerceptualHash(
+      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash }))
+    );
 
     const rows = new Map<string, CreativeRow>();
     for (const m of mapRows) {
@@ -97,24 +105,29 @@ export async function GET(req: NextRequest) {
       const asset = assetByKey.get(m.asset_key);
       if (!metrics || !asset) continue;
       const weight = parseFloat(m.weight) || 1;
+      const canonicalKey = canonicalKeyOf.get(m.asset_key) || m.asset_key;
 
-      let row = rows.get(m.asset_key);
+      let row = rows.get(canonicalKey);
       if (!row) {
+        // Display fields come from the canonical asset's own row, not
+        // whichever original asset_key this loop iteration happened to hit
+        // first — deterministic regardless of mapRows ordering.
+        const canonicalAsset = assetByKey.get(canonicalKey) || asset;
         row = {
-          assetKey: m.asset_key,
-          type: (asset.type as CreativeRow['type']) || 'unknown',
-          thumbnail: asset.thumbnail,
-          videoSource: asset.video_source,
-          videoId: asset.video_id,
-          body: asset.body,
-          title: asset.title,
+          assetKey: canonicalKey,
+          type: (canonicalAsset.type as CreativeRow['type']) || 'unknown',
+          thumbnail: canonicalAsset.thumbnail,
+          videoSource: canonicalAsset.video_source,
+          videoId: canonicalAsset.video_id,
+          body: canonicalAsset.body,
+          title: canonicalAsset.title,
           sampleAdName: metrics.adName || '(unnamed)',
           sampleAdId: m.ad_id,
           spend: 0, results: 0, impressions: 0, linkClicks: 0, reach: 0,
           ctr: 0, cpl: 0,
           ads: [],
         };
-        rows.set(m.asset_key, row);
+        rows.set(canonicalKey, row);
       }
       row.spend += metrics.spend * weight;
       row.results += metrics.results * weight;
