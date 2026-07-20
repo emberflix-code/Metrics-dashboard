@@ -159,10 +159,25 @@ function CoverageTimeline({ clientId, accountId }: { clientId: string; accountId
                 ? 'missing performance numbers (spend/leads/etc.)'
                 : 'no data synced yet';
           return (
-            <div
+            <button
               key={m.month}
-              className={`flex-1 h-4 ${color}`}
-              title={`${m.month}\nPerformance numbers: ${m.insightsRows} of the month's days\nCreative data: ${m.creativesRows} of the month's days\n${missing}`}
+              type="button"
+              title={`${m.month}\nPerformance numbers: ${m.insightsRows} of the month's days\nCreative data: ${m.creativesRows} of the month's days\n${missing}\n\nClick to fill this range below.`}
+              onClick={() => {
+                setSince(m.since);
+                setUntil(m.until);
+                // Pre-check whichever type is actually missing for this
+                // month, so a click on a partial box defaults to fixing
+                // exactly what's missing instead of re-syncing both. A
+                // fully-synced (green) month has nothing missing to target,
+                // so fall back to both rather than leaving neither checked
+                // (which would leave the button disabled).
+                const missingInsights = !hasInsights;
+                const missingCreatives = !hasCreatives;
+                setFillInsights(missingInsights || (!missingInsights && !missingCreatives));
+                setFillCreatives(missingCreatives || (!missingInsights && !missingCreatives));
+              }}
+              className={`flex-1 h-4 ${color} hover:ring-2 hover:ring-inset hover:ring-white/40 cursor-pointer transition-[box-shadow]`}
             />
           );
         })}
