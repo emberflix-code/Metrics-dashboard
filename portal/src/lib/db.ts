@@ -218,6 +218,12 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS cpa_sheet_tab TEXT NOT 
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_cpa BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS retainer_mode TEXT NOT NULL DEFAULT 'flat'`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS retainer_flat_amount NUMERIC(12,2) NOT NULL DEFAULT 0`).catch(() => {});
+
+// LTV/CLV KPI card: won leads in the selected date range (from the same
+// acquisitions sheet the CPA card reads) x an admin-entered value per sale.
+// ltv_value stores that per-sale dollar amount, not a final total.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS ltv_value NUMERIC(12,2) NOT NULL DEFAULT 0`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_ltv BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 (async () => {
   try {
     await pool.query(`

@@ -8,6 +8,7 @@ import ShowAccountToggle from './ShowAccountToggle';
 import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
 import CpaConfigForm from './CpaConfigForm';
+import LtvConfigForm from './LtvConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
 import ImpersonateButton from './ImpersonateButton';
@@ -38,6 +39,8 @@ interface ClientDetail {
   show_cpa: boolean;
   retainer_mode: 'flat' | 'monthly';
   retainer_flat_amount: number;
+  ltv_value: number;
+  show_ltv: boolean;
 }
 
 interface RetainerRow {
@@ -80,6 +83,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
+           c.ltv_value, c.show_ltv,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -253,6 +257,19 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentRetainerMode={client.retainer_mode ?? 'flat'}
             currentRetainerFlatAmount={client.retainer_flat_amount ?? 0}
             currentRetainers={retainers}
+          />
+        </div>
+
+        {/* LTV — won leads (from the CPA sheet above) x a per-sale value */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">LTV — Lifetime Value</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Show an LTV KPI card: won leads in the selected date range &times; a fixed value per sale.
+          </p>
+          <LtvConfigForm
+            clientId={client.id}
+            currentLtvValue={client.ltv_value ?? 0}
+            currentShowLtv={client.show_ltv ?? false}
           />
         </div>
 

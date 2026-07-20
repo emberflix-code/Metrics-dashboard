@@ -139,6 +139,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     }
   }
 
+  if (body.ltv_value !== undefined) {
+    const n = Number(body.ltv_value);
+    if (!Number.isFinite(n) || n < 0) {
+      return NextResponse.json({ error: 'ltv_value must be a non-negative number' }, { status: 400 });
+    }
+    await query('UPDATE clients SET ltv_value = $1 WHERE id = $2', [n, params.id]);
+  }
+
+  if (body.show_ltv !== undefined) {
+    await query('UPDATE clients SET show_ltv = $1 WHERE id = $2', [!!body.show_ltv, params.id]);
+  }
+
   if (body.data_source !== undefined) {
     const v = String(body.data_source).trim();
     if (!VALID_DATA_SOURCES.has(v)) {

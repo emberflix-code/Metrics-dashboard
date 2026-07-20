@@ -23,6 +23,8 @@ interface Props {
   showBookings?: boolean;       // when true (and GHL is configured), show the 7th Bookings card
   showBookRate?: boolean;       // when true, the Bookings card also renders book rate as subtitle
   showCpa?: boolean;            // when true (and a CPA sheet is configured), show the CPA KPI card
+  showLtv?: boolean;            // when true (and a CPA sheet is configured), show the LTV KPI card
+  ltvValue?: number;            // admin-entered $ value per sale; LTV = won leads in range x this
   // Resolved server-side, PER ACCOUNT (not one client-wide flag) — a client
   // scoped to multiple ad accounts can have some synced and some not, so
   // each account independently falls back to 'live' if it hasn't completed
@@ -102,6 +104,11 @@ let _cpaRetainerForRange = 0;
 // the CPA card can list who counted as an acquisition without a second
 // fetch. Only populated with rows where won === true.
 let _cpaWonLeads: { day: string; name: string }[] = [];
+
+// LTV KPI card — won leads in the selected range (shares the CPA
+// acquisitions fetch above) x an admin-entered value per sale.
+let _showLtv = false;
+let _ltvValue = 0;
 
 // Creative breakdown state — one row per asset, populated by /api/meta/creatives
 interface CreativeRow {
@@ -564,6 +571,19 @@ function renderCards(t: any, selCount=0) {
       label:'CPA', value:cpaValue, icon:'user-check', color:'sky',
       delta:`<span class="text-slate-500 text-[11px]">${fmt(acquisitions)} won${acquisitions>0?' · click to view':''}</span>`,
       onClick: acquisitions>0 ? '_openCpaModal()' : undefined,
+    });
+  }
+  if (_showLtv && _cpaAcquisitionsByDay) {
+    let sales = 0;
+    try {
+      const { since, until } = getDateRange();
+      for (const [day, count] of Object.entries(_cpaAcquisitionsByDay)) {
+        if (day >= since && day <= until) sales += count;
+      }
+    } catch { /* leave at 0 */ }
+    cards.push({
+      label:'LTV', value:fmtUsd(sales * _ltvValue), icon:'trending-up', color:'violet',
+      delta:`<span class="text-slate-500 text-[11px]">${fmt(sales)} sale${sales===1?'':'s'} &times; ${fmtUsd(_ltvValue)}</span>`,
     });
   }
   const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20',sky:'from-sky-500/20 to-sky-500/5 border-sky-500/20'};
@@ -1257,8 +1277,10 @@ async function fetchGhlBookingsForClient(since: string, until: string): Promise<
 // CPA acquisitions fetch — mirrors fetchGhlBookingsForClient. The route
 // clips rows to [since, until] server-side and returns the retainer already
 // prorated for that same range, so this just has to bucket won leads by day.
+// Also feeds the LTV card (won leads x per-sale value) — both cards share
+// this one fetch since they're sourced from the same acquisitions sheet.
 async function fetchCpaAcquisitionsForClient(since: string, until: string): Promise<void> {
-  if (!_showCpa) {
+  if (!_showCpa && !_showLtv) {
     _cpaAcquisitionsByDay = null;
     _cpaRetainerForRange = 0;
     _cpaWonLeads = [];
@@ -2093,7 +2115,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, dataSourceByAccount = {} }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {} }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -2101,6 +2123,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _showBookings = showBookings;
   _showBookRate = showBookRate;
   _showCpa = showCpa;
+  _showLtv = showLtv;
+  _ltvValue = ltvValue;
   _dataSourceByAccount = dataSourceByAccount;
 
   useEffect(() => {
