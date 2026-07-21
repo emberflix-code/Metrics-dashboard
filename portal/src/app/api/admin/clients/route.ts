@@ -35,5 +35,18 @@ export async function POST(req: NextRequest) {
     RETURNING client_id AS id
   `, [name, email, hash]);
 
-  return NextResponse.json({ id: client.id }, { status: 201 });
+  // Alloy locations are aggregated into the "Alloy Ops" umbrella client via
+  // its sheet_tab pipe-separated list (see lib/sheets.ts) rather than a
+  // parent/child schema relationship, so a new Alloy client is invisible to
+  // that dashboard until someone manually appends its sheet tab there.
+  let alloyOpsId: string | null = null;
+  if (/alloy/i.test(name) && !/alloy ops/i.test(name)) {
+    const [alloyOps] = await query<{ id: string }>(
+      `SELECT id FROM clients WHERE name ILIKE 'Alloy Ops' AND id != $1 LIMIT 1`,
+      [client.id]
+    );
+    alloyOpsId = alloyOps?.id ?? null;
+  }
+
+  return NextResponse.json({ id: client.id, alloyOpsId }, { status: 201 });
 }
