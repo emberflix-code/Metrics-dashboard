@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import PillTagInput from './PillTagInput';
 
 type LeadsSource = 'meta' | 'sheet' | 'ghl';
 
@@ -69,15 +70,9 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
           Meta Tab Name
           <span className="ml-1 text-slate-500 font-normal">(Facebook/Meta data)</span>
         </label>
-        <input
-          type="text"
-          value={sheetTab}
-          onChange={e => setSheetTab(e.target.value)}
-          placeholder="Sheet1"
-          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-        />
+        <PillTagInput value={sheetTab} onChange={setSheetTab} placeholder="e.g. Sheet1" />
         <p className="mt-1 text-xs text-slate-500">
-          One tab name, or multiple separated by <code className="text-slate-400">|</code> to aggregate. Example: <code className="text-slate-400">Alloy Middleton, WI | Alloy Wexford, PA</code> unions both tabs into one dataset.
+          One tab per pill. Add multiple to aggregate — e.g. <code className="text-slate-400">Alloy Middleton, WI</code> + <code className="text-slate-400">Alloy Wexford, PA</code> unions both tabs into one dataset. Press Enter or click away to add a tab name as its own pill.
         </p>
       </div>
 
@@ -108,15 +103,9 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
           Google Ads Tab Name
           <span className="ml-1 text-slate-500 font-normal">(leave blank if no Google Ads dashboard)</span>
         </label>
-        <input
-          type="text"
-          value={googleSheetTab}
-          onChange={e => setGoogleSheetTab(e.target.value)}
-          placeholder="Alloy Middleton, WI (Google)"
-          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-        />
+        <PillTagInput value={googleSheetTab} onChange={setGoogleSheetTab} placeholder="e.g. Alloy Middleton, WI (Google)" />
         <p className="mt-1 text-xs text-slate-500">
-          When set, the client&apos;s dashboard shows a &quot;View Google Ads&quot; switch. Multiple tabs can be unioned by separating with <code className="text-slate-400">|</code>.
+          When set, the client&apos;s dashboard shows a &quot;View Google Ads&quot; switch. Add multiple pills to union several tabs.
         </p>
       </div>
 
