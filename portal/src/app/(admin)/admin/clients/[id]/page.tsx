@@ -14,6 +14,7 @@ import AutoLoginLink from './AutoLoginLink';
 import ImpersonateButton from './ImpersonateButton';
 import SyncControlForm, { SyncStateRow } from './SyncControlForm';
 import { computeBackfillProgress } from '@/lib/metaSync';
+import { fetchSheetRows, SheetError } from '@/lib/sheets';
 
 interface ClientDetail {
   id: string;
@@ -92,6 +93,30 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   `, [params.id]);
 
   if (!client) redirect('/admin');
+
+  // Google's CSV export silently serves the default tab instead of erroring
+  // when a configured tab name no longer exists (see lib/sheets.ts), so a
+  // renamed/deleted tab produces no error anywhere — the dashboard just
+  // quietly undercounts. Surface it here, admin-side, rather than on the
+  // client's own dashboard.
+  let sheetTabWarning: string | null = null;
+  if (client.sheet_id && client.sheet_tab) {
+    try {
+      const { failedTabs } = await fetchSheetRows(client.sheet_id, client.sheet_tab);
+      if (failedTabs.length > 0) {
+        sheetTabWarning = failedTabs.length === 1
+          ? `Tab "${failedTabs[0]}" did not resolve — it may have been renamed or deleted. Leads from this tab are being silently excluded.`
+          : `${failedTabs.length} tabs did not resolve — they may have been renamed or deleted: ${failedTabs.map(t => `"${t}"`).join(', ')}. Leads from these tabs are being silently excluded.`;
+      }
+    } catch (err) {
+      if (err instanceof SheetError && err.code === 'TAB_NOT_FOUND') {
+        sheetTabWarning = `Tab "${client.sheet_tab}" did not resolve — it may have been renamed or deleted. Leads are being silently excluded.`;
+      }
+      // Other SheetError codes (NOT_PUBLIC, MISSING_COLUMNS, UPSTREAM_5XX) are
+      // left unsurfaced here — they're either already visible on the client
+      // dashboard's own error state or not this-tab-name-specific.
+    }
+  }
 
   const retainerDbRows = await query<{ month: string; amount: string }>(
     `SELECT to_char(month, 'YYYY-MM') AS month, amount FROM client_retainers WHERE client_id = $1 ORDER BY month DESC`,
@@ -218,6 +243,11 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           <p className="text-sm text-slate-400 mb-5">
             Connect a Google Sheet to show leads data on this client&apos;s dashboard.
           </p>
+          {sheetTabWarning && (
+            <div className="mb-5 p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg text-sm text-amber-300">
+              <strong>Tab mismatch detected.</strong> {sheetTabWarning}
+            </div>
+          )}
           <SheetConfigForm
             clientId={client.id}
             currentSheetId={client.sheet_id ?? ''}

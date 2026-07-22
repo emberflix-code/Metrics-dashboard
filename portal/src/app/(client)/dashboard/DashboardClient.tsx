@@ -76,6 +76,13 @@ function metaApiBase(accountId: string): string {
 // fetchMetaCampaigns when _useSheetForLeads is on. Used to override t.results
 // and trend data for the current date range.
 let _sheetLeadsByDay: Record<string, number> | null = null;
+// Leads summed by campaign name (column A of the sheet), keyed by the exact
+// string as typed there. The sheet is a manual/automated log whose campaign
+// column matches Meta's actual campaign name verbatim (confirmed against
+// live data — no fuzzy matching needed), so this drives the per-campaign
+// Leads column/subtotal in the table the same way _sheetLeadsByDay drives
+// the KPI card and trend chart.
+let _sheetLeadsByCampaignName: Record<string, number> | null = null;
 
 // GHL bookings integration. Source for the optional 7th "Bookings" KPI card
 // AND for the Leads card when _leadsSource === 'ghl'. Pattern mirrors the
@@ -646,10 +653,63 @@ function renderTable() {
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('cpc')">CPC${arrow('cpc')}</th>
     <th class="text-right px-4 py-3 ${thB}" onclick="window._setSortCol('cpl')">CPL${arrow('cpl')}</th>`;
 
-  if (data.length===0) { tbody.innerHTML=''; tfoot.innerHTML=''; noRes.classList.remove('hidden'); renderCards({reach:0,impressions:0,spent:0,linkClicks:0,results:0}); return; }
+  if (data.length===0) {
+    tbody.innerHTML=''; tfoot.innerHTML=''; noRes.classList.remove('hidden');
+    document.getElementById('table-leads-mismatch')?.classList.add('hidden');
+    renderCards({reach:0,impressions:0,spent:0,linkClicks:0,results:0}); return;
+  }
   noRes.classList.add('hidden');
 
   const totals = data.reduce((a:any,c:any)=>({reach:a.reach+c.reach,impressions:a.impressions+c.impressions,results:a.results+c.results,spent:a.spent+c.spent,linkClicks:a.linkClicks+c.linkClicks}),{reach:0,impressions:0,results:0,spent:0,linkClicks:0});
+
+  // Leads mismatch banner — the table's Leads column is always Meta's own
+  // per-campaign attribution (there's no campaign dimension in a sheet or
+  // GHL export to break it down by), but the KPI card above substitutes a
+  // different source's total when leads_source is 'sheet' or 'ghl'. Without
+  // this, the two numbers can legitimately disagree with no explanation —
+  // same problem and banner pattern as the Creatives tab's DCO mismatch.
+  const tableMismatchBanner = document.getElementById('table-leads-mismatch');
+  if (tableMismatchBanner && _platform === 'meta') {
+    let kpiTotal: number | null = null;
+    let sourceLabel = '';
+    try {
+      const { since, until } = getDateRange();
+      if (_leadsSource === 'sheet' && _sheetLeadsByDay) {
+        let sum = 0;
+        for (const [day, leads] of Object.entries(_sheetLeadsByDay)) if (day >= since && day <= until) sum += leads;
+        kpiTotal = sum; sourceLabel = 'your Google Sheet';
+      } else if (_leadsSource === 'ghl' && _ghlBookingsByDay) {
+        let sum = 0;
+        for (const [day, count] of Object.entries(_ghlBookingsByDay)) if (day >= since && day <= until) sum += count;
+        kpiTotal = sum; sourceLabel = 'GoHighLevel';
+      }
+    } catch { /* leave kpiTotal null on any error */ }
+
+    if (kpiTotal !== null && kpiTotal > 0 && totals.results > 0) {
+      const delta = Math.abs(kpiTotal - totals.results);
+      const pct = (delta / Math.max(kpiTotal, totals.results)) * 100;
+      if (pct >= 5) {
+        tableMismatchBanner.innerHTML = `
+          <i data-lucide="info" class="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
+          <div class="text-[11px] text-amber-200/90 leading-relaxed">
+            <span class="font-semibold">Heads up:</span> the top KPI card shows <span class="font-mono">${kpiTotal}</span> leads (from ${sourceLabel}), but the campaign table&apos;s Leads column sums to <span class="font-mono">${totals.results}</span> (Meta&apos;s own attribution) — a ${pct.toFixed(0)}% gap.
+            <div class="mt-1">${sourceLabel === 'your Google Sheet' ? 'The sheet has no per-campaign breakdown, so its total can&apos;t be split across rows below.' : 'GoHighLevel bookings aren&apos;t attributed per-campaign in the same way Meta is.'} The KPI card remains the source of truth for total leads.</div>
+          </div>`;
+        tableMismatchBanner.classList.remove('hidden');
+        tableMismatchBanner.classList.add('flex');
+      } else {
+        tableMismatchBanner.classList.add('hidden');
+        tableMismatchBanner.classList.remove('flex');
+      }
+    } else {
+      tableMismatchBanner.classList.add('hidden');
+      tableMismatchBanner.classList.remove('flex');
+    }
+  } else if (tableMismatchBanner) {
+    tableMismatchBanner.classList.add('hidden');
+    tableMismatchBanner.classList.remove('flex');
+  }
+
   const tCpm=totals.impressions>0?(totals.spent/totals.impressions)*1000:0;
   const tCtr=totals.impressions>0?(totals.linkClicks/totals.impressions)*100:0;
   const tCpc=totals.linkClicks>0?totals.spent/totals.linkClicks:0;
@@ -1221,18 +1281,22 @@ function renderStaticAssets() {
 // Reused across reloads — only the first call hits the network because the
 // route also caches the CSV for 60s.
 async function fetchSheetLeadsForMeta(): Promise<void> {
-  if (!_useSheetForLeads) { _sheetLeadsByDay = null; return; }
+  if (!_useSheetForLeads) { _sheetLeadsByDay = null; _sheetLeadsByCampaignName = null; return; }
   try {
     const res = await fetch('/api/sheets/meta');
-    const json = await res.json() as { rows?: { day: string; leads: number }[]; enabled?: boolean; error?: string };
-    if (!json.enabled || !json.rows) { _sheetLeadsByDay = null; return; }
+    const json = await res.json() as { rows?: { day: string; leads: number; campaign?: string }[]; enabled?: boolean; error?: string };
+    if (!json.enabled || !json.rows) { _sheetLeadsByDay = null; _sheetLeadsByCampaignName = null; return; }
     const byDay: Record<string, number> = {};
+    const byCampaign: Record<string, number> = {};
     for (const r of json.rows) {
       byDay[r.day] = (byDay[r.day] || 0) + (r.leads || 0);
+      if (r.campaign) byCampaign[r.campaign] = (byCampaign[r.campaign] || 0) + (r.leads || 0);
     }
     _sheetLeadsByDay = byDay;
+    _sheetLeadsByCampaignName = byCampaign;
   } catch {
     _sheetLeadsByDay = null;
+    _sheetLeadsByCampaignName = null;
   }
 }
 
@@ -1439,6 +1503,22 @@ async function fetchMetaCampaigns() {
     allMapped = results.flat();
 
     if (allMapped.length===0) { _campaigns.splice(0,_campaigns.length); renderTable(); showNotification('No campaign data found for this date range','success'); return; }
+    // Join sheet leads by campaign name when the sheet is the Leads source.
+    // The sheet's campaign column is a manual/automated log of the exact
+    // Meta campaign name (verified against live data — an exact string
+    // match, not fuzzy), so this replaces Meta's own per-row lead count
+    // with the sheet's, making the table agree with the KPI card instead of
+    // needing a "these differ" banner. At adset/ad level every row under the
+    // same campaign gets that campaign's sheet total (same caveat as the
+    // Bookings column below — sheet/GHL data has no finer-than-campaign
+    // dimension). Rows whose campaign name has no matching sheet row keep
+    // Meta's own count rather than silently zeroing them out.
+    if (_leadsSource === 'sheet' && _sheetLeadsByCampaignName) {
+      for (const row of allMapped) {
+        const matched = row.campaignName ? _sheetLeadsByCampaignName[row.campaignName] : undefined;
+        if (matched != null) row.results = matched;
+      }
+    }
     // Join GHL booking counts by Meta campaign_id when the feature is enabled.
     // Null marks "no GHL data" → table renders em-dashes; a real 0 means the
     // campaign is in both systems but has no bookings this period.
@@ -2400,6 +2480,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
             {/* Table view */}
             <div id="table-view">
               <div id="drilldown-banner" className="hidden items-center gap-2 px-4 py-2 bg-blue-500/10 border-b border-blue-500/20 text-xs text-blue-300"></div>
+              <div id="table-leads-mismatch" className="hidden mx-4 mt-3 mb-1 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 flex items-start gap-2"></div>
               <div className="overflow-x-auto scrollbar-thin">
                 <table className="w-full text-sm">
                   <thead><tr className="border-b border-slate-800" id="table-head-row">
