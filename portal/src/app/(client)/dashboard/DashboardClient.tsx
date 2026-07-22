@@ -1503,22 +1503,6 @@ async function fetchMetaCampaigns() {
     allMapped = results.flat();
 
     if (allMapped.length===0) { _campaigns.splice(0,_campaigns.length); renderTable(); showNotification('No campaign data found for this date range','success'); return; }
-    // Join sheet leads by campaign name when the sheet is the Leads source.
-    // The sheet's campaign column is a manual/automated log of the exact
-    // Meta campaign name (verified against live data — an exact string
-    // match, not fuzzy), so this replaces Meta's own per-row lead count
-    // with the sheet's, making the table agree with the KPI card instead of
-    // needing a "these differ" banner. At adset/ad level every row under the
-    // same campaign gets that campaign's sheet total (same caveat as the
-    // Bookings column below — sheet/GHL data has no finer-than-campaign
-    // dimension). Rows whose campaign name has no matching sheet row keep
-    // Meta's own count rather than silently zeroing them out.
-    if (_leadsSource === 'sheet' && _sheetLeadsByCampaignName) {
-      for (const row of allMapped) {
-        const matched = row.campaignName ? _sheetLeadsByCampaignName[row.campaignName] : undefined;
-        if (matched != null) row.results = matched;
-      }
-    }
     // Join GHL booking counts by Meta campaign_id when the feature is enabled.
     // Null marks "no GHL data" → table renders em-dashes; a real 0 means the
     // campaign is in both systems but has no bookings this period.
@@ -1686,6 +1670,27 @@ async function fetchMetaCampaigns() {
     await sheetPromise;
     await ghlPromise;
     await cpaPromise;
+
+    // Join sheet leads by campaign name when the sheet is the Leads source.
+    // The sheet's campaign column is a manual/automated log of the exact
+    // Meta campaign name (verified against live data — an exact string
+    // match, not fuzzy), so this replaces Meta's own per-row lead count with
+    // the sheet's, making the table agree with the KPI card instead of
+    // needing a "these differ" banner. Must run after sheetPromise resolves —
+    // _sheetLeadsByCampaignName is still null before that, and this used to
+    // run immediately after the Meta fetch (before the sheet fetch could
+    // possibly finish), so the join silently never applied. Mutates the same
+    // row objects already referenced by _campaigns, so no re-splice needed.
+    // At adset/ad level every row under the same campaign gets that
+    // campaign's sheet total (same caveat as the Bookings join below — sheet
+    // data has no finer-than-campaign dimension). Rows whose campaign name
+    // has no matching sheet row keep Meta's own count rather than zeroing.
+    if (_leadsSource === 'sheet' && _sheetLeadsByCampaignName) {
+      for (const row of allMapped) {
+        const matched = row.campaignName ? _sheetLeadsByCampaignName[row.campaignName] : undefined;
+        if (matched != null) row.results = matched;
+      }
+    }
 
     // If the sheet override is on, also rewrite the comparison series so
     // delta arrows and the comparison trend reflect sheet leads, not Meta's.
