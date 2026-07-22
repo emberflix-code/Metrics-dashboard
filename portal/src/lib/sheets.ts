@@ -77,7 +77,15 @@ function tabLikelyMatches(tabName: string, rows: { campaign: string }[]): boolea
 }
 
 // ── Cache ────────────────────────────────────────────────────────────────────
-const TTL_MS = 60_000;
+// Short-lived: exists only to dedupe the fan-out when a single dashboard load
+// fetches many tabs (the "Alloy Ops" umbrella can be 30+), not to serve
+// data long-term. A previous 60s TTL meant an admin briefly applying a
+// regular filter to a sheet (which changes what this export returns — see
+// project memory) could have that filtered/incomplete snapshot served to
+// every viewer for up to a minute after the filter was cleared, which caused
+// real confusion diagnosing a "wrong lead count" report. 10s keeps the
+// fan-out dedup benefit while capping how long a bad snapshot can linger.
+const TTL_MS = 10_000;
 const _csvCache = new Map<string, { expires: number; rows: SheetRow[] }>();
 
 // ── CSV helpers (factored out of the route files) ────────────────────────────
