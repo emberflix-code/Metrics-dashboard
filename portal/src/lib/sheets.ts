@@ -105,19 +105,57 @@ export function parseCsv(text: string): string[][] {
   return rows;
 }
 
+const MONTH_NAMES: Record<string, number> = {
+  jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6,
+  jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12,
+};
+function pad2(n: number): string { return String(n).padStart(2, '0'); }
+
+// The "Day" column is a genuine Date-typed cell, so its rendered text
+// follows whatever locale/number-format the sheet (or that column) happens
+// to be set to — M/D/YYYY today, but an admin changing column formatting or
+// the sheet's locale could switch it to D/M/YYYY, "Mon D, YYYY", or Sheets'
+// own gviz Date(y,m,d) serialization with no warning. All of these must
+// resolve to the same ISO string or a day's leads silently vanish (the row
+// gets dropped by fetchOneTabCsv when this returns null).
 export function normalizeDay(raw: string): string | null {
   const s = (raw || '').trim();
   if (!s) return null;
+
   const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(s);
-  if (iso) return `${iso[1]}-${iso[2].padStart(2, '0')}-${iso[3].padStart(2, '0')}`;
+  if (iso) return `${iso[1]}-${pad2(+iso[2])}-${pad2(+iso[3])}`;
+
+  // Google's gviz JSON responses encode dates as Date(y,m,d) with a
+  // zero-based month; some export paths can surface this literally.
+  const gviz = /^Date\((\d{4}),(\d{1,2}),(\d{1,2})\)$/.exec(s);
+  if (gviz) return `${gviz[1]}-${pad2(+gviz[2] + 1)}-${pad2(+gviz[3])}`;
+
+  // M/D/YYYY (US default, what this sheet uses today).
   const mdy = /^(\d{1,2})\/(\d{1,2})\/(\d{2,4})$/.exec(s);
   if (mdy) {
-    const m = mdy[1].padStart(2, '0');
-    const d = mdy[2].padStart(2, '0');
+    const a = +mdy[1], b = +mdy[2];
     let y = mdy[3];
     if (y.length === 2) y = (parseInt(y, 10) >= 70 ? '19' : '20') + y;
-    return `${y}-${m}-${d}`;
+    // Only the M/D reading is ambiguous when both parts are <=12; if the
+    // first number can't be a month (>12), treat it as D/M instead of
+    // silently misparsing or dropping the row.
+    if (a > 12 && b <= 12) return `${y}-${pad2(b)}-${pad2(a)}`;
+    return `${y}-${pad2(a)}-${pad2(b)}`;
   }
+
+  // "Jul 20, 2026" / "20 Jul 2026" / "Jul-20-2026" style — covers common
+  // alternate column-format choices without needing a full date library.
+  const named = /^([A-Za-z]{3,})\.?\s+(\d{1,2}),?\s+(\d{4})$/.exec(s)
+    || /^(\d{1,2})\s+([A-Za-z]{3,})\.?\s+(\d{4})$/.exec(s);
+  if (named) {
+    const monthFirst = /^[A-Za-z]/.test(named[1]);
+    const monthStr = (monthFirst ? named[1] : named[2]).slice(0, 3).toLowerCase();
+    const day = monthFirst ? named[2] : named[1];
+    const year = named[3];
+    const month = MONTH_NAMES[monthStr];
+    if (month) return `${year}-${pad2(month)}-${pad2(+day)}`;
+  }
+
   return null;
 }
 
