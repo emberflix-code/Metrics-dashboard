@@ -76,13 +76,14 @@ function metaApiBase(accountId: string): string {
 // fetchMetaCampaigns when _useSheetForLeads is on. Used to override t.results
 // and trend data for the current date range.
 let _sheetLeadsByDay: Record<string, number> | null = null;
-// Leads summed by campaign name (column A of the sheet), keyed by the exact
-// string as typed there. The sheet is a manual/automated log whose campaign
-// column matches Meta's actual campaign name verbatim (confirmed against
-// live data — no fuzzy matching needed), so this drives the per-campaign
-// Leads column/subtotal in the table the same way _sheetLeadsByDay drives
-// the KPI card and trend chart.
-let _sheetLeadsByCampaignName: Record<string, number> | null = null;
+// Raw per-row sheet leads (day + campaign name, unfiltered by date — same as
+// _sheetLeadsByDay's source). The campaign table needs to bucket these by
+// name AND clip to the currently-selected date range, so we keep the rows
+// rather than a pre-summed map: summing ahead of time (like _sheetLeadsByDay
+// does for the day map) would silently include leads from outside the
+// visible range — exactly the bug this replaced (a campaign's ALL-TIME sheet
+// total was shown instead of the total for the selected date range).
+let _sheetLeadsRows: { day: string; campaign: string; leads: number }[] | null = null;
 
 // GHL bookings integration. Source for the optional 7th "Bookings" KPI card
 // AND for the Leads card when _leadsSource === 'ghl'. Pattern mirrors the
@@ -1281,22 +1282,22 @@ function renderStaticAssets() {
 // Reused across reloads — only the first call hits the network because the
 // route also caches the CSV for 60s.
 async function fetchSheetLeadsForMeta(): Promise<void> {
-  if (!_useSheetForLeads) { _sheetLeadsByDay = null; _sheetLeadsByCampaignName = null; return; }
+  if (!_useSheetForLeads) { _sheetLeadsByDay = null; _sheetLeadsRows = null; return; }
   try {
     const res = await fetch('/api/sheets/meta');
     const json = await res.json() as { rows?: { day: string; leads: number; campaign?: string }[]; enabled?: boolean; error?: string };
-    if (!json.enabled || !json.rows) { _sheetLeadsByDay = null; _sheetLeadsByCampaignName = null; return; }
+    if (!json.enabled || !json.rows) { _sheetLeadsByDay = null; _sheetLeadsRows = null; return; }
     const byDay: Record<string, number> = {};
-    const byCampaign: Record<string, number> = {};
+    const rows: { day: string; campaign: string; leads: number }[] = [];
     for (const r of json.rows) {
       byDay[r.day] = (byDay[r.day] || 0) + (r.leads || 0);
-      if (r.campaign) byCampaign[r.campaign] = (byCampaign[r.campaign] || 0) + (r.leads || 0);
+      if (r.campaign) rows.push({ day: r.day, campaign: r.campaign, leads: r.leads || 0 });
     }
     _sheetLeadsByDay = byDay;
-    _sheetLeadsByCampaignName = byCampaign;
+    _sheetLeadsRows = rows;
   } catch {
     _sheetLeadsByDay = null;
-    _sheetLeadsByCampaignName = null;
+    _sheetLeadsRows = null;
   }
 }
 
@@ -1677,17 +1678,27 @@ async function fetchMetaCampaigns() {
     // match, not fuzzy), so this replaces Meta's own per-row lead count with
     // the sheet's, making the table agree with the KPI card instead of
     // needing a "these differ" banner. Must run after sheetPromise resolves —
-    // _sheetLeadsByCampaignName is still null before that, and this used to
-    // run immediately after the Meta fetch (before the sheet fetch could
-    // possibly finish), so the join silently never applied. Mutates the same
-    // row objects already referenced by _campaigns, so no re-splice needed.
+    // _sheetLeadsRows is still null before that, and this used to run
+    // immediately after the Meta fetch (before the sheet fetch could possibly
+    // finish), so the join silently never applied. Mutates the same row
+    // objects already referenced by _campaigns, so no re-splice needed.
+    // Buckets rows by campaign name HERE (not inside fetchSheetLeadsForMeta)
+    // and clips to [since, until] — bucketing ahead of time like
+    // _sheetLeadsByDay does would silently sum a campaign's entire history
+    // instead of just the selected date range (the previous bug: a campaign
+    // showed its all-time sheet total no matter what range was selected).
     // At adset/ad level every row under the same campaign gets that
     // campaign's sheet total (same caveat as the Bookings join below — sheet
     // data has no finer-than-campaign dimension). Rows whose campaign name
     // has no matching sheet row keep Meta's own count rather than zeroing.
-    if (_leadsSource === 'sheet' && _sheetLeadsByCampaignName) {
+    if (_leadsSource === 'sheet' && _sheetLeadsRows) {
+      const byCampaign: Record<string, number> = {};
+      for (const r of _sheetLeadsRows) {
+        if (r.day < since || r.day > until) continue;
+        byCampaign[r.campaign] = (byCampaign[r.campaign] || 0) + r.leads;
+      }
       for (const row of allMapped) {
-        const matched = row.campaignName ? _sheetLeadsByCampaignName[row.campaignName] : undefined;
+        const matched = row.campaignName ? byCampaign[row.campaignName] : undefined;
         if (matched != null) row.results = matched;
       }
     }
