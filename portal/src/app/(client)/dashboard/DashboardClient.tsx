@@ -2650,6 +2650,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
 
         <footer className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-4 text-center text-[11px] text-slate-600 border-t border-slate-800/50">
           Live data from Meta Marketing API. All times in account timezone.
+          <span className="ml-2 font-mono opacity-60" title="Deployed build">v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}</span>
         </footer>
       </div>
 

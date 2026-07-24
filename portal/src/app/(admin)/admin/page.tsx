@@ -46,7 +46,10 @@ export default async function AdminPage() {
         <div className="flex items-center justify-between mb-6">
           <div>
             <h1 className="text-xl font-bold text-white">Admin Panel</h1>
-            <p className="text-sm text-slate-400 mt-0.5">Manage clients and Meta connection</p>
+            <p className="text-sm text-slate-400 mt-0.5">
+              Manage clients and Meta connection
+              <span className="ml-2 font-mono text-[11px] text-slate-600" title="Deployed build">v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}</span>
+            </p>
           </div>
           <div className="flex items-center gap-3">
             <a
