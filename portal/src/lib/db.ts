@@ -28,6 +28,12 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS use_sheet_for_leads BOO
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS idx_clients_active ON clients (active)`).catch(() => {});
 
+// Agency Overview: free-text grouping dimensions (see migration 017). No
+// fixed option list — plain text per client, used for subgrouping the
+// overview table alongside name-prefix auto-detection.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS marketing_type TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer TEXT NOT NULL DEFAULT ''`).catch(() => {});
+
 // GHL bookings integration + leads-source picker (see migration 010).
 // Defaults are safe-no-op so existing clients are unaffected on first deploy:
 // leads_source defaults to 'meta', show_bookings defaults to false.
