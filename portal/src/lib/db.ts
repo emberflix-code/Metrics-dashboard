@@ -23,6 +23,11 @@ pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS auto_login_token TEXT UNI
 // the rollout is opt-in per client.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS use_sheet_for_leads BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// Agency Overview: active/inactive per client (see migration 016). Defaults
+// true so every existing client stays visible until an admin opts it out.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT true`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_clients_active ON clients (active)`).catch(() => {});
+
 // GHL bookings integration + leads-source picker (see migration 010).
 // Defaults are safe-no-op so existing clients are unaffected on first deploy:
 // leads_source defaults to 'meta', show_bookings defaults to false.

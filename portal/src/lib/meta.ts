@@ -145,6 +145,33 @@ export async function getClientDbScope(): Promise<ClientDbScope> {
 }
 
 /**
+ * Same account/filter resolution as getClientDbScope(), but for admin pages
+ * that iterate arbitrary client rows rather than reading the logged-in
+ * user's own session (e.g. the Agency Overview, which needs every active
+ * client's scope at once, not just "the current session's client"). Takes
+ * the client row directly instead of resolving it from session.user.id.
+ */
+export async function getAdminClientMetaScope(
+  client: { ad_account_ids: string[] | null; campaign_filter: string },
+  agencyAccountIds?: string[]
+): Promise<ClientDbScope> {
+  let accountIds = client.ad_account_ids ?? [];
+  if (accountIds.length === 0) {
+    if (agencyAccountIds) {
+      accountIds = agencyAccountIds;
+    } else {
+      const rows = await query<{ account_ids: string[] }>(`SELECT account_ids FROM agency_bm_connections`);
+      accountIds = Array.from(new Set(rows.flatMap(r => r.account_ids || [])));
+    }
+  }
+
+  return {
+    accountIds,
+    campaignFilter: client.campaign_filter ?? '',
+  };
+}
+
+/**
  * campaign_filter supports `|`-separated keywords for OR matching (e.g. a
  * region umbrella client spanning several states: ", WI| MN| MI, | IN, | IL,").
  * Meta's `CONTAIN` filter operator only matches one substring per clause and

@@ -5,6 +5,7 @@ import { query } from '@/lib/db';
 import CampaignFilterForm from './CampaignFilterForm';
 import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
+import ActiveToggle from './ActiveToggle';
 import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
 import CpaConfigForm from './CpaConfigForm';
@@ -42,6 +43,7 @@ interface ClientDetail {
   retainer_flat_amount: number;
   ltv_value: number;
   show_ltv: boolean;
+  active: boolean;
 }
 
 interface RetainerRow {
@@ -84,7 +86,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
-           c.ltv_value, c.show_ltv,
+           c.ltv_value, c.show_ltv, c.active,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -201,6 +203,9 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           <p className="mt-2 text-xs text-slate-500">
             Opens this client&apos;s dashboard as if you were signed in as them. A banner at the top lets you return to admin.
           </p>
+          <div className="mt-4 pt-4 border-t border-slate-800">
+            <ActiveToggle clientId={client.id} current={client.active ?? true} />
+          </div>
         </div>
 
         {/* Ad Account Assignment */}

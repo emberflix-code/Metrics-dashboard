@@ -53,6 +53,12 @@ export default async function AdminPage() {
           </div>
           <div className="flex items-center gap-3">
             <a
+              href="/admin/overview"
+              className="flex items-center gap-2 text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-600 px-3 py-2 rounded-lg transition-colors"
+            >
+              Agency Overview
+            </a>
+            <a
               href="/admin/settings"
               className="flex items-center gap-2 text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-600 px-3 py-2 rounded-lg transition-colors"
             >

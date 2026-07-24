@@ -1,7 +1,10 @@
-// GoHighLevel bookings helper.
+// GoHighLevel bookings + leads helper.
 //
-// Returns one row per (contact, attribution snapshot) for every contact
-// tagged "booked appointment" whose dateUpdated-dateAdded ≤ 30 days.
+// fetchGhlBookings returns one row per (contact, attribution snapshot) for
+// every contact tagged "booked appointment" whose dateUpdated-dateAdded ≤ 30
+// days. fetchGhlLeads (below) returns one row per contact for EVERY contact,
+// no tag filter — used by the Agency Overview so Leads and Bookings are
+// genuinely distinct numbers instead of both reading the tagged-contact set.
 //
 // Per contact, we may emit up to 2 rows:
 //   1. (attributionSource.campaign, dateAdded)       — first-touch
@@ -203,5 +206,105 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
 
   const result: GhlFetchResult = { rows, bookedContactsScanned, outsideWindow, cancelledContacts };
   _cache.set(cacheKey, { expires: Date.now() + TTL_MS, result });
+  return result;
+}
+
+// Raw GHL leads — every contact (no tag filter), for the Agency Overview's
+// distinct "Leads" column. Separate cache map from bookings so the two don't
+// evict each other; same token+locationId key, same 5-min TTL.
+export interface GhlLeadRow {
+  campaignId: string;
+  day: string;        // YYYY-MM-DD (UTC), from dateAdded
+  contactId: string;
+}
+
+export interface GhlLeadsFetchResult {
+  rows: GhlLeadRow[];
+  contactsScanned: number;
+}
+
+const _leadsCache = new Map<string, { expires: number; result: GhlLeadsFetchResult }>();
+
+export async function fetchGhlLeads(opts: { token: string; locationId?: string }): Promise<GhlLeadsFetchResult> {
+  const { token } = opts;
+  if (!token) throw new GhlError('NO_TOKEN', 'GHL token is not configured for this client.', 400);
+
+  const locationId = opts.locationId?.trim() || tryExtractLocationId(token);
+  if (!locationId) {
+    throw new GhlError('NO_TOKEN', 'GHL location ID is required. Paste it in the admin form next to the PIT.', 400);
+  }
+
+  const cacheKey = `${hashToken(token)}|${locationId}`;
+  const hit = _leadsCache.get(cacheKey);
+  if (hit && hit.expires > Date.now()) return hit.result;
+
+  const rows: GhlLeadRow[] = [];
+  let contactsScanned = 0;
+  let searchAfter: unknown[] | undefined;
+  let page = 0;
+
+  while (page < MAX_PAGES) {
+    page++;
+    const body: Record<string, unknown> = {
+      locationId,
+      pageLimit: PAGE_LIMIT,
+    };
+    if (searchAfter) body.searchAfter = searchAfter;
+
+    const res = await fetch('https://services.leadconnectorhq.com/contacts/search', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Version: '2021-07-28',
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (res.status === 401) {
+      let detail = '';
+      try { detail = (await res.json())?.message || ''; } catch { /* ignore */ }
+      if (/scope/i.test(detail)) {
+        throw new GhlError('INSUFFICIENT_SCOPE', 'GHL token is missing required scope. Regenerate the Private Integration token in GHL Settings → Private Integrations with at least the contacts.readonly scope.', 403);
+      }
+      throw new GhlError('INVALID_TOKEN', 'GHL token is invalid or expired.', 401);
+    }
+    if (res.status === 422) {
+      let detail = '';
+      try { detail = (await res.json())?.message || ''; } catch { /* ignore */ }
+      throw new GhlError('UPSTREAM_5XX', `GHL rejected the request: ${detail || '422'}`, 502);
+    }
+    if (res.status === 429) throw new GhlError('RATE_LIMIT', 'GHL API rate limit reached. Please wait a minute and reload.', 429);
+    if (res.status >= 500) throw new GhlError('UPSTREAM_5XX', `GHL API returned ${res.status}.`);
+
+    let json: SearchResponse;
+    try { json = await res.json(); } catch { throw new GhlError('UPSTREAM_5XX', 'GHL returned a malformed response.'); }
+
+    const contacts = json.contacts || [];
+    if (contacts.length === 0) break;
+
+    for (const c of contacts) {
+      if (!c.id || !c.dateAdded) continue;
+      contactsScanned++;
+
+      const tAdded = Date.parse(c.dateAdded);
+      if (!Number.isFinite(tAdded)) continue;
+
+      rows.push({
+        campaignId: c.attributionSource?.campaign?.trim() || '',
+        day: c.dateAdded.slice(0, 10),
+        contactId: c.id,
+      });
+    }
+
+    const lastContact = contacts[contacts.length - 1] as GhlContact & { searchAfter?: unknown[] };
+    if (!lastContact?.searchAfter || lastContact.searchAfter.length === 0) break;
+    searchAfter = lastContact.searchAfter;
+    if (contacts.length < PAGE_LIMIT) break;
+  }
+
+  const result: GhlLeadsFetchResult = { rows, contactsScanned };
+  _leadsCache.set(cacheKey, { expires: Date.now() + TTL_MS, result });
   return result;
 }
