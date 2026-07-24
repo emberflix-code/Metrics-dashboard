@@ -32,6 +32,11 @@ interface Props {
   // the whole dashboard reads 'cached'. Keyed by bare account id (no act_
   // prefix), matching `accountIds`. Missing/unknown keys default to 'live'.
   dataSourceByAccount?: Record<string, 'live' | 'cached'>;
+  // True only when an admin is viewing via impersonation. Gates internal
+  // diagnostic banners (sheet/GHL-vs-Meta lead mismatch explanations) that
+  // reference implementation details ("Meta's own attribution", source
+  // names) real clients shouldn't see on their own dashboard.
+  isAdminView?: boolean;
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -96,6 +101,9 @@ let _sheetLeadsRows: { day: string; campaign: string; leads: number }[] | null =
 let _leadsSource: 'meta' | 'sheet' | 'ghl' = 'meta';
 let _showBookings = false;
 let _showBookRate = false;
+// True only when an admin is viewing via impersonation — gates internal
+// diagnostic banners real clients shouldn't see (see Props.isAdminView).
+let _isAdminView = false;
 let _ghlBookingsByDay: Record<string, number> | null = null;
 let _ghlBookingsByCampaignId: Record<string, number> | null = null;
 
@@ -669,8 +677,10 @@ function renderTable() {
   // different source's total when leads_source is 'sheet' or 'ghl'. Without
   // this, the two numbers can legitimately disagree with no explanation —
   // same problem and banner pattern as the Creatives tab's DCO mismatch.
+  // Admin-only: this references internal source/attribution details a real
+  // client shouldn't need to parse on their own dashboard.
   const tableMismatchBanner = document.getElementById('table-leads-mismatch');
-  if (tableMismatchBanner && _platform === 'meta') {
+  if (tableMismatchBanner && _platform === 'meta' && _isAdminView) {
     let kpiTotal: number | null = null;
     let sourceLabel = '';
     try {
@@ -994,8 +1004,10 @@ function renderDcoAssets() {
   //      per-asset breakdowns entirely.
   //   3) When `use_sheet_for_leads` is on, KPI reads from the client's sheet
   //      while breakdown rows are Meta-attributed — the two sources differ.
+  // Admin-only: references internal source/attribution details ("Meta's
+  // ad-level totals", "your sheet") a real client shouldn't need to parse.
   const banner = document.getElementById('dco-leads-mismatch');
-  if (banner) {
+  if (banner && _isAdminView) {
     let sumLeadsForCompare = 0;
     for (const r of totalsAll) sumLeadsForCompare += r.results;
     const kpi = _kpiResultsTotal;
@@ -2211,7 +2223,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {} }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -2222,6 +2234,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _showLtv = showLtv;
   _ltvValue = ltvValue;
   _dataSourceByAccount = dataSourceByAccount;
+  _isAdminView = isAdminView;
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);

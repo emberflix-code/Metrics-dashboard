@@ -136,6 +136,7 @@ export default async function DashboardPage() {
         showLtv={!!(client?.show_ltv && client?.cpa_sheet_tab)}
         ltvValue={client?.ltv_value ?? 0}
         dataSourceByAccount={dataSourceByAccount}
+        isAdminView={!!impersonatedBy}
       />
     </>
   );

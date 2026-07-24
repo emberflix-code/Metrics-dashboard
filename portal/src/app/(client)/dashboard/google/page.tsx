@@ -50,6 +50,7 @@ export default async function DashboardGooglePage() {
       platform="google"
       hasGoogleAds={true}
       metaUrl="/dashboard"
+      isAdminView={!!session.user.impersonatedBy}
     />
   );
 }
