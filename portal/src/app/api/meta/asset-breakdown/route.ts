@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter, resolveResultsFromActions } from '@/lib/meta';
+import { getOrComputePhashes, clusterByPerceptualHash } from '@/lib/phash';
 
 interface AssetFeedSpec {
   images?: { hash?: string; url?: string }[];
@@ -53,6 +54,7 @@ interface AssetSummary {
   adIds: string[];             // distinct ad ids contributing — used by client-side search filter
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
   hidden: boolean;             // true when no thumbnail AND under $1 spend — client decides whether to show
+  phash: string | null;        // perceptual hash for client-side visual-duplicate grouping (image only)
 }
 
 interface AdMeta {
@@ -294,9 +296,10 @@ export async function GET(req: NextRequest) {
 
     // 3) Aggregate. The same hash/video can appear across multiple ads;
     //    we sum metrics and count distinct ad_ids per asset.
-    // AggBucket omits `hidden` — it's computed in finalize() from the final
-    // spend total, not maintained incrementally during aggregation.
-    interface AggBucket extends Omit<AssetSummary, 'hidden'> { _adIdSet: Set<string>; _perAd: Map<string, { spend: number; results: number; impressions: number; linkClicks: number }> }
+    // AggBucket omits `hidden` (computed in finalize() from the final spend
+    // total) and `phash` (resolved after aggregation, once thumbnails and
+    // canonical-key merging are known — see step 5b/6).
+    interface AggBucket extends Omit<AssetSummary, 'hidden' | 'phash'> { _adIdSet: Set<string>; _perAd: Map<string, { spend: number; results: number; impressions: number; linkClicks: number }> }
     const accAd = (row: AggBucket, adId: string, r: BreakdownRow) => {
       const sp = parseFloat(r.spend || '0') || 0;
       const im = parseInt(r.impressions || '0', 10) || 0;
@@ -492,6 +495,50 @@ export async function GET(req: NextRequest) {
       }
     }));
 
+    // 5b) Compute (or reuse previously-computed) perceptual hashes for image
+    //     assets, then merge any buckets that are the same visual photo
+    //     uploaded under a different Meta image_hash — same clustering the
+    //     cached/synced route (api/meta/db/asset-breakdown) already does,
+    //     just applied after aggregation instead of during it, since
+    //     thumbnails (needed to hash) aren't resolved until step 4/5 above.
+    //     Live routes never wrote to meta_creative_assets before, so this
+    //     was the entire reason grouping silently never worked for
+    //     data_source='live' clients — not a backfill-timing issue, a
+    //     completely missing code path.
+    const phashByKey = await getOrComputePhashes(
+      accountId,
+      Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, thumbnail: r.thumbnail }))
+    );
+    const canonicalKeyOf = clusterByPerceptualHash(
+      Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, phash: phashByKey.get(r.assetKey) || null }))
+    );
+    const mergedImageAgg = new Map<string, AggBucket>();
+    for (const row of Array.from(imageAgg.values())) {
+      const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
+      const existing = mergedImageAgg.get(canonicalKey);
+      if (!existing) {
+        // canonicalKey is always one of the cluster's own original asset
+        // keys (union-find keeps the lexicographically smallest), so its
+        // display fields — not necessarily this loop iteration's row —
+        // are the ones that should win, same precedence the cached route
+        // uses ("canonical asset's own row, not whichever hit first").
+        const canonicalRow = imageAgg.get(canonicalKey) ?? row;
+        mergedImageAgg.set(canonicalKey, { ...row, assetKey: canonicalKey, thumbnail: canonicalRow.thumbnail, body: canonicalRow.body, title: canonicalRow.title, name: canonicalRow.name });
+        continue;
+      }
+      existing.spend += row.spend;
+      existing.results += row.results;
+      existing.impressions += row.impressions;
+      existing.linkClicks += row.linkClicks;
+      if (!existing.thumbnail && row.thumbnail) existing.thumbnail = row.thumbnail;
+      for (const adId of Array.from(row._adIdSet)) existing._adIdSet.add(adId);
+      for (const [adId, m] of Array.from(row._perAd)) {
+        const cur = existing._perAd.get(adId) || { spend: 0, results: 0, impressions: 0, linkClicks: 0 };
+        cur.spend += m.spend; cur.results += m.results; cur.impressions += m.impressions; cur.linkClicks += m.linkClicks;
+        existing._perAd.set(adId, cur);
+      }
+    }
+
     // 6) Materialize, round, derive CTR/CPL, drop the internal Set/Map, materialize per-ad rows.
     const finalize = (rows: Iterable<AggBucket>): AssetSummary[] => {
       const out: AssetSummary[] = [];
@@ -536,6 +583,7 @@ export async function GET(req: NextRequest) {
           // keep their thumbnail). The client's "Show hidden assets" toggle
           // reveals these no-preview rows when the owner wants to inspect them.
           hidden: r.thumbnail === null,
+          phash: phashByKey.get(r.assetKey) || null,
         });
       }
       out.sort((a, b) => b.spend - a.spend);
@@ -550,7 +598,7 @@ export async function GET(req: NextRequest) {
       dcoAdIds: string[];
       error?: { message: string };
     } = {
-      images: finalize(imageAgg.values()),
+      images: finalize(mergedImageAgg.values()),
       videos: finalize(videoAgg.values()),
       adsWithSpec: hasFeedSpec.size,
       adsTotal: accountWide ? discoveredAdIds.length : adIds.length,

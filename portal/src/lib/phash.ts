@@ -1,4 +1,5 @@
 import sharp from 'sharp';
+import { query } from './db';
 
 const HASH_SIZE = 8;
 
@@ -77,4 +78,56 @@ export function clusterByPerceptualHash(
   }
   for (const a of withHash) canonicalOf.set(a.assetKey, find(a.assetKey));
   return canonicalOf;
+}
+
+// Live (non-cached, data_source='live') dashboards fetch straight from
+// Meta's API and never touch meta_creative_assets — so a live client had no
+// path to ever get a phash computed, and image-asset grouping silently
+// never worked for them (not a backfill-timing issue, an entirely missing
+// code path). This gives live routes the same clustering by computing any
+// missing hashes on demand and persisting them into meta_creative_assets,
+// keyed by (account_id, asset_key) — same table/column the background sync
+// job's backfill writes to. First view of a given asset pays the fetch+hash
+// cost once; every later view (live or cached, any client on the account)
+// reads the stored value instead of recomputing it.
+export async function getOrComputePhashes(
+  accountId: string,
+  images: { assetKey: string; thumbnail: string | null }[]
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>();
+  const withThumbnail = images.filter((i): i is { assetKey: string; thumbnail: string } => !!i.thumbnail);
+  if (withThumbnail.length === 0) return result;
+
+  const assetKeys = withThumbnail.map(i => i.assetKey);
+  const existing = await query<{ asset_key: string; phash: string | null }>(
+    `SELECT asset_key, phash FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+    [accountId, assetKeys]
+  );
+  const existingByKey = new Map(existing.map(r => [r.asset_key, r.phash]));
+  for (const [key, phash] of Array.from(existingByKey)) if (phash) result.set(key, phash);
+
+  const missing = withThumbnail.filter(i => !existingByKey.has(i.assetKey) || !existingByKey.get(i.assetKey));
+  if (missing.length === 0) return result;
+
+  // Cap per-request work so one Creatives-tab load can't stall on dozens of
+  // image fetches — remaining assets simply stay ungrouped until a later
+  // view picks them up (each view chips away at whatever's still missing).
+  const PER_REQUEST_LIMIT = 40;
+  await Promise.all(missing.slice(0, PER_REQUEST_LIMIT).map(async ({ assetKey, thumbnail }) => {
+    try {
+      const res = await fetch(thumbnail);
+      if (!res.ok) return;
+      const bytes = Buffer.from(await res.arrayBuffer());
+      const hash = await computePhash(bytes);
+      result.set(assetKey, hash);
+      await query(
+        `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, phash, updated_at)
+         VALUES ($1, $2, 'image', $3, $4, now())
+         ON CONFLICT (account_id, asset_key)
+         DO UPDATE SET phash = EXCLUDED.phash, updated_at = now()`,
+        [accountId, assetKey, thumbnail, hash]
+      );
+    } catch { /* leave this asset ungrouped; retried on a future request */ }
+  }));
+  return result;
 }

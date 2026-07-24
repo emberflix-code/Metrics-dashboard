@@ -1046,7 +1046,17 @@ function renderDcoAssets() {
   }
 
   if (all.length === 0) {
-    wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets match the current search filter.</div>`;
+    // totalsAll is the pre-toggle snapshot (search/campaign filter already
+    // applied, but before Hidden/Has-results-only) — if it's non-empty, the
+    // grid isn't actually empty, a toggle is just hiding everything. Naming
+    // which one saves a client from assuming something's broken.
+    if (totalsAll.length > 0 && _dcoOnlyWithResults) {
+      wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets have leads for this date range with &ldquo;Has results only&rdquo; on. Turn it off above to see all ${totalsAll.length} asset${totalsAll.length !== 1 ? 's' : ''}.</div>`;
+    } else if (totalsAll.length > 0) {
+      wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets match the current filters.</div>`;
+    } else {
+      wrap.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No assets match the current search filter.</div>`;
+    }
     return;
   }
   const sorted = [...all].sort((a, b) => {
