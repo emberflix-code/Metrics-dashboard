@@ -3,6 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { encrypt } from '@/lib/crypto';
+import { verifyGhlLocationAccess } from '@/lib/ghl';
 import bcrypt from 'bcryptjs';
 
 const VALID_LEADS_SOURCES = new Set(['meta', 'sheet', 'ghl']);
@@ -73,11 +74,27 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
 
   // GHL bookings + leads-source picker.
+  //
+  // When both a new token and a location ID arrive together, verify the
+  // token actually has access to that location before saving either — GHL
+  // doesn't validate this itself, so a token copied from one sub-account
+  // pasted alongside a locationId copied from another silently returns that
+  // OTHER location's contacts instead of erroring (see the Burley's Gym
+  // incident: a real token + a real locationId, from two different GHL
+  // sub-accounts, quietly served the wrong client's leads for weeks).
+  const newToken = body.ghl_token !== undefined ? String(body.ghl_token).trim() : '';
+  const newLocationId = body.ghl_location_id !== undefined ? String(body.ghl_location_id).trim() : undefined;
+  if (newToken && newLocationId) {
+    const check = await verifyGhlLocationAccess(newToken, newLocationId);
+    if (!check.ok) {
+      return NextResponse.json({ error: check.message }, { status: 400 });
+    }
+  }
+
   if (body.ghl_token !== undefined) {
-    const t = String(body.ghl_token).trim();
     // Empty string = "keep existing"; only update when a new token is provided.
-    if (t.length > 0) {
-      await query('UPDATE clients SET ghl_token_enc = $1 WHERE id = $2', [encrypt(t), params.id]);
+    if (newToken.length > 0) {
+      await query('UPDATE clients SET ghl_token_enc = $1 WHERE id = $2', [encrypt(newToken), params.id]);
     }
   }
 
@@ -87,7 +104,11 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   }
 
   if (body.ghl_location_id !== undefined) {
-    await query('UPDATE clients SET ghl_location_id = $1 WHERE id = $2', [String(body.ghl_location_id).trim(), params.id]);
+    await query('UPDATE clients SET ghl_location_id = $1 WHERE id = $2', [newLocationId, params.id]);
+  }
+
+  if (body.ghl_leads_tag !== undefined) {
+    await query('UPDATE clients SET ghl_leads_tag = $1 WHERE id = $2', [String(body.ghl_leads_tag).trim(), params.id]);
   }
 
   if (body.leads_source !== undefined) {

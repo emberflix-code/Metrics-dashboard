@@ -52,6 +52,13 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS ghl_location_id TEXT NO
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS leads_source TEXT NOT NULL DEFAULT 'meta'`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_bookings BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_book_rate BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
+// Agency Overview: per-client GHL tag identifying "real" form-submission
+// leads (see migration 020). A contact counts as a lead when it carries this
+// tag OR has attributionSource.campaign populated; blank (default) means
+// only the attribution condition applies — it does NOT fall back to
+// counting every contact in the location.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS ghl_leads_tag TEXT NOT NULL DEFAULT ''`).catch(() => {});
 // One-shot backfill: any client that had `use_sheet_for_leads = true` now has
 // `leads_source = 'sheet'`. Idempotent — the guard `leads_source = 'meta'`
 // makes this no-op on re-run (admin may have manually switched to 'ghl' since).

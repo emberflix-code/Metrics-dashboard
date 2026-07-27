@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
 import { getAdminClientMetaScope, matchesCampaignFilter } from '@/lib/meta';
-import { fetchGhlLeads, fetchGhlBookings, GhlError } from '@/lib/ghl';
+import { fetchGhlLeads, fetchGhlBookings, isQualifyingLead, GhlError } from '@/lib/ghl';
 import ActiveToggle from '../clients/[id]/ActiveToggle';
 import OverviewRangeSelect from './OverviewRangeSelect';
 import MetricsPicker from './MetricsPicker';
@@ -28,6 +28,7 @@ interface ClientRow {
   has_ghl_token: boolean;
   ghl_token_enc: string;
   ghl_location_id: string;
+  ghl_leads_tag: string;
   active: boolean;
   marketing_type: string;
   offer: string;
@@ -73,7 +74,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     SELECT c.id, c.name, u.email, c.ad_account_ids, c.campaign_filter,
            c.data_source, c.leads_source,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token,
-           c.ghl_token_enc, c.ghl_location_id, c.active,
+           c.ghl_token_enc, c.ghl_location_id, c.ghl_leads_tag, c.active,
            c.marketing_type, c.offer, c.sort_order
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -190,7 +191,9 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           fetchGhlBookings({ token, locationId: c.ghl_location_id }),
         ]);
         const leadContactIds = new Set(
-          leadsResult.rows.filter(r => r.day >= since && r.day <= until).map(r => r.contactId)
+          leadsResult.rows
+            .filter(r => r.day >= since && r.day <= until && isQualifyingLead(r, c.ghl_leads_tag))
+            .map(r => r.contactId)
         );
         const bookingContactIds = new Set(
           bookingsResult.rows.filter(r => r.day >= since && r.day <= until).map(r => r.contactId)
@@ -283,8 +286,25 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           {r.ghlError ? (
             <span className="text-xs text-red-400" title={r.ghlError}>GHL error</span>
           ) : r.leads === null ? (
-            <GhlConfigModal clientId={r.client.id} clientName={r.client.name} currentLocationId={r.client.ghl_location_id} />
-          ) : r.leads.toLocaleString()}
+            <GhlConfigModal
+              clientId={r.client.id}
+              clientName={r.client.name}
+              currentLocationId={r.client.ghl_location_id}
+              currentLeadsTag={r.client.ghl_leads_tag}
+              hasToken={false}
+            />
+          ) : (
+            <span className="inline-flex items-center gap-1.5">
+              {r.leads.toLocaleString()}
+              <GhlConfigModal
+                clientId={r.client.id}
+                clientName={r.client.name}
+                currentLocationId={r.client.ghl_location_id}
+                currentLeadsTag={r.client.ghl_leads_tag}
+                hasToken
+              />
+            </span>
+          )}
         </td>
         <td className="px-4 py-3 text-right font-mono text-slate-200">
           {r.ghlError ? (

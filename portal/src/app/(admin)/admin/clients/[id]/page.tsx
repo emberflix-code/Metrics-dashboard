@@ -34,6 +34,7 @@ interface ClientDetail {
   show_bookings: boolean;
   show_book_rate: boolean;
   ghl_location_id: string;
+  ghl_leads_tag: string;
   has_ghl_token: boolean;
   data_source: 'live' | 'cached';
   cpa_sheet_id: string;
@@ -83,7 +84,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   const [client] = await query<ClientDetail>(`
     SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
            c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
-           c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id,
+           c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id, c.ghl_leads_tag,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
            c.ltv_value, c.show_ltv, c.active,
@@ -273,6 +274,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             clientId={client.id}
             hasToken={!!client.has_ghl_token}
             currentLocationId={client.ghl_location_id ?? ''}
+            currentLeadsTag={client.ghl_leads_tag ?? ''}
             currentShowBookings={client.show_bookings ?? false}
             currentShowBookRate={client.show_book_rate ?? false}
           />

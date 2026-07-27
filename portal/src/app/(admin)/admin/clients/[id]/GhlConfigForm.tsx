@@ -6,35 +6,45 @@ interface Props {
   clientId: string;
   hasToken: boolean;
   currentLocationId: string;
+  currentLeadsTag: string;
   currentShowBookings: boolean;
   currentShowBookRate: boolean;
 }
 
-export default function GhlConfigForm({ clientId, hasToken, currentLocationId, currentShowBookings, currentShowBookRate }: Props) {
+export default function GhlConfigForm({ clientId, hasToken, currentLocationId, currentLeadsTag, currentShowBookings, currentShowBookRate }: Props) {
   const [token, setToken] = useState('');
   const [locationId, setLocationId] = useState(currentLocationId);
+  const [leadsTag, setLeadsTag] = useState(currentLeadsTag);
   const [showBookings, setShowBookings] = useState(currentShowBookings);
   const [showBookRate, setShowBookRate] = useState(currentShowBookRate);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState('');
   const [clearingConfirmed, setClearingConfirmed] = useState(false);
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
     setSaving(true);
     setSaved(false);
+    setError('');
     const body: Record<string, unknown> = {
       show_bookings: showBookings,
       show_book_rate: showBookRate,
       ghl_location_id: locationId.trim(),
+      ghl_leads_tag: leadsTag.trim(),
     };
     if (token.trim().length > 0) body.ghl_token = token.trim();
-    await fetch(`/api/admin/clients/${clientId}`, {
+    const res = await fetch(`/api/admin/clients/${clientId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
     setSaving(false);
+    if (!res.ok) {
+      const data = await res.json().catch(() => null);
+      setError(data?.error || 'Failed to save — try again.');
+      return;
+    }
     setSaved(true);
     setToken(''); // Never leave a token visible after save.
     setTimeout(() => setSaved(false), 2500);
@@ -91,6 +101,23 @@ export default function GhlConfigForm({ clientId, hasToken, currentLocationId, c
         </p>
       </div>
 
+      <div>
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">
+          Leads Tag
+          <span className="ml-1 text-slate-500 font-normal">(optional)</span>
+        </label>
+        <input
+          type="text"
+          value={leadsTag}
+          onChange={e => setLeadsTag(e.target.value)}
+          placeholder="e.g. web lead"
+          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
+        />
+        <p className="mt-1 text-xs text-slate-500">
+          A GHL contact counts toward the Leads KPI when it carries this tag OR has an attributed campaign. Leave blank to count only contacts with an attributed campaign — useful when this location also has contacts from manual entry, imports, or other sources that shouldn&apos;t count as leads. Different clients can use different tag names (e.g. per-offer tags).
+        </p>
+      </div>
+
       <div className="p-3 bg-slate-800/50 border border-slate-700/60 rounded-lg space-y-3">
         <div className="flex items-start gap-3">
           <input
@@ -126,6 +153,8 @@ export default function GhlConfigForm({ clientId, hasToken, currentLocationId, c
           </label>
         </div>
       </div>
+
+      {error && <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{error}</p>}
 
       <div className="flex items-center gap-2">
         <button

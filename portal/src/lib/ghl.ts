@@ -2,9 +2,11 @@
 //
 // fetchGhlBookings returns one row per (contact, attribution snapshot) for
 // every contact tagged "booked appointment" whose dateUpdated-dateAdded ≤ 30
-// days. fetchGhlLeads (below) returns one row per contact for EVERY contact,
-// no tag filter — used by the Agency Overview so Leads and Bookings are
+// days. fetchGhlLeads (below) returns one row per contact for EVERY contact
+// in the location — used by the Agency Overview so Leads and Bookings are
 // genuinely distinct numbers instead of both reading the tagged-contact set.
+// The raw fetch is unfiltered; callers apply isQualifyingLead() (tag-or-
+// attribution) to decide which rows actually count as leads.
 //
 // Per contact, we may emit up to 2 rows:
 //   1. (attributionSource.campaign, dateAdded)       — first-touch
@@ -209,13 +211,17 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
   return result;
 }
 
-// Raw GHL leads — every contact (no tag filter), for the Agency Overview's
-// distinct "Leads" column. Separate cache map from bookings so the two don't
-// evict each other; same token+locationId key, same 5-min TTL.
+// Raw GHL leads — every contact (no tag filter applied here), for the Agency
+// Overview's distinct "Leads" column. Separate cache map from bookings so
+// the two don't evict each other; same token+locationId key, same 5-min TTL.
+// The cache is unfiltered regardless of which tag a client configures for
+// counting leads — see hasAttribution/tags below, filtered by the caller.
 export interface GhlLeadRow {
   campaignId: string;
   day: string;        // YYYY-MM-DD (UTC), from dateAdded
   contactId: string;
+  tags: string[];
+  hasAttribution: boolean;
 }
 
 export interface GhlLeadsFetchResult {
@@ -291,10 +297,13 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
       const tAdded = Date.parse(c.dateAdded);
       if (!Number.isFinite(tAdded)) continue;
 
+      const campaignId = c.attributionSource?.campaign?.trim() || '';
       rows.push({
-        campaignId: c.attributionSource?.campaign?.trim() || '',
+        campaignId,
         day: c.dateAdded.slice(0, 10),
         contactId: c.id,
+        tags: Array.isArray(c.tags) ? c.tags : [],
+        hasAttribution: campaignId.length > 0,
       });
     }
 
@@ -307,4 +316,51 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
   const result: GhlLeadsFetchResult = { rows, contactsScanned };
   _leadsCache.set(cacheKey, { expires: Date.now() + TTL_MS, result });
   return result;
+}
+
+// A GHL contact counts as a "real" lead when it carries the client's
+// configured tag OR has attributionSource.campaign populated (came in via a
+// tracked ad). Tag names vary per client — some split multiple offers
+// across different tags — so this is admin-configured per client, not a
+// fixed tag. Blank leadsTag means only the attribution condition applies;
+// it deliberately does NOT fall back to counting every contact.
+export function isQualifyingLead(row: GhlLeadRow, leadsTag: string): boolean {
+  const tag = leadsTag.trim().toLowerCase();
+  if (tag && row.tags.some(t => t.toLowerCase() === tag)) return true;
+  return row.hasAttribution;
+}
+
+// Confirms a PIT token actually has access to the given locationId, catching
+// the case where an admin pastes a real token + a locationId copied from a
+// DIFFERENT sub-account (GHL doesn't validate that the two belong together —
+// the token silently serves data from whatever location it actually belongs
+// to instead of erroring, which is exactly how a client can end up with
+// another location's contacts showing as their leads). Uses the cheapest
+// possible /contacts/search call (pageLimit: 1) purely to read the response
+// status, not the data.
+export async function verifyGhlLocationAccess(token: string, locationId: string): Promise<{ ok: true } | { ok: false; message: string }> {
+  try {
+    const res = await fetch('https://services.leadconnectorhq.com/contacts/search', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Version: '2021-07-28',
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ locationId, pageLimit: 1 }),
+    });
+    if (res.status === 403) {
+      return { ok: false, message: 'This token does not have access to that Location ID — double check you copied both from the same GHL sub-account.' };
+    }
+    if (res.status === 401) {
+      return { ok: false, message: 'GHL token is invalid or expired.' };
+    }
+    if (!res.ok) {
+      return { ok: false, message: `GHL rejected the request (status ${res.status}) — could not verify location access.` };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: false, message: 'Could not reach GHL to verify location access — check your connection and try again.' };
+  }
 }
