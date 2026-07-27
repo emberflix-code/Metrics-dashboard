@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
-import { fetchGhlLeads, isQualifyingLead, GhlError } from '@/lib/ghl';
+import { fetchGhlLeads, isQualifyingLead, BOOKING_TAG, GhlError } from '@/lib/ghl';
 
 // Returns the contact names/emails behind a client's "Leads" count on the
 // Agency Overview, for the same [since, until] range and the same
@@ -31,11 +31,17 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     const token = decrypt(client.ghl_token_enc);
     const result = await fetchGhlLeads({ token, locationId: client.ghl_location_id });
 
+    const bookingTag = BOOKING_TAG.toLowerCase();
     const seen = new Set<string>();
     const leads = result.rows
       .filter(r => r.day >= since && r.day <= until && isQualifyingLead(r, client.ghl_leads_tag))
       .filter(r => (seen.has(r.contactId) ? false : (seen.add(r.contactId), true)))
-      .map(r => ({ name: r.name || '(no name)', email: r.email, day: r.day }))
+      .map(r => ({
+        name: r.name || '(no name)',
+        email: r.email,
+        day: r.day,
+        booked: r.tags.some(t => t.toLowerCase() === bookingTag),
+      }))
       .sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
 
     return NextResponse.json({ leads });

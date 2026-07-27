@@ -80,7 +80,7 @@ interface SearchResponse {
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_PAGES = 50;     // 50 × 100 = 5000 booked contacts — safety cap
 const PAGE_LIMIT = 100;
-const BOOKING_TAG = 'booked appointment';
+export const BOOKING_TAG = 'booked appointment';
 const CANCELLED_TAG = 'cancelled appointment';
 
 // Try to extract location_id from a 3-segment JWT-style PIT. Modern `pit-<uuid>`

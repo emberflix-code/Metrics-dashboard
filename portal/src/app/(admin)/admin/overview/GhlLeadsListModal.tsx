@@ -6,6 +6,7 @@ interface Lead {
   name: string;
   email: string;
   day: string;
+  booked: boolean;
 }
 
 interface Props {
@@ -88,8 +89,15 @@ export default function GhlLeadsListModal({ clientId, clientName, since, until, 
                     {leads.map((lead, i) => (
                       <tr key={i} className="border-b border-slate-800/50">
                         <td className="py-2 pr-3 text-white">{lead.name}</td>
-                        <td className="py-2 pr-3 text-slate-400 truncate max-w-[140px]">{lead.email}</td>
-                        <td className="py-2 text-right text-slate-500 font-mono whitespace-nowrap">{lead.day}</td>
+                        <td className="py-2 pr-3 text-slate-400 truncate max-w-[120px]">{lead.email}</td>
+                        <td className="py-2 pr-3 text-slate-500 font-mono whitespace-nowrap">{lead.day}</td>
+                        <td className="py-2 text-right whitespace-nowrap">
+                          {lead.booked && (
+                            <span className="text-xs bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded-full">
+                              Booked
+                            </span>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
