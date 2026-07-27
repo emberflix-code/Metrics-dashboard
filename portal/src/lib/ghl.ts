@@ -62,6 +62,9 @@ interface GhlContact {
   dateAdded?: string;       // ISO 8601
   dateUpdated?: string;     // ISO 8601
   tags?: string[];
+  firstName?: string;
+  lastName?: string;
+  email?: string;
   attributionSource?: { campaign?: string };
   lastAttributionSource?: { campaign?: string };
 }
@@ -220,6 +223,8 @@ export interface GhlLeadRow {
   campaignId: string;
   day: string;        // YYYY-MM-DD (UTC), from dateAdded
   contactId: string;
+  name: string;
+  email: string;
   tags: string[];
   hasAttribution: boolean;
 }
@@ -302,6 +307,8 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
         campaignId,
         day: c.dateAdded.slice(0, 10),
         contactId: c.id,
+        name: [c.firstName, c.lastName].filter(Boolean).join(' ').trim(),
+        email: c.email?.trim() || '',
         tags: Array.isArray(c.tags) ? c.tags : [],
         hasAttribution: campaignId.length > 0,
       });

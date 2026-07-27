@@ -10,6 +10,7 @@ import OverviewRangeSelect from './OverviewRangeSelect';
 import MetricsPicker from './MetricsPicker';
 import { parseMetricsParam } from './metrics';
 import GhlConfigModal from './GhlConfigModal';
+import GhlLeadsListModal from './GhlLeadsListModal';
 import InlineTextField from './InlineTextField';
 import InlineNumberField from './InlineNumberField';
 import GroupBySelect, { GroupByKey } from './GroupBySelect';
@@ -294,16 +295,21 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
               hasToken={false}
             />
           ) : (
-            <span className="inline-flex items-center gap-1.5">
-              {r.leads.toLocaleString()}
-              <GhlConfigModal
+            <GhlConfigModal
+              clientId={r.client.id}
+              clientName={r.client.name}
+              currentLocationId={r.client.ghl_location_id}
+              currentLeadsTag={r.client.ghl_leads_tag}
+              hasToken
+            >
+              <GhlLeadsListModal
                 clientId={r.client.id}
                 clientName={r.client.name}
-                currentLocationId={r.client.ghl_location_id}
-                currentLeadsTag={r.client.ghl_leads_tag}
-                hasToken
+                since={since}
+                until={until}
+                count={r.leads}
               />
-            </span>
+            </GhlConfigModal>
           )}
         </td>
         <td className="px-4 py-3 text-right font-mono text-slate-200">

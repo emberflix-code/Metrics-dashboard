@@ -8,9 +8,11 @@ interface Props {
   currentLocationId: string;
   currentLeadsTag: string;
   hasToken: boolean;
+  /** When provided, rendered as the trigger (double-click to open) instead of the default "Configure GHL" link. */
+  children?: React.ReactNode;
 }
 
-export default function GhlConfigModal({ clientId, clientName, currentLocationId, currentLeadsTag, hasToken }: Props) {
+export default function GhlConfigModal({ clientId, clientName, currentLocationId, currentLeadsTag, hasToken, children }: Props) {
   const [open, setOpen] = useState(false);
   const [token, setToken] = useState('');
   const [locationId, setLocationId] = useState(currentLocationId);
@@ -48,13 +50,23 @@ export default function GhlConfigModal({ clientId, clientName, currentLocationId
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="text-xs text-blue-400 hover:text-blue-300 underline decoration-dotted"
-      >
-        {hasToken ? 'edit' : 'Configure GHL'}
-      </button>
+      {children ? (
+        <span
+          onDoubleClick={() => setOpen(true)}
+          title="Double-click to configure GHL"
+          className="cursor-pointer"
+        >
+          {children}
+        </span>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen(true)}
+          className="text-xs text-blue-400 hover:text-blue-300 underline decoration-dotted"
+        >
+          Configure GHL
+        </button>
+      )}
       {open && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => !saving && setOpen(false)}>
           <div
