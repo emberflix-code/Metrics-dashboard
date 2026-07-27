@@ -48,6 +48,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET offer = $1 WHERE id = $2', [String(body.offer).trim(), params.id]);
   }
 
+  if (body.sort_order !== undefined) {
+    const n = Number(body.sort_order);
+    if (!Number.isFinite(n) || !Number.isInteger(n)) {
+      return NextResponse.json({ error: 'sort_order must be an integer' }, { status: 400 });
+    }
+    await query('UPDATE clients SET sort_order = $1 WHERE id = $2', [n, params.id]);
+  }
+
   if (body.sheet_id !== undefined) {
     await query('UPDATE clients SET sheet_id = $1 WHERE id = $2', [String(body.sheet_id).trim(), params.id]);
   }

@@ -11,6 +11,7 @@ import MetricsPicker from './MetricsPicker';
 import { parseMetricsParam } from './metrics';
 import GhlConfigModal from './GhlConfigModal';
 import InlineTextField from './InlineTextField';
+import InlineNumberField from './InlineNumberField';
 import GroupBySelect, { GroupByKey } from './GroupBySelect';
 import { resolveDateRange } from './dateRange';
 import { namePrefixGroup } from './grouping';
@@ -29,6 +30,7 @@ interface ClientRow {
   active: boolean;
   marketing_type: string;
   offer: string;
+  sort_order: number;
 }
 
 interface BmConnectionRow {
@@ -71,12 +73,12 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
            c.data_source, c.leads_source,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token,
            c.ghl_token_enc, c.ghl_location_id, c.active,
-           c.marketing_type, c.offer
+           c.marketing_type, c.offer, c.sort_order
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
     JOIN users u ON u.id = cu.user_id
     WHERE c.active = true
-    ORDER BY c.name ASC
+    ORDER BY c.sort_order ASC, c.name ASC
   `);
 
   const bmRows = await query<BmConnectionRow>(`SELECT token_enc, account_ids FROM agency_bm_connections`);
@@ -252,11 +254,14 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     return { spend, leads, bookings, impressions, reach, linkClicks, ctr, cpl };
   }
 
-  const colSpan = 7 + selectedMetrics.size;
+  const colSpan = 8 + selectedMetrics.size;
 
   function renderRow(r: RowResult) {
     return (
       <tr key={r.client.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+        <td className="px-4 py-3">
+          <InlineNumberField clientId={r.client.id} field="sort_order" value={r.client.sort_order} />
+        </td>
         <td className="px-4 py-3 font-medium text-white">{r.client.name}</td>
         <td className="px-4 py-3">
           <ActiveToggle clientId={r.client.id} current={r.client.active} compact />
@@ -329,6 +334,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-800">
+                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">#</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Client</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Active</th>
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Marketing Type</th>
@@ -357,7 +363,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
                     const sub = subtotal(rows);
                     return [
                       <tr key={`group-${key}`} className="bg-slate-800/60 border-b border-slate-800">
-                        <td className="px-4 py-2 font-semibold text-slate-200" colSpan={4}>
+                        <td className="px-4 py-2 font-semibold text-slate-200" colSpan={5}>
                           {key} <span className="text-slate-500 font-normal">({rows.length})</span>
                         </td>
                         <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.leads.toLocaleString()}</td>

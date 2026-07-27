@@ -34,6 +34,12 @@ pool.query(`CREATE INDEX IF NOT EXISTS idx_clients_active ON clients (active)`).
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS marketing_type TEXT NOT NULL DEFAULT ''`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer TEXT NOT NULL DEFAULT ''`).catch(() => {});
 
+// Agency Overview: manual display order per client (see migration 018).
+// Lower sorts first; ties broken by name. Only affects row order within
+// the overview table (and within each group, when grouping is on) — the
+// group itself still sorts alphabetically.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS sort_order INT NOT NULL DEFAULT 0`).catch(() => {});
+
 // GHL bookings integration + leads-source picker (see migration 010).
 // Defaults are safe-no-op so existing clients are unaffected on first deploy:
 // leads_source defaults to 'meta', show_bookings defaults to false.
