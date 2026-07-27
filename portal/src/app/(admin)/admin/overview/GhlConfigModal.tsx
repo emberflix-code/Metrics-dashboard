@@ -109,7 +109,7 @@ export default function GhlConfigModal({ clientId, clientName, currentLocationId
               className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono mb-1"
             />
             <p className="text-xs text-slate-500 mb-4">
-              A contact counts as a lead when it carries this tag OR has an attributed campaign. Leave blank to count only attributed contacts. Different clients can use different tags (e.g. per-offer tags).
+              When set, only contacts with this EXACT tag count as leads (e.g. won&apos;t match a tag with extra words appended). Leave blank to count only contacts with an attributed campaign instead. Different clients can use different tags (e.g. per-offer tags).
             </p>
 
             {error && <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-3">{error}</p>}

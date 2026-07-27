@@ -325,15 +325,18 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
   return result;
 }
 
-// A GHL contact counts as a "real" lead when it carries the client's
-// configured tag OR has attributionSource.campaign populated (came in via a
-// tracked ad). Tag names vary per client — some split multiple offers
-// across different tags — so this is admin-configured per client, not a
-// fixed tag. Blank leadsTag means only the attribution condition applies;
-// it deliberately does NOT fall back to counting every contact.
+// A GHL contact counts as a "real" lead based on the client's configured tag:
+//   - Tag configured: the contact must carry that EXACT tag (case-insensitive)
+//     to count. Attribution alone is NOT enough — a client tagging leads by
+//     offer/campaign line (e.g. "new ad lead" vs. "new ad lead - stretch")
+//     needs contacts from a different line correctly excluded even though
+//     they still have real ad attribution.
+//   - No tag configured: falls back to attributionSource.campaign being
+//     populated (came in via a tracked ad) — NOT a fallback to counting
+//     every contact in the location.
 export function isQualifyingLead(row: GhlLeadRow, leadsTag: string): boolean {
   const tag = leadsTag.trim().toLowerCase();
-  if (tag && row.tags.some(t => t.toLowerCase() === tag)) return true;
+  if (tag) return row.tags.some(t => t.toLowerCase() === tag);
   return row.hasAttribution;
 }
 

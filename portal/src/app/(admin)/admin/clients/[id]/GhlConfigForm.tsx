@@ -114,7 +114,7 @@ export default function GhlConfigForm({ clientId, hasToken, currentLocationId, c
           className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
         />
         <p className="mt-1 text-xs text-slate-500">
-          A GHL contact counts toward the Leads KPI when it carries this tag OR has an attributed campaign. Leave blank to count only contacts with an attributed campaign — useful when this location also has contacts from manual entry, imports, or other sources that shouldn&apos;t count as leads. Different clients can use different tag names (e.g. per-offer tags).
+          When set, only contacts with this EXACT tag count toward the Leads KPI (e.g. won&apos;t match &ldquo;{leadsTag || 'new ad lead'} - stretch&rdquo; if this is &ldquo;{leadsTag || 'new ad lead'}&rdquo;) — useful when this location has multiple offer/campaign lines with different tags. Leave blank to count only contacts with an attributed campaign instead, which excludes manual entries and imports but doesn&apos;t distinguish between offers.
         </p>
       </div>
 
