@@ -13,6 +13,7 @@ import GhlConfigModal from './GhlConfigModal';
 import InlineTextField from './InlineTextField';
 import InlineNumberField from './InlineNumberField';
 import GroupBySelect, { GroupByKey } from './GroupBySelect';
+import SearchBox from './SearchBox';
 import { resolveDateRange } from './dateRange';
 import { namePrefixGroup } from './grouping';
 
@@ -256,9 +257,15 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
 
   const colSpan = 8 + selectedMetrics.size;
 
-  function renderRow(r: RowResult) {
+  function renderRow(r: RowResult, groupKey?: string) {
+    const searchable = [r.client.name, r.client.marketing_type, r.client.offer].join(' ').toLowerCase();
     return (
-      <tr key={r.client.id} className="border-b border-slate-800/50 hover:bg-slate-800/30">
+      <tr
+        key={r.client.id}
+        className="border-b border-slate-800/50 hover:bg-slate-800/30"
+        data-search={searchable}
+        data-group={groupKey}
+      >
         <td className="px-4 py-3">
           <InlineNumberField clientId={r.client.id} field="sort_order" value={r.client.sort_order} />
         </td>
@@ -318,6 +325,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
             </p>
           </div>
           <div className="flex items-center gap-3 flex-wrap">
+            <SearchBox />
             <GroupBySelect current={groupBy} />
             <MetricsPicker current={selectedMetrics} />
             <OverviewRangeSelect currentPreset={preset} currentSince={since} currentUntil={until} />
@@ -331,7 +339,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden overflow-x-auto">
-          <table className="w-full text-sm">
+          <table className="w-full text-sm" data-overview-table>
             <thead>
               <tr className="border-b border-slate-800">
                 <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">#</th>
@@ -357,12 +365,12 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
                 </tr>
               )}
               {groupBy === 'none'
-                ? results.map(renderRow)
+                ? results.map(r => renderRow(r))
                 : sortedGroupKeys.flatMap(key => {
                     const rows = groupsMap.get(key)!;
                     const sub = subtotal(rows);
                     return [
-                      <tr key={`group-${key}`} className="bg-slate-800/60 border-b border-slate-800">
+                      <tr key={`group-${key}`} className="bg-slate-800/60 border-b border-slate-800" data-group-header={key}>
                         <td className="px-4 py-2 font-semibold text-slate-200" colSpan={5}>
                           {key} <span className="text-slate-500 font-normal">({rows.length})</span>
                         </td>
@@ -376,7 +384,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
                         <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.cpl === null ? '—' : `$${sub.cpl.toFixed(2)}`}</td>
                         <td className="px-4 py-2"></td>
                       </tr>,
-                      ...rows.map(renderRow),
+                      ...rows.map(r => renderRow(r, key)),
                     ];
                   })}
             </tbody>
