@@ -171,6 +171,46 @@ export async function getAdminClientMetaScope(
   };
 }
 
+// Cache of resolved Meta ad account timezones (timezone_name from Graph
+// API's act_{id} endpoint), keyed by account_id. Used to bucket GHL
+// leads/bookings by the same clock the rest of the app already uses for
+// "today/yesterday" — NOT each GHL sub-account's own timezone, which can
+// differ from the client's actual ad account. 30-minute TTL: a Meta account's
+// timezone essentially never changes, this just avoids holding a stale
+// value forever if it ever does.
+const ACCOUNT_TIMEZONE_TTL_MS = 30 * 60 * 1000;
+const _accountTimezoneCache = new Map<string, { expires: number; timezone: string }>();
+
+/**
+ * Resolves an ad account's timezone_name via the Graph API (falls back to
+ * 'UTC' on any failure — a wrong-but-consistent bucket beats throwing and
+ * failing the caller's entire leads/bookings computation over a timezone
+ * lookup hiccup). Takes the raw account id (no "act_" prefix) and its token.
+ */
+export async function getAccountTimezone(accountId: string, token: string): Promise<string> {
+  const hit = _accountTimezoneCache.get(accountId);
+  if (hit && hit.expires > Date.now()) return hit.timezone;
+
+  let timezone = 'UTC';
+  try {
+    const url = new URL(`https://graph.facebook.com/v22.0/act_${accountId}`);
+    url.searchParams.set('fields', 'timezone_name');
+    url.searchParams.set('access_token', token);
+    const res = await fetch(url.toString());
+    if (res.ok) {
+      const json = await res.json() as { timezone_name?: string };
+      if (typeof json.timezone_name === 'string' && json.timezone_name) {
+        timezone = json.timezone_name;
+      }
+    }
+  } catch {
+    // Fall through to UTC.
+  }
+
+  _accountTimezoneCache.set(accountId, { expires: Date.now() + ACCOUNT_TIMEZONE_TTL_MS, timezone });
+  return timezone;
+}
+
 /**
  * campaign_filter supports `|`-separated keywords for OR matching (e.g. a
  * region umbrella client spanning several states: ", WI| MN| MI, | IN, | IL,").

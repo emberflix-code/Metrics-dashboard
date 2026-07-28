@@ -3,8 +3,8 @@ import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
-import { getAdminClientMetaScope, matchesCampaignFilter } from '@/lib/meta';
-import { fetchGhlLeads, fetchGhlBookings, isQualifyingLead, GhlError } from '@/lib/ghl';
+import { getAdminClientMetaScope, matchesCampaignFilter, getAccountTimezone } from '@/lib/meta';
+import { fetchGhlLeads, fetchGhlBookings, dayInTimezone, isQualifyingLead, GhlError } from '@/lib/ghl';
 import ActiveToggle from '../clients/[id]/ActiveToggle';
 import OverviewRangeSelect from './OverviewRangeSelect';
 import MetricsPicker from './MetricsPicker';
@@ -182,8 +182,11 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   }
 
   // --- GHL leads + bookings, in parallel across all clients with a token ---
+  // Bucketed by the client's own Meta ad account timezone (not GHL's own
+  // per-location timezone, and not raw UTC) so "today/yesterday" here lines
+  // up with the Meta spend numbers on the same row and with Meta BM.
   const ghlResults = await Promise.all(
-    clients.map(async c => {
+    clients.map(async (c, i) => {
       if (!c.has_ghl_token) return { id: c.id, leads: null as number | null, bookings: null as number | null, error: null as string | null };
       try {
         const token = decrypt(c.ghl_token_enc);
@@ -191,13 +194,26 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           fetchGhlLeads({ token, locationId: c.ghl_location_id }),
           fetchGhlBookings({ token, locationId: c.ghl_location_id }),
         ]);
+
+        let timezone = 'UTC';
+        const accountId = scopes[i].accountIds[0];
+        const metaTokenEnc = accountId ? tokenByAccountId.get(accountId) : undefined;
+        if (accountId && metaTokenEnc) {
+          timezone = await getAccountTimezone(accountId, decrypt(metaTokenEnc));
+        }
+
         const leadContactIds = new Set(
           leadsResult.rows
-            .filter(r => r.day >= since && r.day <= until && isQualifyingLead(r, c.ghl_leads_tag))
+            .filter(r => {
+              const day = dayInTimezone(r.dateAdded, timezone);
+              return day >= since && day <= until && isQualifyingLead(r, c.ghl_leads_tag);
+            })
             .map(r => r.contactId)
         );
         const bookingContactIds = new Set(
-          bookingsResult.rows.filter(r => r.day >= since && r.day <= until).map(r => r.contactId)
+          bookingsResult.rows
+            .filter(r => { const day = dayInTimezone(r.date, timezone); return day >= since && day <= until; })
+            .map(r => r.contactId)
         );
         return { id: c.id, leads: leadContactIds.size, bookings: bookingContactIds.size, error: null };
       } catch (err) {

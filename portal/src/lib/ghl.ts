@@ -18,6 +18,16 @@
 // alone, not on date range — bookings rarely shift backfill, the 5-min TTL
 // is enough.
 //
+// `dateAdded`/`dateUpdated` are exposed as raw ISO 8601 UTC timestamps, NOT
+// pre-bucketed into a day here — bucketing by a naive UTC slice is wrong (a
+// contact created late evening local time can land on the next UTC day and
+// silently fall outside a range GHL's own UI still shows it under), but the
+// "correct" timezone to bucket by is the CLIENT'S META AD ACCOUNT timezone
+// (to match how the rest of the app aligns "today/yesterday" with Meta BM),
+// not GHL's own per-location timezone — those can differ. This module has no
+// Meta dependency, so callers resolve the account timezone themselves (see
+// getAccountTimezone in lib/meta.ts) and call dayInTimezone() below.
+//
 // Confirmed working against Empowered's PIT during the planning session.
 // See memory: ghl-pit-api.
 
@@ -25,7 +35,7 @@ import { createHash } from 'crypto';
 
 export interface GhlBookingRow {
   campaignId: string;
-  day: string;          // YYYY-MM-DD (UTC)
+  date: string;          // ISO 8601 UTC — dateAdded for 'first' rows, dateUpdated for 'last' rows
   contactId: string;
   attribution: 'first' | 'last';
   // True when the contact also carries the "cancelled appointment" tag.
@@ -99,6 +109,30 @@ function tryExtractLocationId(token: string): string | null {
 
 function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex').slice(0, 32);
+}
+
+// Converts an ISO 8601 UTC timestamp to a YYYY-MM-DD day string in the given
+// IANA timezone, e.g. dayInTimezone('2026-07-28T03:20:52.840Z',
+// 'America/New_York') -> '2026-07-27' (11:20 PM the prior day local time).
+// Falls back to a naive UTC slice if the timezone is invalid. Exported so
+// callers (the Overview page, the ghl-leads route) can bucket
+// dateAdded/dateUpdated by the client's own Meta ad account timezone.
+export function dayInTimezone(isoTimestamp: string, timezone: string): string {
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).formatToParts(new Date(isoTimestamp));
+    const year = parts.find(p => p.type === 'year')?.value;
+    const month = parts.find(p => p.type === 'month')?.value;
+    const day = parts.find(p => p.type === 'day')?.value;
+    if (year && month && day) return `${year}-${month}-${day}`;
+  } catch {
+    // Invalid timezone string — fall through.
+  }
+  return isoTimestamp.slice(0, 10);
 }
 
 export async function fetchGhlBookings(opts: { token: string; locationId?: string }): Promise<GhlFetchResult> {
@@ -185,7 +219,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
       if (firstCampaign) {
         rows.push({
           campaignId: firstCampaign,
-          day: c.dateAdded.slice(0, 10),
+          date: c.dateAdded,
           contactId: c.id,
           attribution: 'first',
           cancelled,
@@ -194,7 +228,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
       if (lastCampaign && lastCampaign !== firstCampaign) {
         rows.push({
           campaignId: lastCampaign,
-          day: c.dateUpdated.slice(0, 10),
+          date: c.dateUpdated,
           contactId: c.id,
           attribution: 'last',
           cancelled,
@@ -221,7 +255,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
 // counting leads — see hasAttribution/tags below, filtered by the caller.
 export interface GhlLeadRow {
   campaignId: string;
-  day: string;        // YYYY-MM-DD (UTC), from dateAdded
+  dateAdded: string;  // ISO 8601 UTC
   contactId: string;
   name: string;
   email: string;
@@ -305,7 +339,7 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
       const campaignId = c.attributionSource?.campaign?.trim() || '';
       rows.push({
         campaignId,
-        day: c.dateAdded.slice(0, 10),
+        dateAdded: c.dateAdded,
         contactId: c.id,
         name: [c.firstName, c.lastName].filter(Boolean).join(' ').trim(),
         email: c.email?.trim() || '',

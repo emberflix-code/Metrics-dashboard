@@ -3,7 +3,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
-import { fetchGhlBookings, GhlError } from '@/lib/ghl';
+import { fetchGhlBookings, dayInTimezone, GhlError } from '@/lib/ghl';
+import { getClientConnection, getAccountTimezone } from '@/lib/meta';
 
 // Returns booked-contact attribution rows from GHL, optionally clipped to
 // [since, until]. Powers both the optional 7th "Bookings" KPI card AND the
@@ -49,10 +50,27 @@ export async function GET(req: NextRequest) {
 
   try {
     const result = await fetchGhlBookings({ token, locationId: client.ghl_location_id || undefined });
+
+    // Bucket by the client's own Meta ad account timezone (not GHL's, and
+    // not raw UTC) so "today/yesterday" here lines up with the rest of the
+    // dashboard and with Meta BM — see lib/meta.ts getAccountTimezone.
+    let timezone = 'UTC';
+    try {
+      const conn = await getClientConnection();
+      if (conn.accountIds.length > 0) {
+        const accountId = conn.accountIds[0];
+        timezone = await getAccountTimezone(accountId, conn.tokenForAccount(accountId));
+      }
+    } catch {
+      // No Meta connection configured for this client — fall back to UTC
+      // rather than failing the whole bookings fetch.
+    }
+
+    const rowsWithDay = result.rows.map(r => ({ ...r, day: dayInTimezone(r.date, timezone) }));
     // Clip to [since, until] if provided. Strings sort YYYY-MM-DD correctly.
     const rows = (since && until)
-      ? result.rows.filter(r => r.day >= since && r.day <= until)
-      : result.rows;
+      ? rowsWithDay.filter(r => r.day >= since && r.day <= until)
+      : rowsWithDay;
     return NextResponse.json({
       rows,
       enabled: true,
