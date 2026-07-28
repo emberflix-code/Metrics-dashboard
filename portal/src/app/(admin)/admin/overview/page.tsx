@@ -263,12 +263,19 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       groupsMap.set(key, list);
     }
   }
-  // "(none)" (clients with no Marketing Type/Offer set, when grouping by
-  // those) always sorts last — it's the leftover bucket, not a real category,
-  // so it shouldn't interleave alphabetically with actual group names.
+  // Real category names sort alphabetically first. "No Dashboard" (a real,
+  // deliberate category — clients with no working leads dashboard yet) comes
+  // after those but before "(none)" (clients with no Marketing Type/Offer
+  // set at all — a leftover bucket, not a real category, so it always sorts
+  // last of all).
+  function groupSortRank(key: string): number {
+    if (key === '(none)') return 2;
+    if (key === 'No Dashboard') return 1;
+    return 0;
+  }
   const sortedGroupKeys = Array.from(groupsMap.keys()).sort((a, b) => {
-    if (a === '(none)') return 1;
-    if (b === '(none)') return -1;
+    const rankDiff = groupSortRank(a) - groupSortRank(b);
+    if (rankDiff !== 0) return rankDiff;
     return a.localeCompare(b);
   });
 

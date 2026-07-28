@@ -5,6 +5,21 @@ import PillTagInput from './PillTagInput';
 
 type LeadsSource = 'meta' | 'sheet' | 'ghl';
 
+// The 3 spreadsheets this agency actually uses today, so admins pick a
+// known sheet by name instead of pasting/memorizing a raw ID. "Custom..."
+// keeps the raw-ID field available for anything outside these 3.
+const KNOWN_SHEETS = [
+  { label: 'Alloy', id: '14cuF6ASfor7g9Lj5Q4EqLYix1uw1q2LCTVPDImYmzwM' },
+  { label: 'Non Alloy / Non AF', id: '1KBKGWqlgYJTXOuovNs_E23wZOYHn_9-DWWCXai_FPlw' },
+  { label: 'Canada Clubs', id: '1wxkwJshZ3icz8aJF_CXpe9quMD_IkDzzxlUCm-hq7F8' },
+] as const;
+const CUSTOM_VALUE = '__custom__';
+
+function presetKeyForId(id: string): string {
+  const match = KNOWN_SHEETS.find(s => s.id === id);
+  return match ? match.id : (id ? CUSTOM_VALUE : KNOWN_SHEETS[0].id);
+}
+
 interface Props {
   clientId: string;
   currentSheetId: string;
@@ -16,6 +31,7 @@ interface Props {
 
 export default function SheetConfigForm({ clientId, currentSheetId, currentSheetTab, currentGoogleSheetTab, currentLeadsSource, hasGhlToken }: Props) {
   const [sheetId, setSheetId] = useState(currentSheetId);
+  const [sheetPreset, setSheetPreset] = useState(() => presetKeyForId(currentSheetId));
   const [sheetTab, setSheetTab] = useState(currentSheetTab);
   const [googleSheetTab, setGoogleSheetTab] = useState(currentGoogleSheetTab);
   const [leadsSource, setLeadsSource] = useState<LeadsSource>(currentLeadsSource);
@@ -49,20 +65,35 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <div>
-        <label className="block text-xs font-medium text-slate-400 mb-1.5">
-          Spreadsheet ID
-          <span className="ml-1 text-slate-500 font-normal">(from the sheet URL)</span>
-        </label>
-        <input
-          type="text"
-          value={sheetId}
-          onChange={e => setSheetId(e.target.value)}
-          placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
-          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-        />
-        <p className="mt-1 text-xs text-slate-500">
-          Found in the URL: docs.google.com/spreadsheets/d/<strong className="text-slate-400">SPREADSHEET_ID</strong>/edit
-        </p>
+        <label className="block text-xs font-medium text-slate-400 mb-1.5">Spreadsheet</label>
+        <select
+          value={sheetPreset}
+          onChange={e => {
+            const value = e.target.value;
+            setSheetPreset(value);
+            if (value !== CUSTOM_VALUE) setSheetId(value);
+          }}
+          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
+        >
+          {KNOWN_SHEETS.map(s => (
+            <option key={s.id} value={s.id}>{s.label}</option>
+          ))}
+          <option value={CUSTOM_VALUE}>Custom…</option>
+        </select>
+        {sheetPreset === CUSTOM_VALUE && (
+          <>
+            <input
+              type="text"
+              value={sheetId}
+              onChange={e => setSheetId(e.target.value)}
+              placeholder="1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgVE2upms"
+              className="mt-2 w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
+            />
+            <p className="mt-1 text-xs text-slate-500">
+              Found in the URL: docs.google.com/spreadsheets/d/<strong className="text-slate-400">SPREADSHEET_ID</strong>/edit
+            </p>
+          </>
+        )}
       </div>
 
       <div>
