@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     `SELECT u.id, u.email, u.role, cu.client_id
      FROM users u
      LEFT JOIN client_users cu ON cu.user_id = u.id
-     WHERE u.auto_login_token = $1 AND u.role = 'client'
+     WHERE u.auto_login_token = $1 AND u.role IN ('client', 'admin')
      LIMIT 1`,
     [token]
   );
