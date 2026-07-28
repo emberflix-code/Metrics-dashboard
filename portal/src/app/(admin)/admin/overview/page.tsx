@@ -372,7 +372,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   // grouped by it — hidden (not removed: the field/data/inline-edit still
   // exist, just not shown as a column) in that one grouping mode only.
   const showMarketingTypeColumn = groupBy !== 'marketing_type';
-  const thisWeekExtraCols = isThisWeek ? 4 : 0; // This Week Bookings + CPL Trend + Comparison CPL + Campaign Trend
+  const thisWeekExtraCols = isThisWeek ? 4 : 0; // This Week Bookings + Campaign Trend + Last Week CPL + LW CPL Trend
   const colSpan = (showMarketingTypeColumn ? 8 : 7) + selectedMetrics.size + thisWeekExtraCols;
 
   function renderColumnHeaderCells() {
@@ -392,16 +392,16 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         {selectedMetrics.has('link_clicks') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Link Clicks</th>}
         {selectedMetrics.has('ctr') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CTR</th>}
         <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CPL</th>
-        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="vs. prior Friday–Thursday">CPL Trend</th>}
-        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="Full prior Friday–Thursday week">Last Week CPL</th>}
         {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="This Week's CPL today vs. as of yesterday">Campaign Trend</th>}
+        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="Full prior Friday–Thursday week">Last Week CPL</th>}
+        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="vs. prior Friday–Thursday">LW CPL Trend</th>}
         <th className="px-4 py-2.5"></th>
       </>
     );
   }
 
-  // Shared up/down/flat rendering for both CPL Trend (vs. full prior week)
-  // and Campaign Trend (vs. yesterday, same rolling window) — lower CPL than
+  // Shared up/down/flat rendering for both Campaign Trend (vs. yesterday,
+  // same rolling window) and LW CPL Trend (vs. full prior week) — lower CPL than
   // the baseline = improvement = green/down; higher = worse = red/up.
   // Returns "—" when there's no baseline CPL to compare against (e.g. zero
   // leads that period).
@@ -532,7 +532,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         </td>
         {isThisWeek && (
           <td className="px-4 py-3 text-right font-mono text-sm">
-            {renderCplTrendArrow(r.cpl, r.comparisonCpl, r.comparisonCpl === null ? 'No comparison data' : `Prior week CPL: $${r.comparisonCpl.toFixed(2)}`)}
+            {renderCplTrendArrow(r.cpl, r.dayOverDayCpl, r.dayOverDayCpl === null ? 'No prior-day data yet this week' : `Yesterday's This Week CPL: $${r.dayOverDayCpl.toFixed(2)}`)}
           </td>
         )}
         {isThisWeek && (
@@ -542,7 +542,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         )}
         {isThisWeek && (
           <td className="px-4 py-3 text-right font-mono text-sm">
-            {renderCplTrendArrow(r.cpl, r.dayOverDayCpl, r.dayOverDayCpl === null ? 'No prior-day data yet this week' : `Yesterday's This Week CPL: $${r.dayOverDayCpl.toFixed(2)}`)}
+            {renderCplTrendArrow(r.cpl, r.comparisonCpl, r.comparisonCpl === null ? 'No comparison data' : `Prior week CPL: $${r.comparisonCpl.toFixed(2)}`)}
           </td>
         )}
         <td className="px-4 py-3 text-right">
