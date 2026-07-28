@@ -6,11 +6,12 @@ import { useState } from 'react';
 // Mirrors Meta Business Manager's date-range picker: named presets plus a
 // custom From/To range. All presets are computed relative to "yesterday"
 // (never today/future), consistent with the rest of the app's date handling.
-type PresetKey = 'today' | 'yesterday' | '7' | '14' | '30' | '90' | 'this_month' | 'last_month' | 'custom';
+type PresetKey = 'today' | 'yesterday' | 'this_week' | '7' | '14' | '30' | '90' | 'this_month' | 'last_month' | 'custom';
 
 const PRESETS: { key: PresetKey; label: string }[] = [
   { key: 'today', label: 'Today' },
   { key: 'yesterday', label: 'Yesterday' },
+  { key: 'this_week', label: 'This week (Fri–yesterday)' },
   { key: '7', label: 'Last 7 days' },
   { key: '14', label: 'Last 14 days' },
   { key: '30', label: 'Last 30 days' },

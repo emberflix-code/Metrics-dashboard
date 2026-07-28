@@ -17,7 +17,7 @@ import GroupBySelect, { GroupByKey } from './GroupBySelect';
 import SearchBox from './SearchBox';
 import GroupSection from './GroupSection';
 import { groupColorFor } from './groupColors';
-import { resolveDateRange } from './dateRange';
+import { resolveDateRange, resolveThisWeekRanges } from './dateRange';
 import { namePrefixGroup } from './grouping';
 
 interface ClientRow {
@@ -63,6 +63,9 @@ interface RowResult {
   cpl: number | null;
   ghlError: string | null;
   metaError: string | null;
+  // Only populated when preset === 'this_week'.
+  comparisonCpl: number | null;
+  thisWeekBookings: number | null;
 }
 
 export default async function OverviewPage({ searchParams }: { searchParams: { preset?: string; since?: string; until?: string; metrics?: string; group_by?: string } }) {
@@ -101,6 +104,9 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   );
 
   // --- Spend + optional metrics: split by data_source, dedupe by unique account_id ---
+  // Extracted as a function of (since, until) so the "This Week" preset can
+  // call it a second time for its comparison range without duplicating the
+  // cached-SQL / live-Meta-API branching logic.
   const cachedAccountIds = new Set<string>();
   const liveAccountIds = new Set<string>();
   clients.forEach((c, i) => {
@@ -110,78 +116,96 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     }
   });
 
-  const campaignRowsByAccount = new Map<string, CampaignSpendRow[]>();
-  if (cachedAccountIds.size > 0) {
-    const rows = await query<{ account_id: string; campaign_name: string; spend: string; impressions: string; reach: string; link_clicks: string }>(
-      `SELECT account_id, campaign_name, SUM(spend)::text AS spend, SUM(impressions)::text AS impressions,
-              SUM(reach)::text AS reach, SUM(link_clicks)::text AS link_clicks
-       FROM meta_daily_insights
-       WHERE account_id = ANY($1) AND level = 'campaign' AND date BETWEEN $2 AND $3
-       GROUP BY account_id, campaign_name`,
-      [Array.from(cachedAccountIds), since, until]
-    );
-    for (const r of rows) {
-      const list = campaignRowsByAccount.get(r.account_id) || [];
-      list.push({
-        campaign_name: r.campaign_name || '',
-        spend: parseFloat(r.spend) || 0,
-        impressions: parseInt(r.impressions, 10) || 0,
-        reach: parseInt(r.reach, 10) || 0,
-        linkClicks: parseInt(r.link_clicks, 10) || 0,
-      });
-      campaignRowsByAccount.set(r.account_id, list);
-    }
-  }
+  async function fetchSpendForRange(rangeSince: string, rangeUntil: string) {
+    const campaignRowsByAccount = new Map<string, CampaignSpendRow[]>();
+    const liveAccountError = new Map<string, string>();
 
-  // Live accounts: one Graph API call per unique account, in parallel.
-  const liveAccountError = new Map<string, string>();
-  const liveResults = await Promise.all(
-    Array.from(liveAccountIds).map(async accId => {
-      const tokenEnc = tokenByAccountId.get(accId);
-      if (!tokenEnc) { liveAccountError.set(accId, 'No Meta connection for this account'); return { accId, rows: [] as CampaignSpendRow[] }; }
-      try {
-        const token = decrypt(tokenEnc);
-        const url = new URL(`https://graph.facebook.com/v22.0/act_${accId}/insights`);
-        url.searchParams.set('fields', 'campaign_name,spend,impressions,reach,inline_link_clicks');
-        url.searchParams.set('level', 'campaign');
-        url.searchParams.set('time_range', JSON.stringify({ since, until }));
-        url.searchParams.set('limit', '500');
-        url.searchParams.set('access_token', token);
-        const res = await fetch(url.toString());
-        const json = await res.json();
-        if (!res.ok) { liveAccountError.set(accId, json?.error?.message || `Meta API error ${res.status}`); return { accId, rows: [] }; }
-        const rows: CampaignSpendRow[] = (json.data || []).map((d: { campaign_name?: string; spend?: string; impressions?: string; reach?: string; inline_link_clicks?: string }) => ({
-          campaign_name: d.campaign_name || '',
-          spend: parseFloat(d.spend || '0') || 0,
-          impressions: parseInt(d.impressions || '0', 10) || 0,
-          reach: parseInt(d.reach || '0', 10) || 0,
-          linkClicks: parseInt(d.inline_link_clicks || '0', 10) || 0,
-        }));
-        return { accId, rows };
-      } catch (err) {
-        liveAccountError.set(accId, err instanceof Error ? err.message : 'Meta fetch failed');
-        return { accId, rows: [] as CampaignSpendRow[] };
-      }
-    })
-  );
-  for (const { accId, rows } of liveResults) campaignRowsByAccount.set(accId, rows);
-
-  function metaForClient(accountIds: string[], campaignFilter: string) {
-    let spend = 0, impressions = 0, reach = 0, linkClicks = 0;
-    let error: string | null = null;
-    for (const accId of accountIds) {
-      if (liveAccountError.has(accId)) { error = liveAccountError.get(accId)!; continue; }
-      const rows = campaignRowsByAccount.get(accId) || [];
+    if (cachedAccountIds.size > 0) {
+      const rows = await query<{ account_id: string; campaign_name: string; spend: string; impressions: string; reach: string; link_clicks: string }>(
+        `SELECT account_id, campaign_name, SUM(spend)::text AS spend, SUM(impressions)::text AS impressions,
+                SUM(reach)::text AS reach, SUM(link_clicks)::text AS link_clicks
+         FROM meta_daily_insights
+         WHERE account_id = ANY($1) AND level = 'campaign' AND date BETWEEN $2 AND $3
+         GROUP BY account_id, campaign_name`,
+        [Array.from(cachedAccountIds), rangeSince, rangeUntil]
+      );
       for (const r of rows) {
-        if (!matchesCampaignFilter(r.campaign_name, campaignFilter)) continue;
-        spend += r.spend;
-        impressions += r.impressions;
-        reach += r.reach;
-        linkClicks += r.linkClicks;
+        const list = campaignRowsByAccount.get(r.account_id) || [];
+        list.push({
+          campaign_name: r.campaign_name || '',
+          spend: parseFloat(r.spend) || 0,
+          impressions: parseInt(r.impressions, 10) || 0,
+          reach: parseInt(r.reach, 10) || 0,
+          linkClicks: parseInt(r.link_clicks, 10) || 0,
+        });
+        campaignRowsByAccount.set(r.account_id, list);
       }
     }
-    return { spend: Math.round(spend * 100) / 100, impressions, reach, linkClicks, error };
+
+    // Live accounts: one Graph API call per unique account, in parallel.
+    const liveResults = await Promise.all(
+      Array.from(liveAccountIds).map(async accId => {
+        const tokenEnc = tokenByAccountId.get(accId);
+        if (!tokenEnc) { liveAccountError.set(accId, 'No Meta connection for this account'); return { accId, rows: [] as CampaignSpendRow[] }; }
+        try {
+          const token = decrypt(tokenEnc);
+          const url = new URL(`https://graph.facebook.com/v22.0/act_${accId}/insights`);
+          url.searchParams.set('fields', 'campaign_name,spend,impressions,reach,inline_link_clicks');
+          url.searchParams.set('level', 'campaign');
+          url.searchParams.set('time_range', JSON.stringify({ since: rangeSince, until: rangeUntil }));
+          url.searchParams.set('limit', '500');
+          url.searchParams.set('access_token', token);
+          const res = await fetch(url.toString());
+          const json = await res.json();
+          if (!res.ok) { liveAccountError.set(accId, json?.error?.message || `Meta API error ${res.status}`); return { accId, rows: [] }; }
+          const rows: CampaignSpendRow[] = (json.data || []).map((d: { campaign_name?: string; spend?: string; impressions?: string; reach?: string; inline_link_clicks?: string }) => ({
+            campaign_name: d.campaign_name || '',
+            spend: parseFloat(d.spend || '0') || 0,
+            impressions: parseInt(d.impressions || '0', 10) || 0,
+            reach: parseInt(d.reach || '0', 10) || 0,
+            linkClicks: parseInt(d.inline_link_clicks || '0', 10) || 0,
+          }));
+          return { accId, rows };
+        } catch (err) {
+          liveAccountError.set(accId, err instanceof Error ? err.message : 'Meta fetch failed');
+          return { accId, rows: [] as CampaignSpendRow[] };
+        }
+      })
+    );
+    for (const { accId, rows } of liveResults) campaignRowsByAccount.set(accId, rows);
+
+    function metaForClient(accountIds: string[], campaignFilter: string) {
+      let spend = 0, impressions = 0, reach = 0, linkClicks = 0;
+      let error: string | null = null;
+      for (const accId of accountIds) {
+        if (liveAccountError.has(accId)) { error = liveAccountError.get(accId)!; continue; }
+        const rows = campaignRowsByAccount.get(accId) || [];
+        for (const r of rows) {
+          if (!matchesCampaignFilter(r.campaign_name, campaignFilter)) continue;
+          spend += r.spend;
+          impressions += r.impressions;
+          reach += r.reach;
+          linkClicks += r.linkClicks;
+        }
+      }
+      return { spend: Math.round(spend * 100) / 100, impressions, reach, linkClicks, error };
+    }
+
+    return { metaForClient };
   }
+
+  const { metaForClient } = await fetchSpendForRange(since, until);
+
+  // "This Week" needs a second spend fetch (comparison range) and its own
+  // Meta-account-timezone resolution, but does NOT need a second GHL fetch —
+  // fetchGhlLeads/fetchGhlBookings return ALL rows (unfiltered by date), so
+  // re-filtering the already-fetched rows against a different date window
+  // is enough to get the comparison period's leads/bookings.
+  const isThisWeek = preset === 'this_week';
+  const thisWeekRanges = isThisWeek ? resolveThisWeekRanges() : null;
+  const { metaForClient: metaForClientComparison } = isThisWeek
+    ? await fetchSpendForRange(thisWeekRanges!.comparison.since, thisWeekRanges!.comparison.until)
+    : { metaForClient: null };
 
   // --- GHL leads + bookings, in parallel across all clients with a token ---
   // Bucketed by the client's own Meta ad account timezone (not GHL's own
@@ -189,7 +213,13 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   // up with the Meta spend numbers on the same row and with Meta BM.
   const ghlResults = await Promise.all(
     clients.map(async (c, i) => {
-      if (!c.has_ghl_token) return { id: c.id, leads: null as number | null, bookings: null as number | null, error: null as string | null };
+      if (!c.has_ghl_token) {
+        return {
+          id: c.id, leads: null as number | null, bookings: null as number | null,
+          comparisonLeads: null as number | null, thisWeekBookings: null as number | null,
+          error: null as string | null,
+        };
+      }
       try {
         const token = decrypt(c.ghl_token_enc);
         const [leadsResult, bookingsResult] = await Promise.all([
@@ -204,23 +234,39 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           timezone = await getAccountTimezone(accountId, decrypt(metaTokenEnc));
         }
 
-        const leadContactIds = new Set(
-          leadsResult.rows
-            .filter(r => {
-              const day = dayInTimezone(r.dateAdded, timezone);
-              return day >= since && day <= until && isQualifyingLead(r, c.ghl_leads_tag);
-            })
-            .map(r => r.contactId)
-        );
-        const bookingContactIds = new Set(
-          bookingsResult.rows
-            .filter(r => { const day = dayInTimezone(r.date, timezone); return day >= since && day <= until; })
-            .map(r => r.contactId)
-        );
-        return { id: c.id, leads: leadContactIds.size, bookings: bookingContactIds.size, error: null };
+        const countQualifyingLeadsInRange = (rangeSince: string, rangeUntil: string): number => {
+          const ids = new Set(
+            leadsResult.rows
+              .filter(r => {
+                const day = dayInTimezone(r.dateAdded, timezone);
+                return day >= rangeSince && day <= rangeUntil && isQualifyingLead(r, c.ghl_leads_tag);
+              })
+              .map(r => r.contactId)
+          );
+          return ids.size;
+        };
+        const countBookingsInRange = (rangeSince: string, rangeUntil: string): number => {
+          const ids = new Set(
+            bookingsResult.rows
+              .filter(r => { const day = dayInTimezone(r.date, timezone); return day >= rangeSince && day <= rangeUntil; })
+              .map(r => r.contactId)
+          );
+          return ids.size;
+        };
+
+        const leads = countQualifyingLeadsInRange(since, until);
+        const bookings = countBookingsInRange(since, until);
+        const comparisonLeads = thisWeekRanges ? countQualifyingLeadsInRange(thisWeekRanges.comparison.since, thisWeekRanges.comparison.until) : null;
+        const thisWeekBookings = thisWeekRanges ? countBookingsInRange(thisWeekRanges.bookingsWeek.since, thisWeekRanges.bookingsWeek.until) : null;
+
+        return { id: c.id, leads, bookings, comparisonLeads, thisWeekBookings, error: null };
       } catch (err) {
         const message = err instanceof GhlError ? err.message : (err instanceof Error ? err.message : 'GHL fetch failed');
-        return { id: c.id, leads: null as number | null, bookings: null as number | null, error: message };
+        return {
+          id: c.id, leads: null as number | null, bookings: null as number | null,
+          comparisonLeads: null as number | null, thisWeekBookings: null as number | null,
+          error: message,
+        };
       }
     })
   );
@@ -231,6 +277,13 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     const ghl = ghlById.get(c.id)!;
     const cpl = ghl.leads && ghl.leads > 0 ? Math.round((meta.spend / ghl.leads) * 100) / 100 : null;
     const ctr = meta.impressions > 0 ? Math.round((meta.linkClicks / meta.impressions) * 10000) / 100 : null;
+
+    let comparisonCpl: number | null = null;
+    if (thisWeekRanges && metaForClientComparison && ghl.comparisonLeads && ghl.comparisonLeads > 0) {
+      const comparisonMeta = metaForClientComparison(scopes[i].accountIds, scopes[i].campaignFilter);
+      comparisonCpl = Math.round((comparisonMeta.spend / ghl.comparisonLeads) * 100) / 100;
+    }
+
     return {
       client: c,
       leads: ghl.leads,
@@ -243,6 +296,8 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       cpl,
       ghlError: ghl.error,
       metaError: meta.error,
+      comparisonCpl,
+      thisWeekBookings: ghl.thisWeekBookings,
     };
   });
 
@@ -288,14 +343,16 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     const linkClicks = rows.reduce((s, r) => s + r.linkClicks, 0);
     const ctr = impressions > 0 ? Math.round((linkClicks / impressions) * 10000) / 100 : null;
     const cpl = leads > 0 ? Math.round((spend / leads) * 100) / 100 : null;
-    return { spend, leads, bookings, impressions, reach, linkClicks, ctr, cpl };
+    const thisWeekBookings = isThisWeek ? rows.reduce((s, r) => s + (r.thisWeekBookings ?? 0), 0) : null;
+    return { spend, leads, bookings, impressions, reach, linkClicks, ctr, cpl, thisWeekBookings };
   }
 
   // Marketing Type is redundant as its own column when the table is already
   // grouped by it — hidden (not removed: the field/data/inline-edit still
   // exist, just not shown as a column) in that one grouping mode only.
   const showMarketingTypeColumn = groupBy !== 'marketing_type';
-  const colSpan = (showMarketingTypeColumn ? 8 : 7) + selectedMetrics.size;
+  const thisWeekExtraCols = isThisWeek ? 2 : 0; // CPL Trend + This Week Bookings
+  const colSpan = (showMarketingTypeColumn ? 8 : 7) + selectedMetrics.size + thisWeekExtraCols;
 
   function renderColumnHeaderCells() {
     return (
@@ -307,14 +364,35 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Offer</th>
         <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Leads</th>
         <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Bookings</th>
+        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="Sunday–Saturday of the current calendar week">This Week Bookings</th>}
         <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Meta Spend</th>
         {selectedMetrics.has('impressions') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Impressions</th>}
         {selectedMetrics.has('reach') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Reach</th>}
         {selectedMetrics.has('link_clicks') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Link Clicks</th>}
         {selectedMetrics.has('ctr') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CTR</th>}
         <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CPL</th>
+        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="vs. prior Friday–Thursday">CPL Trend</th>}
         <th className="px-4 py-2.5"></th>
       </>
+    );
+  }
+
+  // Lower CPL than the comparison period = improvement = green/down. Higher
+  // CPL = worse = red/up. Returns null (render as "—") when there's no
+  // comparison CPL to compare against (e.g. zero leads that period).
+  function renderCplTrend(cpl: number | null, comparisonCpl: number | null) {
+    if (cpl === null || comparisonCpl === null || comparisonCpl === 0) {
+      return <span className="text-slate-600">—</span>;
+    }
+    const pctChange = ((cpl - comparisonCpl) / comparisonCpl) * 100;
+    const isUp = pctChange > 0.005; // tiny epsilon so ~0% doesn't render as a false trend
+    const isDown = pctChange < -0.005;
+    const colorClass = isUp ? 'text-red-400' : isDown ? 'text-emerald-400' : 'text-slate-400';
+    const arrow = isUp ? '▲' : isDown ? '▼' : '—';
+    return (
+      <span className={`inline-flex items-center gap-1 ${colorClass}`} title={`Prior week CPL: $${comparisonCpl.toFixed(2)}`}>
+        {arrow} {Math.abs(pctChange).toFixed(1)}%
+      </span>
     );
   }
 
@@ -328,12 +406,14 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         <td className="px-4 py-2 text-slate-300 text-xs uppercase tracking-wider" colSpan={showMarketingTypeColumn ? 4 : 3}>Subtotal</td>
         <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.leads.toLocaleString()}</td>
         <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.bookings.toLocaleString()}</td>
+        {isThisWeek && <td className="px-4 py-2 text-right font-mono text-slate-200">{(sub.thisWeekBookings ?? 0).toLocaleString()}</td>}
         <td className="px-4 py-2 text-right font-mono text-slate-200">${sub.spend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
         {selectedMetrics.has('impressions') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.impressions.toLocaleString()}</td>}
         {selectedMetrics.has('reach') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.reach.toLocaleString()}</td>}
         {selectedMetrics.has('link_clicks') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.linkClicks.toLocaleString()}</td>}
         {selectedMetrics.has('ctr') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.ctr === null ? '—' : `${sub.ctr.toFixed(2)}%`}</td>}
         <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.cpl === null ? '—' : `$${sub.cpl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</td>
+        {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
         <td className="px-4 py-2"></td>
       </tr>
     );
@@ -402,6 +482,15 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
             <span className="text-xs text-slate-600">Not configured</span>
           ) : r.bookings.toLocaleString()}
         </td>
+        {isThisWeek && (
+          <td className="px-4 py-3 text-right font-mono text-slate-200">
+            {r.ghlError ? (
+              <span className="text-xs text-red-400" title={r.ghlError}>GHL error</span>
+            ) : r.thisWeekBookings === null ? (
+              <span className="text-xs text-slate-600">Not configured</span>
+            ) : r.thisWeekBookings.toLocaleString()}
+          </td>
+        )}
         <td className="px-4 py-3 text-right font-mono text-slate-200">
           {r.metaError ? (
             <span className="text-xs text-red-400" title={r.metaError}>Meta error</span>
@@ -414,6 +503,11 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         <td className="px-4 py-3 text-right font-mono text-slate-200">
           {r.cpl === null ? <span className="text-slate-600">—</span> : `$${r.cpl.toFixed(2)}`}
         </td>
+        {isThisWeek && (
+          <td className="px-4 py-3 text-right font-mono text-sm">
+            {renderCplTrend(r.cpl, r.comparisonCpl)}
+          </td>
+        )}
         <td className="px-4 py-3 text-right">
           <a href={`/admin/clients/${r.client.id}`} className="text-xs text-blue-400 hover:text-blue-300">
             Manage →
