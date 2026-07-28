@@ -69,6 +69,12 @@ export interface ThisWeekRanges {
   // intentional, this powers the separate "This Week Bookings" figure,
   // distinct from the Fri-yesterday range used for Leads/Spend/CPL).
   bookingsWeek: { since: string; until: string };
+  // The SAME rolling "This Week" window shifted back one day (e.g. This Week
+  // Fri-Tue -> this is Fri-Mon) — a day-over-day check on the in-progress
+  // week's CPL trend. Null when This Week is only a single day (right after
+  // the Friday boundary resets) — there's no earlier day within the same
+  // week to compare against yet.
+  dayOverDay: { since: string; until: string } | null;
 }
 
 export function resolveThisWeekRanges(): ThisWeekRanges {
@@ -92,10 +98,16 @@ export function resolveThisWeekRanges(): ThisWeekRanges {
   }
   const saturday = addDaysToISODate(sunday, 6);
 
+  const dayBeforeYesterday = addDaysToISODate(yesterday, -1);
+  const dayOverDay = dayBeforeYesterday >= mostRecentFriday
+    ? { since: mostRecentFriday, until: dayBeforeYesterday }
+    : null;
+
   return {
     thisWeek: { since: mostRecentFriday, until: yesterday },
     comparison: { since: comparisonSince, until: comparisonUntil },
     bookingsWeek: { since: sunday, until: saturday },
+    dayOverDay,
   };
 }
 

@@ -66,6 +66,11 @@ interface RowResult {
   // Only populated when preset === 'this_week'.
   comparisonCpl: number | null;
   thisWeekBookings: number | null;
+  // CPL for the SAME rolling "This Week" window shifted back one day (e.g.
+  // if This Week is Fri-Tue, this is Fri-Mon) — a day-over-day check on
+  // whether the in-progress week's CPL is trending up or down since
+  // yesterday, distinct from comparisonCpl (the full prior Fri-Thu week).
+  dayOverDayCpl: number | null;
 }
 
 export default async function OverviewPage({ searchParams }: { searchParams: { preset?: string; since?: string; until?: string; metrics?: string; group_by?: string } }) {
@@ -196,15 +201,19 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
 
   const { metaForClient } = await fetchSpendForRange(since, until);
 
-  // "This Week" needs a second spend fetch (comparison range) and its own
-  // Meta-account-timezone resolution, but does NOT need a second GHL fetch —
+  // "This Week" needs two more spend fetches (the full prior Fri-Thu
+  // comparison week, and the day-over-day shifted window) and its own
+  // Meta-account-timezone resolution, but does NOT need extra GHL fetches —
   // fetchGhlLeads/fetchGhlBookings return ALL rows (unfiltered by date), so
   // re-filtering the already-fetched rows against a different date window
-  // is enough to get the comparison period's leads/bookings.
+  // is enough to get each period's leads/bookings.
   const isThisWeek = preset === 'this_week';
   const thisWeekRanges = isThisWeek ? resolveThisWeekRanges() : null;
   const { metaForClient: metaForClientComparison } = isThisWeek
     ? await fetchSpendForRange(thisWeekRanges!.comparison.since, thisWeekRanges!.comparison.until)
+    : { metaForClient: null };
+  const { metaForClient: metaForClientDayOverDay } = isThisWeek && thisWeekRanges!.dayOverDay
+    ? await fetchSpendForRange(thisWeekRanges!.dayOverDay.since, thisWeekRanges!.dayOverDay.until)
     : { metaForClient: null };
 
   // --- GHL leads + bookings, in parallel across all clients with a token ---
@@ -217,6 +226,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         return {
           id: c.id, leads: null as number | null, bookings: null as number | null,
           comparisonLeads: null as number | null, thisWeekBookings: null as number | null,
+          dayOverDayLeads: null as number | null,
           error: null as string | null,
         };
       }
@@ -258,13 +268,17 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         const bookings = countBookingsInRange(since, until);
         const comparisonLeads = thisWeekRanges ? countQualifyingLeadsInRange(thisWeekRanges.comparison.since, thisWeekRanges.comparison.until) : null;
         const thisWeekBookings = thisWeekRanges ? countBookingsInRange(thisWeekRanges.bookingsWeek.since, thisWeekRanges.bookingsWeek.until) : null;
+        const dayOverDayLeads = thisWeekRanges?.dayOverDay
+          ? countQualifyingLeadsInRange(thisWeekRanges.dayOverDay.since, thisWeekRanges.dayOverDay.until)
+          : null;
 
-        return { id: c.id, leads, bookings, comparisonLeads, thisWeekBookings, error: null };
+        return { id: c.id, leads, bookings, comparisonLeads, thisWeekBookings, dayOverDayLeads, error: null };
       } catch (err) {
         const message = err instanceof GhlError ? err.message : (err instanceof Error ? err.message : 'GHL fetch failed');
         return {
           id: c.id, leads: null as number | null, bookings: null as number | null,
           comparisonLeads: null as number | null, thisWeekBookings: null as number | null,
+          dayOverDayLeads: null as number | null,
           error: message,
         };
       }
@@ -284,6 +298,12 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       comparisonCpl = Math.round((comparisonMeta.spend / ghl.comparisonLeads) * 100) / 100;
     }
 
+    let dayOverDayCpl: number | null = null;
+    if (thisWeekRanges?.dayOverDay && metaForClientDayOverDay && ghl.dayOverDayLeads && ghl.dayOverDayLeads > 0) {
+      const dayOverDayMeta = metaForClientDayOverDay(scopes[i].accountIds, scopes[i].campaignFilter);
+      dayOverDayCpl = Math.round((dayOverDayMeta.spend / ghl.dayOverDayLeads) * 100) / 100;
+    }
+
     return {
       client: c,
       leads: ghl.leads,
@@ -298,6 +318,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       metaError: meta.error,
       comparisonCpl,
       thisWeekBookings: ghl.thisWeekBookings,
+      dayOverDayCpl,
     };
   });
 
@@ -351,7 +372,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   // grouped by it — hidden (not removed: the field/data/inline-edit still
   // exist, just not shown as a column) in that one grouping mode only.
   const showMarketingTypeColumn = groupBy !== 'marketing_type';
-  const thisWeekExtraCols = isThisWeek ? 2 : 0; // CPL Trend + This Week Bookings
+  const thisWeekExtraCols = isThisWeek ? 4 : 0; // This Week Bookings + CPL Trend + Comparison CPL + Campaign Trend
   const colSpan = (showMarketingTypeColumn ? 8 : 7) + selectedMetrics.size + thisWeekExtraCols;
 
   function renderColumnHeaderCells() {
@@ -372,25 +393,29 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         {selectedMetrics.has('ctr') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CTR</th>}
         <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CPL</th>
         {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="vs. prior Friday–Thursday">CPL Trend</th>}
+        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="Full prior Friday–Thursday week">Last Week CPL</th>}
+        {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="This Week's CPL today vs. as of yesterday">Campaign Trend</th>}
         <th className="px-4 py-2.5"></th>
       </>
     );
   }
 
-  // Lower CPL than the comparison period = improvement = green/down. Higher
-  // CPL = worse = red/up. Returns null (render as "—") when there's no
-  // comparison CPL to compare against (e.g. zero leads that period).
-  function renderCplTrend(cpl: number | null, comparisonCpl: number | null) {
-    if (cpl === null || comparisonCpl === null || comparisonCpl === 0) {
+  // Shared up/down/flat rendering for both CPL Trend (vs. full prior week)
+  // and Campaign Trend (vs. yesterday, same rolling window) — lower CPL than
+  // the baseline = improvement = green/down; higher = worse = red/up.
+  // Returns "—" when there's no baseline CPL to compare against (e.g. zero
+  // leads that period).
+  function renderCplTrendArrow(cpl: number | null, baselineCpl: number | null, tooltip: string) {
+    if (cpl === null || baselineCpl === null || baselineCpl === 0) {
       return <span className="text-slate-600">—</span>;
     }
-    const pctChange = ((cpl - comparisonCpl) / comparisonCpl) * 100;
+    const pctChange = ((cpl - baselineCpl) / baselineCpl) * 100;
     const isUp = pctChange > 0.005; // tiny epsilon so ~0% doesn't render as a false trend
     const isDown = pctChange < -0.005;
     const colorClass = isUp ? 'text-red-400' : isDown ? 'text-emerald-400' : 'text-slate-400';
     const arrow = isUp ? '▲' : isDown ? '▼' : '—';
     return (
-      <span className={`inline-flex items-center gap-1 ${colorClass}`} title={`Prior week CPL: $${comparisonCpl.toFixed(2)}`}>
+      <span className={`inline-flex items-center gap-1 ${colorClass}`} title={tooltip}>
         {arrow} {Math.abs(pctChange).toFixed(1)}%
       </span>
     );
@@ -413,6 +438,8 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         {selectedMetrics.has('link_clicks') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.linkClicks.toLocaleString()}</td>}
         {selectedMetrics.has('ctr') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.ctr === null ? '—' : `${sub.ctr.toFixed(2)}%`}</td>}
         <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.cpl === null ? '—' : `$${sub.cpl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</td>
+        {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
+        {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
         {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
         <td className="px-4 py-2"></td>
       </tr>
@@ -505,7 +532,17 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         </td>
         {isThisWeek && (
           <td className="px-4 py-3 text-right font-mono text-sm">
-            {renderCplTrend(r.cpl, r.comparisonCpl)}
+            {renderCplTrendArrow(r.cpl, r.comparisonCpl, r.comparisonCpl === null ? 'No comparison data' : `Prior week CPL: $${r.comparisonCpl.toFixed(2)}`)}
+          </td>
+        )}
+        {isThisWeek && (
+          <td className="px-4 py-3 text-right font-mono text-slate-200">
+            {r.comparisonCpl === null ? <span className="text-slate-600">—</span> : `$${r.comparisonCpl.toFixed(2)}`}
+          </td>
+        )}
+        {isThisWeek && (
+          <td className="px-4 py-3 text-right font-mono text-sm">
+            {renderCplTrendArrow(r.cpl, r.dayOverDayCpl, r.dayOverDayCpl === null ? 'No prior-day data yet this week' : `Yesterday's This Week CPL: $${r.dayOverDayCpl.toFixed(2)}`)}
           </td>
         )}
         <td className="px-4 py-3 text-right">
