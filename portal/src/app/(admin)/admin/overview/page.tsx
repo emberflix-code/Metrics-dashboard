@@ -263,7 +263,14 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       groupsMap.set(key, list);
     }
   }
-  const sortedGroupKeys = Array.from(groupsMap.keys()).sort((a, b) => a.localeCompare(b));
+  // "(none)" (clients with no Marketing Type/Offer set, when grouping by
+  // those) always sorts last — it's the leftover bucket, not a real category,
+  // so it shouldn't interleave alphabetically with actual group names.
+  const sortedGroupKeys = Array.from(groupsMap.keys()).sort((a, b) => {
+    if (a === '(none)') return 1;
+    if (b === '(none)') return -1;
+    return a.localeCompare(b);
+  });
 
   function subtotal(rows: RowResult[]) {
     const spend = Math.round(rows.reduce((s, r) => s + r.spend, 0) * 100) / 100;
@@ -277,7 +284,53 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     return { spend, leads, bookings, impressions, reach, linkClicks, ctr, cpl };
   }
 
-  const colSpan = 8 + selectedMetrics.size;
+  // Marketing Type is redundant as its own column when the table is already
+  // grouped by it — hidden (not removed: the field/data/inline-edit still
+  // exist, just not shown as a column) in that one grouping mode only.
+  const showMarketingTypeColumn = groupBy !== 'marketing_type';
+  const colSpan = (showMarketingTypeColumn ? 8 : 7) + selectedMetrics.size;
+
+  function renderColumnHeaderCells() {
+    return (
+      <>
+        <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">#</th>
+        <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Client</th>
+        <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Active</th>
+        {showMarketingTypeColumn && <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Marketing Type</th>}
+        <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Offer</th>
+        <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Leads</th>
+        <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Bookings</th>
+        <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Meta Spend</th>
+        {selectedMetrics.has('impressions') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Impressions</th>}
+        {selectedMetrics.has('reach') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Reach</th>}
+        {selectedMetrics.has('link_clicks') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Link Clicks</th>}
+        {selectedMetrics.has('ctr') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CTR</th>}
+        <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CPL</th>
+        <th className="px-4 py-2.5"></th>
+      </>
+    );
+  }
+
+  function renderSubtotalRow(key: string, rows: RowResult[], barColor: string) {
+    const sub = subtotal(rows);
+    return (
+      <tr key={`subtotal-${key}`} className="bg-slate-800/40 border-b border-slate-800 font-medium">
+        <td className="px-4 py-2 relative">
+          <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: barColor }} />
+        </td>
+        <td className="px-4 py-2 text-slate-300 text-xs uppercase tracking-wider" colSpan={showMarketingTypeColumn ? 4 : 3}>Subtotal</td>
+        <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.leads.toLocaleString()}</td>
+        <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.bookings.toLocaleString()}</td>
+        <td className="px-4 py-2 text-right font-mono text-slate-200">${sub.spend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+        {selectedMetrics.has('impressions') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.impressions.toLocaleString()}</td>}
+        {selectedMetrics.has('reach') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.reach.toLocaleString()}</td>}
+        {selectedMetrics.has('link_clicks') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.linkClicks.toLocaleString()}</td>}
+        {selectedMetrics.has('ctr') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.ctr === null ? '—' : `${sub.ctr.toFixed(2)}%`}</td>}
+        <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.cpl === null ? '—' : `$${sub.cpl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</td>
+        <td className="px-4 py-2"></td>
+      </tr>
+    );
+  }
 
   function renderRow(r: RowResult, groupKey?: string, barColor?: string) {
     const searchable = [r.client.name, r.client.marketing_type, r.client.offer].join(' ').toLowerCase();
@@ -298,9 +351,11 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         <td className="px-4 py-3">
           <ActiveToggle clientId={r.client.id} current={r.client.active} compact />
         </td>
-        <td className="px-4 py-3 w-32">
-          <InlineTextField clientId={r.client.id} field="marketing_type" value={r.client.marketing_type} placeholder="Add type…" />
-        </td>
+        {showMarketingTypeColumn && (
+          <td className="px-4 py-3 w-32">
+            <InlineTextField clientId={r.client.id} field="marketing_type" value={r.client.marketing_type} placeholder="Add type…" />
+          </td>
+        )}
         <td className="px-4 py-3 w-32">
           <InlineTextField clientId={r.client.id} field="offer" value={r.client.offer} placeholder="Add offer…" />
         </td>
@@ -364,45 +419,40 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   return (
     <div className="min-h-screen bg-slate-950 p-6">
       <div className="max-w-7xl mx-auto">
-        <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
             <h1 className="text-xl font-bold text-white">Agency Overview</h1>
             <p className="text-sm text-slate-400 mt-0.5">
               Active clients — leads &amp; bookings from GoHighLevel, spend from Meta, CPL computed per client.
             </p>
           </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <SearchBox />
+          <a
+            href="/admin"
+            className="text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-600 px-3 py-2 rounded-lg transition-colors"
+          >
+            ← Back to admin
+          </a>
+        </div>
+
+        <div className="flex items-center justify-between flex-wrap gap-3 mb-4 bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-3">
+          <div className="flex items-center gap-3 flex-wrap flex-1 min-w-0">
+            <div className="flex-1 min-w-[200px] max-w-sm">
+              <SearchBox />
+            </div>
+            <div className="w-px self-stretch bg-slate-800 hidden sm:block" />
             <GroupBySelect current={groupBy} />
             <MetricsPicker current={selectedMetrics} />
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
             <OverviewRangeSelect currentPreset={preset} currentSince={since} currentUntil={until} />
-            <a
-              href="/admin"
-              className="text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-600 px-3 py-2 rounded-lg transition-colors"
-            >
-              ← Back to admin
-            </a>
           </div>
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden overflow-x-auto">
           <table className="w-full text-sm" data-overview-table>
             <thead>
-              <tr className="border-b border-slate-800">
-                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">#</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Client</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Active</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Marketing Type</th>
-                <th className="text-left px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Offer</th>
-                <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Leads</th>
-                <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Bookings</th>
-                <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Meta Spend</th>
-                {selectedMetrics.has('impressions') && <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Impressions</th>}
-                {selectedMetrics.has('reach') && <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Reach</th>}
-                {selectedMetrics.has('link_clicks') && <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">Link Clicks</th>}
-                {selectedMetrics.has('ctr') && <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">CTR</th>}
-                <th className="text-right px-4 py-3 text-xs font-semibold text-slate-400 uppercase tracking-wider">CPL</th>
-                <th className="px-4 py-3"></th>
+              <tr className="border-b border-slate-800 bg-slate-800/40">
+                {renderColumnHeaderCells()}
               </tr>
             </thead>
             <tbody>
@@ -415,14 +465,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
                 ? results.map(r => renderRow(r))
                 : sortedGroupKeys.map(key => {
                     const rows = groupsMap.get(key)!;
-                    const sub = subtotal(rows);
                     const { bar, tint } = groupColorFor(key);
-                    const summaryParts = [
-                      `${sub.leads.toLocaleString()} leads`,
-                      `${sub.bookings.toLocaleString()} bookings`,
-                      `$${sub.spend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} spend`,
-                      sub.cpl === null ? null : `$${sub.cpl.toFixed(2)} CPL`,
-                    ].filter(Boolean);
                     return (
                       <GroupSection
                         key={key}
@@ -430,10 +473,13 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
                         count={rows.length}
                         barColor={bar}
                         tintColor={tint}
-                        summaryText={summaryParts.join(' · ')}
                         colSpan={colSpan}
                       >
+                        <tr className="bg-slate-900 border-b border-slate-800">
+                          {renderColumnHeaderCells()}
+                        </tr>
                         {rows.map(r => renderRow(r, key, bar))}
+                        {renderSubtotalRow(key, rows, bar)}
                       </GroupSection>
                     );
                   })}

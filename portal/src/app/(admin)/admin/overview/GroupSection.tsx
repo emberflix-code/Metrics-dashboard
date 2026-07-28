@@ -7,15 +7,16 @@ interface Props {
   count: number;
   barColor: string;
   tintColor: string;
-  summaryText: string;
   children: ReactNode;
   colSpan: number;
 }
 
 // Monday.com-style collapsible group: a colored left accent bar on the
 // header AND every row in the group, a tinted header background, and a
-// chevron that rotates on collapse.
-export default function GroupSection({ groupKey, count, barColor, tintColor, summaryText, children, colSpan }: Props) {
+// chevron that rotates on collapse. Subtotal numbers live in a separate
+// bottom row (rendered by the caller as part of children) so they align
+// under the real data columns instead of floating as header-only text.
+export default function GroupSection({ groupKey, count, barColor, tintColor, children, colSpan }: Props) {
   const [open, setOpen] = useState(true);
 
   return (
@@ -29,7 +30,7 @@ export default function GroupSection({ groupKey, count, barColor, tintColor, sum
         <td colSpan={colSpan} className="p-0">
           <div className="flex items-stretch">
             <div className="w-1.5 shrink-0" style={{ backgroundColor: barColor }} />
-            <div className="flex items-center gap-2 px-3 py-2.5 flex-1">
+            <div className="flex items-center gap-2 px-3 py-2.5">
               <svg
                 className={`w-3.5 h-3.5 text-slate-400 transition-transform shrink-0 ${open ? 'rotate-90' : ''}`}
                 fill="none" stroke="currentColor" viewBox="0 0 24 24"
@@ -43,8 +44,6 @@ export default function GroupSection({ groupKey, count, barColor, tintColor, sum
               >
                 {count}
               </span>
-              <div className="flex-1" />
-              <span className="text-xs text-slate-400 font-mono pr-2">{summaryText}</span>
             </div>
           </div>
         </td>
