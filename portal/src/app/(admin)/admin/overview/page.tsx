@@ -15,6 +15,8 @@ import InlineTextField from './InlineTextField';
 import InlineNumberField from './InlineNumberField';
 import GroupBySelect, { GroupByKey } from './GroupBySelect';
 import SearchBox from './SearchBox';
+import GroupSection from './GroupSection';
+import { groupColorFor } from './groupColors';
 import { resolveDateRange } from './dateRange';
 import { namePrefixGroup } from './grouping';
 
@@ -277,7 +279,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
 
   const colSpan = 8 + selectedMetrics.size;
 
-  function renderRow(r: RowResult, groupKey?: string) {
+  function renderRow(r: RowResult, groupKey?: string, barColor?: string) {
     const searchable = [r.client.name, r.client.marketing_type, r.client.offer].join(' ').toLowerCase();
     return (
       <tr
@@ -286,8 +288,11 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         data-search={searchable}
         data-group={groupKey}
       >
-        <td className="px-4 py-3">
-          <InlineNumberField clientId={r.client.id} field="sort_order" value={r.client.sort_order} />
+        <td className="px-4 py-3 relative">
+          {barColor && <div className="absolute left-0 top-0 bottom-0 w-1.5" style={{ backgroundColor: barColor }} />}
+          <div className={barColor ? 'pl-2' : ''}>
+            <InlineNumberField clientId={r.client.id} field="sort_order" value={r.client.sort_order} />
+          </div>
         </td>
         <td className="px-4 py-3 font-medium text-white">{r.client.name}</td>
         <td className="px-4 py-3">
@@ -408,26 +413,29 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
               )}
               {groupBy === 'none'
                 ? results.map(r => renderRow(r))
-                : sortedGroupKeys.flatMap(key => {
+                : sortedGroupKeys.map(key => {
                     const rows = groupsMap.get(key)!;
                     const sub = subtotal(rows);
-                    return [
-                      <tr key={`group-${key}`} className="bg-slate-800/60 border-b border-slate-800" data-group-header={key}>
-                        <td className="px-4 py-2 font-semibold text-slate-200" colSpan={5}>
-                          {key} <span className="text-slate-500 font-normal">({rows.length})</span>
-                        </td>
-                        <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.leads.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.bookings.toLocaleString()}</td>
-                        <td className="px-4 py-2 text-right font-mono text-slate-300">${sub.spend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                        {selectedMetrics.has('impressions') && <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.impressions.toLocaleString()}</td>}
-                        {selectedMetrics.has('reach') && <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.reach.toLocaleString()}</td>}
-                        {selectedMetrics.has('link_clicks') && <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.linkClicks.toLocaleString()}</td>}
-                        {selectedMetrics.has('ctr') && <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.ctr === null ? '—' : `${sub.ctr.toFixed(2)}%`}</td>}
-                        <td className="px-4 py-2 text-right font-mono text-slate-300">{sub.cpl === null ? '—' : `$${sub.cpl.toFixed(2)}`}</td>
-                        <td className="px-4 py-2"></td>
-                      </tr>,
-                      ...rows.map(r => renderRow(r, key)),
-                    ];
+                    const { bar, tint } = groupColorFor(key);
+                    const summaryParts = [
+                      `${sub.leads.toLocaleString()} leads`,
+                      `${sub.bookings.toLocaleString()} bookings`,
+                      `$${sub.spend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} spend`,
+                      sub.cpl === null ? null : `$${sub.cpl.toFixed(2)} CPL`,
+                    ].filter(Boolean);
+                    return (
+                      <GroupSection
+                        key={key}
+                        groupKey={key}
+                        count={rows.length}
+                        barColor={bar}
+                        tintColor={tint}
+                        summaryText={summaryParts.join(' · ')}
+                        colSpan={colSpan}
+                      >
+                        {rows.map(r => renderRow(r, key, bar))}
+                      </GroupSection>
+                    );
                   })}
             </tbody>
           </table>
