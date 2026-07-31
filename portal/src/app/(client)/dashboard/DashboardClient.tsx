@@ -1713,15 +1713,37 @@ async function fetchMetaCampaigns() {
     // campaign's sheet total (same caveat as the Bookings join below — sheet
     // data has no finer-than-campaign dimension). Rows whose campaign name
     // has no matching sheet row keep Meta's own count rather than zeroing.
+    //
+    // At campaign level, Meta lets two distinct campaigns (different
+    // campaign_id, e.g. one paused + one active) share the exact same name.
+    // The sheet has no campaign_id to join on, only the name, so without
+    // dedup every same-named row would get the *full* sheet total assigned
+    // to it and the table subtotal would multiply it by the number of
+    // duplicates — while the KPI card (summed straight from _sheetLeadsByDay,
+    // which has no campaign dimension at all) still shows the true total
+    // once. Only the first row seen for a given campaign name claims that
+    // name's total; subsequent rows sharing the name get 0 so the subtotal
+    // matches the KPI instead of double-counting.
     if (_leadsSource === 'sheet' && _sheetLeadsRows) {
       const byCampaign: Record<string, number> = {};
       for (const r of _sheetLeadsRows) {
         if (r.day < since || r.day > until) continue;
         byCampaign[r.campaign] = (byCampaign[r.campaign] || 0) + r.leads;
       }
+      const claimedNames = new Set<string>();
       for (const row of allMapped) {
         const matched = row.campaignName ? byCampaign[row.campaignName] : undefined;
-        if (matched != null) row.results = matched;
+        if (matched == null) continue;
+        if (_currentLevel === 'campaign') {
+          if (claimedNames.has(row.campaignName)) {
+            row.results = 0;
+          } else {
+            row.results = matched;
+            claimedNames.add(row.campaignName);
+          }
+        } else {
+          row.results = matched;
+        }
       }
     }
 
