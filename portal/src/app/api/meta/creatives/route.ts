@@ -185,7 +185,9 @@ export async function GET(req: NextRequest) {
     };
 
     // 2) Ads + their creative metadata (one call thanks to field expansion).
-    // Similarly slim: only ACTIVE/PAUSED so we don't drag every historic ad.
+    // Includes ARCHIVED/DELETED too — an account can have only archived
+    // campaigns (e.g. a paused/wound-down account), and insights still
+    // return historic spend for those, so creatives must match them.
     // Any ad that appears in insights but not in this /ads response is fine —
     // it just gets rendered without a thumbnail (still visible in the grid).
     // Ads are matched to insights by ad_id below, and insights are already
@@ -201,7 +203,7 @@ export async function GET(req: NextRequest) {
     // under the cap even when creative{...} expansion adds nested fields.
     adsUrl.searchParams.set('limit', '50');
     const adsFilter: { field: string; operator: string; value: string | string[] }[] = [
-      { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED'] },
+      { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED','ARCHIVED','DELETED'] },
     ];
     if (campaignFilter && !multiKeyword) adsFilter.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     adsUrl.searchParams.set('filtering', JSON.stringify(adsFilter));
