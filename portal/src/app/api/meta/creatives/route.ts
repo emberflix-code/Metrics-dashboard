@@ -220,9 +220,18 @@ export async function GET(req: NextRequest) {
           return [] as AdInsight[];
         })
     );
+    // Same non-fatal treatment as the insights chunks: a rate-limited or
+    // failed /ads call shouldn't kill the whole response — rows still render
+    // via the CASE 5 fallback (no thumbnail) using insights alone, and the
+    // per-ad backfill below gets a chance to fill in what it can.
+    let adsFetchFailed = false;
     const [insightsChunkedRaw, ads] = await Promise.all([
       Promise.all(insightsChunkPromises),
-      fetchAll<AdCreative>(adsUrl, token),
+      fetchAll<AdCreative>(adsUrl, token).catch((e: unknown) => {
+        adsFetchFailed = true;
+        console.log('[CREATIVES-DIAG-ADSERR]', JSON.stringify({ message: e instanceof Error ? e.message : String(e) }));
+        return [] as AdCreative[];
+      }),
     ]);
     const insightsChunked = multiKeyword
       ? insightsChunkedRaw.map(chunk => chunk.filter(row => matchesCampaignFilter(row.campaign_name || '', campaignFilter)))
@@ -272,8 +281,13 @@ export async function GET(req: NextRequest) {
     // multi-run convergence for a huge backlog. On accounts where this cap
     // bites, most rows still render via insights alone (CASE 5 fallback,
     // no thumbnail) rather than the request stalling or tripping code:17.
+    // Skip entirely if the primary /ads call itself failed (e.g. code:17) —
+    // firing more requests at the same throttled account would just compound
+    // the rate limit instead of recovering from it.
     const AD_BACKFILL_LIMIT = 300;
-    const missingAdIds = insights.map(r => r.ad_id).filter(id => id && !creativeByAdId.has(id)).slice(0, AD_BACKFILL_LIMIT);
+    const missingAdIds = adsFetchFailed
+      ? []
+      : insights.map(r => r.ad_id).filter(id => id && !creativeByAdId.has(id)).slice(0, AD_BACKFILL_LIMIT);
     const AD_LOOKUP_CHUNK = 50;
     for (let i = 0; i < missingAdIds.length; i += AD_LOOKUP_CHUNK) {
       const chunk = missingAdIds.slice(i, i + AD_LOOKUP_CHUNK);
