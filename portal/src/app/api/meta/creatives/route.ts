@@ -185,11 +185,15 @@ export async function GET(req: NextRequest) {
     };
 
     // 2) Ads + their creative metadata (one call thanks to field expansion).
-    // Includes ARCHIVED/DELETED too — an account can have only archived
-    // campaigns (e.g. a paused/wound-down account), and insights still
-    // return historic spend for those, so creatives must match them.
-    // Any ad that appears in insights but not in this /ads response is fine —
-    // it just gets rendered without a thumbnail (still visible in the grid).
+    // Only ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED — widening this to
+    // ARCHIVED/DELETED forces Meta to enumerate every historic ad on the
+    // account before filtering, which trips the per-request row cap (code:1)
+    // on high-ad-count accounts (see the insights comment above re: AF
+    // Regional Omega) and, fanned out across "All Accounts", the per-user
+    // rate limit (code:17 "User request limit reached"). Any ad that appears
+    // in insights but not in this /ads response gets backfilled individually
+    // by ID below instead (accounts whose only campaigns are archived, e.g.
+    // a wound-down client, rely entirely on that backfill).
     // Ads are matched to insights by ad_id below, and insights are already
     // filtered by campaign name, so this fetch doesn't need its own name
     // filter even in the multi-keyword case.
@@ -203,7 +207,7 @@ export async function GET(req: NextRequest) {
     // under the cap even when creative{...} expansion adds nested fields.
     adsUrl.searchParams.set('limit', '50');
     const adsFilter: { field: string; operator: string; value: string | string[] }[] = [
-      { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED','ARCHIVED','DELETED'] },
+      { field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED'] },
     ];
     if (campaignFilter && !multiKeyword) adsFilter.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
     adsUrl.searchParams.set('filtering', JSON.stringify(adsFilter));
@@ -254,6 +258,34 @@ export async function GET(req: NextRequest) {
     const creativeByAdId = new Map<string, AdCreative>();
     for (const ad of ads) {
       if (ad.id) creativeByAdId.set(ad.id, ad);
+    }
+
+    // Backfill creative metadata for ads insights found but the status-
+    // filtered /ads fetch above didn't (archived/deleted ads — most of an
+    // account's history, or its entirety for a wound-down client). A plain
+    // ?ids= lookup has no status filter, so these resolve fine; batched at
+    // Meta's 50-ID cap to stay off the per-user rate limit (code:17).
+    // Capped: a live per-request route can't afford metaSync's time-boxed,
+    // multi-run convergence for a huge backlog. On accounts where this cap
+    // bites, most rows still render via insights alone (CASE 5 fallback,
+    // no thumbnail) rather than the request stalling or tripping code:17.
+    const AD_BACKFILL_LIMIT = 300;
+    const missingAdIds = insights.map(r => r.ad_id).filter(id => id && !creativeByAdId.has(id)).slice(0, AD_BACKFILL_LIMIT);
+    const AD_LOOKUP_CHUNK = 50;
+    for (let i = 0; i < missingAdIds.length; i += AD_LOOKUP_CHUNK) {
+      const chunk = missingAdIds.slice(i, i + AD_LOOKUP_CHUNK);
+      try {
+        const u = new URL('https://graph.facebook.com/v22.0/');
+        u.searchParams.set('ids', chunk.join(','));
+        u.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as Record<string, AdCreative | { error?: unknown }>;
+        for (const id of chunk) {
+          const entry = json[id];
+          if (entry && !('error' in entry) && (entry as AdCreative).id) creativeByAdId.set(id, entry as AdCreative);
+        }
+      } catch { /* leave these ads without metadata; still render via CASE 5 fallback */ }
     }
 
     // For each insight row, derive the asset identity (or identities, if a carousel).
