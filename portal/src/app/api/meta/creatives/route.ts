@@ -215,7 +215,10 @@ export async function GET(req: NextRequest) {
     // the rest rather than throwing the whole request away.
     const insightsChunkPromises = chunks.map(c =>
       fetchAll<AdInsight>(buildInsightsUrl(JSON.stringify({ since: c.since, until: c.until })), token)
-        .catch(() => [] as AdInsight[])
+        .catch((e: unknown) => {
+          console.log('[CREATIVES-DIAG-CHUNKERR]', JSON.stringify({ chunk: c, message: e instanceof Error ? e.message : String(e) }));
+          return [] as AdInsight[];
+        })
     );
     const [insightsChunkedRaw, ads] = await Promise.all([
       Promise.all(insightsChunkPromises),
@@ -252,6 +255,7 @@ export async function GET(req: NextRequest) {
       }
     }
     const insights: AdInsight[] = Array.from(insightByAdId.values());
+    console.log('[CREATIVES-DIAG]', JSON.stringify({ accountId, timeRange, chunkCount: chunks.length, chunkSizes: insightsChunked.map(c => c.length), insightsCount: insights.length, adsCount: ads.length, campaignFilter: campaignFilter || null, sampleAdIds: insights.slice(0, 3).map(r => r.ad_id) }));
 
     // Index creative metadata by ad ID.
     const creativeByAdId = new Map<string, AdCreative>();
