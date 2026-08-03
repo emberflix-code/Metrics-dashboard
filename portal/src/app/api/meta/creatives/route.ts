@@ -134,13 +134,11 @@ export async function GET(req: NextRequest) {
     const timeRange = sp.get('time_range') || '{}';
     const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
 
-    // NOTE: we deliberately do NOT pass an ad.effective_status filter to
-    // /insights. Meta's insights endpoint naturally returns only ads with
-    // delivery in the window; adding a 12-status filter forces the API to
-    // enumerate every historic ad on the account first, blowing up the row
-    // count and tripping code:1 "reduce the amount of data" on wide-range +
-    // high-ad-count accounts (e.g. AF Regional Omega). Statuses are attached
-    // later from the /ads fetch which is separately paginated.
+    // Meta's /insights silently drops DELETED + ARCHIVED entities unless
+    // explicitly opted in (same fix already applied in insights/route.ts —
+    // see its comment). Without this, an account whose only campaigns are
+    // archived gets zero ad-level rows here even though account-level KPI
+    // insights (which use the same opt-in) still show spend for the range.
 
     // 1) Insights at ad level — the metrics we need.
     // Wide date ranges on high-ad-count accounts trip Meta's per-request row
@@ -169,6 +167,7 @@ export async function GET(req: NextRequest) {
     // filters are applied locally after fetching instead of sent to Meta.
     const multiKeyword = isMultiKeywordFilter(campaignFilter);
 
+    const INSIGHTS_ALL_STATUSES = ['ACTIVE','PAUSED','DELETED','PENDING_REVIEW','DISAPPROVED','PREAPPROVED','PENDING_BILLING_INFO','CAMPAIGN_PAUSED','ARCHIVED','ADSET_PAUSED','IN_PROCESS','WITH_ISSUES'];
     const buildInsightsUrl = (chunkRange: string) => {
       const u = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
       u.searchParams.set('fields', 'ad_id,ad_name,campaign_name,adset_name,spend,impressions,inline_link_clicks,reach,actions');
@@ -176,11 +175,11 @@ export async function GET(req: NextRequest) {
       u.searchParams.set('time_range', chunkRange);
       u.searchParams.set('limit', '500');
       u.searchParams.set('action_attribution_windows', attribution);
-      if (campaignFilter && !multiKeyword) {
-        u.searchParams.set('filtering', JSON.stringify([
-          { field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter },
-        ]));
-      }
+      const insightsFilter: { field: string; operator: string; value: string | string[] }[] = [
+        { field: 'ad.effective_status', operator: 'IN', value: INSIGHTS_ALL_STATUSES },
+      ];
+      if (campaignFilter && !multiKeyword) insightsFilter.push({ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter });
+      u.searchParams.set('filtering', JSON.stringify(insightsFilter));
       return u;
     };
 
@@ -253,7 +252,6 @@ export async function GET(req: NextRequest) {
       }
     }
     const insights: AdInsight[] = Array.from(insightByAdId.values());
-    console.log('[CREATIVES-DIAG]', JSON.stringify({ accountId, timeRange, chunkCount: chunks.length, insightsCount: insights.length, adsCount: ads.length, campaignFilter: campaignFilter || null }));
 
     // Index creative metadata by ad ID.
     const creativeByAdId = new Map<string, AdCreative>();
