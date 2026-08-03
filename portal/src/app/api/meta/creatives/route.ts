@@ -253,6 +253,7 @@ export async function GET(req: NextRequest) {
       }
     }
     const insights: AdInsight[] = Array.from(insightByAdId.values());
+    console.log('[CREATIVES-DIAG]', JSON.stringify({ accountId, timeRange, chunkCount: chunks.length, insightsCount: insights.length, adsCount: ads.length, campaignFilter: campaignFilter || null }));
 
     // Index creative metadata by ad ID.
     const creativeByAdId = new Map<string, AdCreative>();
