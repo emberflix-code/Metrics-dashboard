@@ -563,7 +563,15 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
-            <h1 className="text-xl font-bold text-white">Agency Overview</h1>
+            <h1 className="text-xl font-bold text-white">
+              Agency Overview
+              <span className="ml-2 font-mono text-[11px] text-slate-600 font-normal" title="Deployed build">
+                v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}
+                {process.env.NEXT_PUBLIC_BUILD_TIME && (
+                  <> · {new Date(process.env.NEXT_PUBLIC_BUILD_TIME).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}</>
+                )}
+              </span>
+            </h1>
             <p className="text-sm text-slate-400 mt-0.5">
               Active clients — leads &amp; bookings from GoHighLevel, spend from Meta, CPL computed per client.
             </p>
