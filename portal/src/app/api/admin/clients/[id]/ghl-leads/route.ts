@@ -64,7 +64,7 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     const bookingTag = BOOKING_TAG.toLowerCase();
     const seen = new Set<string>();
     const leads = result.rows
-      .map(r => ({ ...r, day: dayInTimezone(r.dateAdded, timezone) }))
+      .map(r => ({ ...r, day: dayInTimezone(r.date, timezone) }))
       .filter(r => r.day >= since && r.day <= until && isQualifyingLead(r, client.ghl_leads_tag))
       .filter(r => (seen.has(r.contactId) ? false : (seen.add(r.contactId), true)))
       .map(r => ({

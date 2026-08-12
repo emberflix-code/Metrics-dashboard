@@ -79,7 +79,11 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
 
   const { preset, since, until } = resolveDateRange(searchParams);
   const selectedMetrics = parseMetricsParam(searchParams.metrics);
-  const groupBy: GroupByKey = (['prefix', 'marketing_type', 'offer'].includes(searchParams.group_by || '') ? searchParams.group_by : 'none') as GroupByKey;
+  // Default view: grouped by Marketing Type, This Week's data — the daily
+  // check-in shape most admins land on. Both stay fully overridable via the
+  // URL (group_by=none, preset=30, etc.); this only changes what a bare
+  // /admin/overview (no query params at all) shows.
+  const groupBy: GroupByKey = (['prefix', 'marketing_type', 'offer'].includes(searchParams.group_by || '') ? searchParams.group_by : 'marketing_type') as GroupByKey;
 
   const clients = await query<ClientRow>(`
     SELECT c.id, c.name, u.email, c.ad_account_ids, c.campaign_filter,
@@ -248,7 +252,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           const ids = new Set(
             leadsResult.rows
               .filter(r => {
-                const day = dayInTimezone(r.dateAdded, timezone);
+                const day = dayInTimezone(r.date, timezone);
                 return day >= rangeSince && day <= rangeUntil && isQualifyingLead(r, c.ghl_leads_tag);
               })
               .map(r => r.contactId)

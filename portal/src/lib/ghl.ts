@@ -2,11 +2,13 @@
 //
 // fetchGhlBookings returns one row per (contact, attribution snapshot) for
 // every contact tagged "booked appointment" whose dateUpdated-dateAdded ≤ 30
-// days. fetchGhlLeads (below) returns one row per contact for EVERY contact
-// in the location — used by the Agency Overview so Leads and Bookings are
-// genuinely distinct numbers instead of both reading the tagged-contact set.
-// The raw fetch is unfiltered; callers apply isQualifyingLead() (tag-or-
-// attribution) to decide which rows actually count as leads.
+// days. fetchGhlLeads (below) returns one or two rows per contact for EVERY
+// contact in the location (first-touch always, plus last-touch when a
+// contact re-attributes to a different campaign — same split as bookings) —
+// used by the Agency Overview so Leads and Bookings are genuinely distinct
+// numbers instead of both reading the tagged-contact set. The raw fetch is
+// unfiltered; callers apply isQualifyingLead() (tag-or-attribution) to
+// decide which rows actually count as leads.
 //
 // Per contact, we may emit up to 2 rows:
 //   1. (attributionSource.campaign, dateAdded)       — first-touch
@@ -253,14 +255,28 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
 // the two don't evict each other; same token+locationId key, same 5-min TTL.
 // The cache is unfiltered regardless of which tag a client configures for
 // counting leads — see hasAttribution/tags below, filtered by the caller.
+//
+// Mirrors fetchGhlBookings' first-touch/last-touch split: an old contact who
+// re-engages (re-submits a form, gets re-tagged, etc.) has their GHL
+// `dateUpdated` bumped and `lastAttributionSource.campaign` repointed to
+// whatever campaign brought them back — but their `dateAdded` stays frozen
+// at their original (possibly months-old) creation date. Bucketing leads by
+// dateAdded alone makes that re-engagement invisible to whatever week it
+// actually happened in. So — same as bookings — we emit up to 2 rows per
+// contact: one anchored on dateAdded/first-touch, one on
+// dateUpdated/last-touch (only when the last-touch campaign differs from
+// first-touch). Callers dedupe by contactId within a range, so a contact
+// whose dateAdded AND dateUpdated both land in the same window isn't
+// double-counted — they just match on either row.
 export interface GhlLeadRow {
   campaignId: string;
-  dateAdded: string;  // ISO 8601 UTC
+  date: string;  // ISO 8601 UTC — dateAdded for 'first' rows, dateUpdated for 'last' rows
   contactId: string;
   name: string;
   email: string;
   tags: string[];
   hasAttribution: boolean;
+  attribution: 'first' | 'last';
 }
 
 export interface GhlLeadsFetchResult {
@@ -336,16 +352,40 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
       const tAdded = Date.parse(c.dateAdded);
       if (!Number.isFinite(tAdded)) continue;
 
-      const campaignId = c.attributionSource?.campaign?.trim() || '';
+      const tags = Array.isArray(c.tags) ? c.tags : [];
+      const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
+      const email = c.email?.trim() || '';
+
+      const firstCampaign = c.attributionSource?.campaign?.trim() || '';
       rows.push({
-        campaignId,
-        dateAdded: c.dateAdded,
+        campaignId: firstCampaign,
+        date: c.dateAdded,
         contactId: c.id,
-        name: [c.firstName, c.lastName].filter(Boolean).join(' ').trim(),
-        email: c.email?.trim() || '',
-        tags: Array.isArray(c.tags) ? c.tags : [],
-        hasAttribution: campaignId.length > 0,
+        name,
+        email,
+        tags,
+        hasAttribution: firstCampaign.length > 0,
+        attribution: 'first',
       });
+
+      // Last-touch row — only when it actually differs from first-touch and
+      // dateUpdated parses, same shape as fetchGhlBookings' split. This is
+      // what makes a re-engaged old contact show up as a lead in the week
+      // they came back, not just the week they were originally created.
+      const lastCampaign = c.lastAttributionSource?.campaign?.trim() || '';
+      const tUpdated = c.dateUpdated ? Date.parse(c.dateUpdated) : NaN;
+      if (lastCampaign && lastCampaign !== firstCampaign && c.dateUpdated && Number.isFinite(tUpdated)) {
+        rows.push({
+          campaignId: lastCampaign,
+          date: c.dateUpdated,
+          contactId: c.id,
+          name,
+          email,
+          tags,
+          hasAttribution: true,
+          attribution: 'last',
+        });
+      }
     }
 
     const lastContact = contacts[contacts.length - 1] as GhlContact & { searchAfter?: unknown[] };

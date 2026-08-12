@@ -112,7 +112,10 @@ export function resolveThisWeekRanges(): ThisWeekRanges {
 }
 
 export function resolveDateRange(searchParams: { preset?: string; since?: string; until?: string }): ResolvedRange {
-  const preset = searchParams.preset || '30';
+  // Default view is This Week — matches the default grouping (Marketing
+  // Type) as the daily check-in shape most admins land on. Still fully
+  // overridable via ?preset=.
+  const preset = searchParams.preset || 'this_week';
 
   if (preset === 'custom' && searchParams.since && searchParams.until) {
     return { preset, since: searchParams.since, until: searchParams.until };
