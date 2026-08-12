@@ -3,12 +3,24 @@
 // fetchGhlBookings returns one row per (contact, attribution snapshot) for
 // every contact tagged "booked appointment" whose dateUpdated-dateAdded ≤ 30
 // days. fetchGhlLeads (below) returns one or two rows per contact for EVERY
-// contact in the location (first-touch always, plus last-touch when a
-// contact re-attributes to a different campaign — same split as bookings) —
-// used by the Agency Overview so Leads and Bookings are genuinely distinct
-// numbers instead of both reading the tagged-contact set. The raw fetch is
-// unfiltered; callers apply isQualifyingLead() (tag-or-attribution) to
-// decide which rows actually count as leads.
+// contact in the location — used by the Agency Overview so Leads and
+// Bookings are genuinely distinct numbers instead of both reading the
+// tagged-contact set. The raw fetch is unfiltered; callers apply
+// isQualifyingLead() (tag-or-attribution) to decide which rows actually
+// count as leads.
+//
+// Leads' first/last-touch split needs real event timestamps, not dateAdded/
+// dateUpdated verbatim — dateUpdated is bumped by ANY contact change (a tag,
+// an opportunity, an automated text reply), not specifically by a new ad
+// touch, so using it directly produces false positives (a contact whose
+// dateUpdated moved for an unrelated reason gets counted as a fresh lead in
+// a week they never actually revisited the campaign's page in). Meta's `fbc`
+// cookie value embeds the real click timestamp (`fb.1.<ms>.<fbclid>`) — see
+// fbcClickTime() below — so the last-touch row is dated using that when
+// present. Not every contact has an fbc value (some sessions never set the
+// cookie), so dateUpdated is kept as a fallback for those — accepting some
+// risk of a false positive there in exchange for not silently dropping
+// contacts with a real fbclid but no fbc.
 //
 // Per contact, we may emit up to 2 rows:
 //   1. (attributionSource.campaign, dateAdded)       — first-touch
@@ -77,8 +89,8 @@ interface GhlContact {
   firstName?: string;
   lastName?: string;
   email?: string;
-  attributionSource?: { campaign?: string };
-  lastAttributionSource?: { campaign?: string };
+  attributionSource?: { campaign?: string; fbc?: string };
+  lastAttributionSource?: { campaign?: string; fbc?: string };
 }
 
 interface SearchResponse {
@@ -135,6 +147,24 @@ export function dayInTimezone(isoTimestamp: string, timezone: string): string {
     // Invalid timezone string — fall through.
   }
   return isoTimestamp.slice(0, 10);
+}
+
+// Extracts the real click timestamp embedded in Meta's fbc cookie value,
+// format `fb.<subdomainIndex>.<unixMs>.<fbclid>` (e.g.
+// "fb.1.1784848988673.PAcGRv..."). Returns null when fbc is missing/malformed
+// — the cookie isn't set on every session (privacy settings, non-Meta
+// traffic, etc.), so this is a best-effort signal, not guaranteed present.
+// Used to date a lead's last-touch row by when the contact actually clicked
+// through again, instead of GHL's own dateUpdated (which moves on any
+// contact change, not just a new ad touch).
+export function fbcClickTime(fbc: string | undefined): string | null {
+  if (!fbc) return null;
+  const parts = fbc.split('.');
+  if (parts.length < 3) return null;
+  const ms = Number(parts[2]);
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  const iso = new Date(ms).toISOString();
+  return iso;
 }
 
 export async function fetchGhlBookings(opts: { token: string; locationId?: string }): Promise<GhlFetchResult> {
@@ -256,21 +286,20 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
 // The cache is unfiltered regardless of which tag a client configures for
 // counting leads — see hasAttribution/tags below, filtered by the caller.
 //
-// Mirrors fetchGhlBookings' first-touch/last-touch split: an old contact who
-// re-engages (re-submits a form, gets re-tagged, etc.) has their GHL
-// `dateUpdated` bumped and `lastAttributionSource.campaign` repointed to
-// whatever campaign brought them back — but their `dateAdded` stays frozen
-// at their original (possibly months-old) creation date. Bucketing leads by
-// dateAdded alone makes that re-engagement invisible to whatever week it
-// actually happened in. So — same as bookings — we emit up to 2 rows per
-// contact: one anchored on dateAdded/first-touch, one on
-// dateUpdated/last-touch (only when the last-touch campaign differs from
-// first-touch). Callers dedupe by contactId within a range, so a contact
-// whose dateAdded AND dateUpdated both land in the same window isn't
-// double-counted — they just match on either row.
+// Mirrors fetchGhlBookings' first-touch/last-touch split, but dated more
+// carefully: a contact re-engaging with a (possibly different) campaign
+// should show up as a lead in the week they actually clicked through again,
+// not just the week they were originally created. The last-touch row is
+// dated using fbcClickTime() — Meta's fbc cookie embeds the real click
+// timestamp — when the contact has one; dateUpdated is the fallback for
+// contacts with a real lastAttributionSource.campaign but no fbc value
+// (e.g. their session never set the cookie). dateUpdated alone is NOT a
+// reliable last-touch signal on its own — it moves on any contact change
+// (a tag, an opportunity, an automated text reply), not just a new ad
+// touch — so it's used only as a fallback, not the primary date.
 export interface GhlLeadRow {
   campaignId: string;
-  date: string;  // ISO 8601 UTC — dateAdded for 'first' rows, dateUpdated for 'last' rows
+  date: string;  // ISO 8601 UTC — dateAdded for 'first' rows, best-known touch time for 'last' rows
   contactId: string;
   name: string;
   email: string;
@@ -368,23 +397,28 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
         attribution: 'first',
       });
 
-      // Last-touch row — only when it actually differs from first-touch and
-      // dateUpdated parses, same shape as fetchGhlBookings' split. This is
-      // what makes a re-engaged old contact show up as a lead in the week
-      // they came back, not just the week they were originally created.
+      // Last-touch row — only when the campaign actually differs from
+      // first-touch. Dated by the real click time when Meta's fbc cookie is
+      // present; falls back to dateUpdated (accepting some risk of a false
+      // positive from an unrelated contact update) only when fbc is absent
+      // but a real lastAttributionSource.campaign still exists.
       const lastCampaign = c.lastAttributionSource?.campaign?.trim() || '';
-      const tUpdated = c.dateUpdated ? Date.parse(c.dateUpdated) : NaN;
-      if (lastCampaign && lastCampaign !== firstCampaign && c.dateUpdated && Number.isFinite(tUpdated)) {
-        rows.push({
-          campaignId: lastCampaign,
-          date: c.dateUpdated,
-          contactId: c.id,
-          name,
-          email,
-          tags,
-          hasAttribution: true,
-          attribution: 'last',
-        });
+      if (lastCampaign && lastCampaign !== firstCampaign) {
+        const clickTime = fbcClickTime(c.lastAttributionSource?.fbc);
+        const fallbackTime = c.dateUpdated && Number.isFinite(Date.parse(c.dateUpdated)) ? c.dateUpdated : null;
+        const date = clickTime || fallbackTime;
+        if (date) {
+          rows.push({
+            campaignId: lastCampaign,
+            date,
+            contactId: c.id,
+            name,
+            email,
+            tags,
+            hasAttribution: true,
+            attribution: 'last',
+          });
+        }
       }
     }
 
