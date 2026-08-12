@@ -395,7 +395,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         {selectedMetrics.has('reach') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Reach</th>}
         {selectedMetrics.has('link_clicks') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Link Clicks</th>}
         {selectedMetrics.has('ctr') && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CTR</th>}
-        <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">CPL</th>
+        <th className="text-right px-4 py-2.5 text-xs font-semibold text-blue-300 uppercase tracking-wider bg-blue-500/5">CPL</th>
         {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="This Week's CPL today vs. as of yesterday">Campaign Trend</th>}
         {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="Full prior Friday–Thursday week">Last Week CPL</th>}
         {isThisWeek && <th className="text-right px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider" title="vs. prior Friday–Thursday">LW CPL Trend</th>}
@@ -441,7 +441,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         {selectedMetrics.has('reach') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.reach.toLocaleString()}</td>}
         {selectedMetrics.has('link_clicks') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.linkClicks.toLocaleString()}</td>}
         {selectedMetrics.has('ctr') && <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.ctr === null ? '—' : `${sub.ctr.toFixed(2)}%`}</td>}
-        <td className="px-4 py-2 text-right font-mono text-slate-200">{sub.cpl === null ? '—' : `$${sub.cpl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</td>
+        <td className="px-4 py-2 text-right font-mono font-bold text-blue-300 bg-blue-500/10">{sub.cpl === null ? '—' : `$${sub.cpl.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</td>
         {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
         {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
         {isThisWeek && <td className="px-4 py-2 text-right font-mono text-sm">—</td>}
@@ -531,8 +531,8 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         {selectedMetrics.has('reach') && <td className="px-4 py-3 text-right font-mono text-slate-200">{r.reach.toLocaleString()}</td>}
         {selectedMetrics.has('link_clicks') && <td className="px-4 py-3 text-right font-mono text-slate-200">{r.linkClicks.toLocaleString()}</td>}
         {selectedMetrics.has('ctr') && <td className="px-4 py-3 text-right font-mono text-slate-200">{r.ctr === null ? '—' : `${r.ctr.toFixed(2)}%`}</td>}
-        <td className="px-4 py-3 text-right font-mono text-slate-200">
-          {r.cpl === null ? <span className="text-slate-600">—</span> : `$${r.cpl.toFixed(2)}`}
+        <td className="px-4 py-3 text-right font-mono text-base font-semibold text-blue-300 bg-blue-500/5">
+          {r.cpl === null ? <span className="text-slate-600 font-normal text-sm">—</span> : `$${r.cpl.toFixed(2)}`}
         </td>
         {isThisWeek && (
           <td className="px-4 py-3 text-right font-mono text-sm">
@@ -591,7 +591,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden overflow-x-auto">
-          <table className="w-full text-sm" data-overview-table>
+          <table className="w-full text-sm [&_td]:border-l [&_td]:border-slate-800/60 [&_td:first-child]:border-l-0 [&_th]:border-l [&_th]:border-slate-800/60 [&_th:first-child]:border-l-0" data-overview-table>
             <thead>
               <tr className="border-b border-slate-800 bg-slate-800/40">
                 {renderColumnHeaderCells()}
