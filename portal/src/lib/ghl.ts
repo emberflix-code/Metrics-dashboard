@@ -291,15 +291,17 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
 // should show up as a lead in the week they actually clicked through again,
 // not just the week they were originally created. The last-touch row is
 // dated using fbcClickTime() — Meta's fbc cookie embeds the real click
-// timestamp — when the contact has one; dateUpdated is the fallback for
-// contacts with a real lastAttributionSource.campaign but no fbc value
-// (e.g. their session never set the cookie). dateUpdated alone is NOT a
-// reliable last-touch signal on its own — it moves on any contact change
-// (a tag, an opportunity, an automated text reply), not just a new ad
-// touch — so it's used only as a fallback, not the primary date.
+// timestamp — and ONLY emitted when that timestamp is available. No
+// dateUpdated fallback: dateUpdated moves on ANY contact change (a tag, an
+// opportunity, an automated broadcast reply, a call log) not just a new ad
+// touch, so using it as a last-touch date produces false positives —
+// confirmed against real production contacts whose dateUpdated moved for
+// unrelated reasons weeks after their actual last ad visit. Undercounting a
+// genuine re-engagement (when fbc is missing) is preferable to a false
+// positive.
 export interface GhlLeadRow {
   campaignId: string;
-  date: string;  // ISO 8601 UTC — dateAdded for 'first' rows, best-known touch time for 'last' rows
+  date: string;  // ISO 8601 UTC — dateAdded for 'first' rows, fbc click time for 'last' rows
   contactId: string;
   name: string;
   email: string;
@@ -398,19 +400,22 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
       });
 
       // Last-touch row — only when the campaign actually differs from
-      // first-touch. Dated by the real click time when Meta's fbc cookie is
-      // present; falls back to dateUpdated (accepting some risk of a false
-      // positive from an unrelated contact update) only when fbc is absent
-      // but a real lastAttributionSource.campaign still exists.
+      // first-touch, AND we have a real fbc click timestamp to date it by.
+      // No dateUpdated fallback: two real production cases (a contact whose
+      // dateUpdated moved from an automated broadcast reply, another from a
+      // "no show" call log) both got miscounted as fresh leads in a week
+      // they never actually revisited the campaign's page in, because
+      // dateUpdated moves on ANY contact change, not just a new ad touch.
+      // Without a verifiable fbc timestamp there's no way to know the real
+      // last-touch date, so we simply don't emit the row — undercounting a
+      // genuine re-engagement is preferable to a false positive.
       const lastCampaign = c.lastAttributionSource?.campaign?.trim() || '';
       if (lastCampaign && lastCampaign !== firstCampaign) {
         const clickTime = fbcClickTime(c.lastAttributionSource?.fbc);
-        const fallbackTime = c.dateUpdated && Number.isFinite(Date.parse(c.dateUpdated)) ? c.dateUpdated : null;
-        const date = clickTime || fallbackTime;
-        if (date) {
+        if (clickTime) {
           rows.push({
             campaignId: lastCampaign,
-            date,
+            date: clickTime,
             contactId: c.id,
             name,
             email,
