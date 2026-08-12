@@ -9,23 +9,17 @@
 // isQualifyingLead() (tag-or-attribution) to decide which rows actually
 // count as leads.
 //
-// Leads' first/last-touch split needs real event timestamps, not dateAdded/
-// dateUpdated verbatim — dateUpdated is bumped by ANY contact change (a tag,
-// an opportunity, an automated text reply), not specifically by a new ad
-// touch, so using it directly produces false positives (a contact whose
-// dateUpdated moved for an unrelated reason gets counted as a fresh lead in
-// a week they never actually revisited the campaign's page in). Meta's `fbc`
-// cookie value embeds the real click timestamp (`fb.1.<ms>.<fbclid>`) — see
-// fbcClickTime() below — so the last-touch row is dated using that when
-// present. Not every contact has an fbc value (some sessions never set the
-// cookie), so dateUpdated is kept as a fallback for those — accepting some
-// risk of a false positive there in exchange for not silently dropping
-// contacts with a real fbclid but no fbc.
-//
-// Per contact, we may emit up to 2 rows:
-//   1. (attributionSource.campaign, dateAdded)       — first-touch
-//   2. (lastAttributionSource.campaign, dateUpdated) — last-touch
-//      (only if the campaign differs from first-touch)
+// Leads counting needs real event timestamps to catch re-engagement — an old
+// contact resubmitting a form this week should count as a lead THIS week,
+// not be invisible because their GHL `dateAdded` is months old. dateUpdated
+// is NOT a reliable proxy for "they touched the campaign again": it's bumped
+// by ANY contact change (a tag, an opportunity, an automated text reply), so
+// using it directly produces false positives — confirmed against real
+// production contacts whose dateUpdated moved for unrelated reasons weeks
+// after their actual last ad visit. fetchGhlFormSubmissions() (below) hits
+// GHL's /forms/submissions endpoint instead — real, dated form-submission
+// events, ground truth for exactly this. See fetchGhlLeads' own comment for
+// how the two are combined.
 //
 // Caller (route → dashboard) is responsible for clipping rows to its
 // requested date range. We do not pre-filter so the cache is keyed on token
@@ -149,24 +143,6 @@ export function dayInTimezone(isoTimestamp: string, timezone: string): string {
   return isoTimestamp.slice(0, 10);
 }
 
-// Extracts the real click timestamp embedded in Meta's fbc cookie value,
-// format `fb.<subdomainIndex>.<unixMs>.<fbclid>` (e.g.
-// "fb.1.1784848988673.PAcGRv..."). Returns null when fbc is missing/malformed
-// — the cookie isn't set on every session (privacy settings, non-Meta
-// traffic, etc.), so this is a best-effort signal, not guaranteed present.
-// Used to date a lead's last-touch row by when the contact actually clicked
-// through again, instead of GHL's own dateUpdated (which moves on any
-// contact change, not just a new ad touch).
-export function fbcClickTime(fbc: string | undefined): string | null {
-  if (!fbc) return null;
-  const parts = fbc.split('.');
-  if (parts.length < 3) return null;
-  const ms = Number(parts[2]);
-  if (!Number.isFinite(ms) || ms <= 0) return null;
-  const iso = new Date(ms).toISOString();
-  return iso;
-}
-
 export async function fetchGhlBookings(opts: { token: string; locationId?: string }): Promise<GhlFetchResult> {
   const { token } = opts;
   if (!token) throw new GhlError('NO_TOKEN', 'GHL token is not configured for this client.', 400);
@@ -286,28 +262,21 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
 // The cache is unfiltered regardless of which tag a client configures for
 // counting leads — see hasAttribution/tags below, filtered by the caller.
 //
-// Mirrors fetchGhlBookings' first-touch/last-touch split, but dated more
-// carefully: a contact re-engaging with a (possibly different) campaign
-// should show up as a lead in the week they actually clicked through again,
-// not just the week they were originally created. The last-touch row is
-// dated using fbcClickTime() — Meta's fbc cookie embeds the real click
-// timestamp — and ONLY emitted when that timestamp is available. No
-// dateUpdated fallback: dateUpdated moves on ANY contact change (a tag, an
-// opportunity, an automated broadcast reply, a call log) not just a new ad
-// touch, so using it as a last-touch date produces false positives —
-// confirmed against real production contacts whose dateUpdated moved for
-// unrelated reasons weeks after their actual last ad visit. Undercounting a
-// genuine re-engagement (when fbc is missing) is preferable to a false
-// positive.
+// One row per contact, dated by dateAdded — this alone is the base signal
+// (every client counts on it, including ones with zero GHL form
+// submissions ever, e.g. contacts entered manually or via a non-form
+// channel). Re-engagement (an old contact resubmitting a form this week)
+// is NOT captured here — see fetchGhlFormSubmissions() below, which callers
+// combine with this to catch that case using real dated events instead of
+// guessing from attribution snapshots.
 export interface GhlLeadRow {
   campaignId: string;
-  date: string;  // ISO 8601 UTC — dateAdded for 'first' rows, fbc click time for 'last' rows
+  date: string;  // ISO 8601 UTC — dateAdded
   contactId: string;
   name: string;
   email: string;
   tags: string[];
   hasAttribution: boolean;
-  attribution: 'first' | 'last';
 }
 
 export interface GhlLeadsFetchResult {
@@ -383,48 +352,16 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
       const tAdded = Date.parse(c.dateAdded);
       if (!Number.isFinite(tAdded)) continue;
 
-      const tags = Array.isArray(c.tags) ? c.tags : [];
-      const name = [c.firstName, c.lastName].filter(Boolean).join(' ').trim();
-      const email = c.email?.trim() || '';
-
-      const firstCampaign = c.attributionSource?.campaign?.trim() || '';
+      const campaignId = c.attributionSource?.campaign?.trim() || '';
       rows.push({
-        campaignId: firstCampaign,
+        campaignId,
         date: c.dateAdded,
         contactId: c.id,
-        name,
-        email,
-        tags,
-        hasAttribution: firstCampaign.length > 0,
-        attribution: 'first',
+        name: [c.firstName, c.lastName].filter(Boolean).join(' ').trim(),
+        email: c.email?.trim() || '',
+        tags: Array.isArray(c.tags) ? c.tags : [],
+        hasAttribution: campaignId.length > 0,
       });
-
-      // Last-touch row — only when the campaign actually differs from
-      // first-touch, AND we have a real fbc click timestamp to date it by.
-      // No dateUpdated fallback: two real production cases (a contact whose
-      // dateUpdated moved from an automated broadcast reply, another from a
-      // "no show" call log) both got miscounted as fresh leads in a week
-      // they never actually revisited the campaign's page in, because
-      // dateUpdated moves on ANY contact change, not just a new ad touch.
-      // Without a verifiable fbc timestamp there's no way to know the real
-      // last-touch date, so we simply don't emit the row — undercounting a
-      // genuine re-engagement is preferable to a false positive.
-      const lastCampaign = c.lastAttributionSource?.campaign?.trim() || '';
-      if (lastCampaign && lastCampaign !== firstCampaign) {
-        const clickTime = fbcClickTime(c.lastAttributionSource?.fbc);
-        if (clickTime) {
-          rows.push({
-            campaignId: lastCampaign,
-            date: clickTime,
-            contactId: c.id,
-            name,
-            email,
-            tags,
-            hasAttribution: true,
-            attribution: 'last',
-          });
-        }
-      }
     }
 
     const lastContact = contacts[contacts.length - 1] as GhlContact & { searchAfter?: unknown[] };
@@ -435,6 +372,123 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
 
   const result: GhlLeadsFetchResult = { rows, contactsScanned };
   _leadsCache.set(cacheKey, { expires: Date.now() + TTL_MS, result });
+  return result;
+}
+
+// Real, dated form-submission events — GHL's /forms/submissions endpoint,
+// distinct from /contacts/search. This is what actually catches a contact
+// re-engaging with a (possibly different) campaign: their GHL contact record
+// only ever holds ONE "last touch" snapshot (overwritten on each new visit,
+// no history), and dateUpdated moves on any unrelated contact change — see
+// fetchGhlLeads' comment. A submission event, in contrast, is permanent and
+// precisely dated (createdAt), one row per actual visit, so a contact who
+// resubmits shows up here every time, correctly dated each time.
+//
+// Not every contact has any submissions here — some are entered manually or
+// via a channel this endpoint doesn't cover — so callers combine this with
+// fetchGhlLeads' dateAdded rather than replacing it: dateAdded is the floor
+// every contact has, submissions are additional real touchpoints layered on
+// top wherever they exist.
+export interface GhlFormSubmissionRow {
+  campaignId: string;
+  date: string;  // ISO 8601 UTC — the submission's createdAt
+  contactId: string;
+}
+
+export interface GhlFormSubmissionsFetchResult {
+  rows: GhlFormSubmissionRow[];
+  submissionsScanned: number;
+}
+
+interface GhlFormSubmission {
+  contactId?: string;
+  createdAt?: string;
+  others?: { eventData?: { url_params?: { utm_campaign?: string } } };
+}
+
+interface FormSubmissionsResponse {
+  submissions?: GhlFormSubmission[];
+  meta?: { total?: number; currentPage?: number; nextPage?: number | null };
+}
+
+const SUBMISSIONS_PAGE_LIMIT = 100;
+const MAX_SUBMISSION_PAGES = 50; // 50 × 100 = 5000 submissions — safety cap, matches MAX_PAGES elsewhere
+
+const _submissionsCache = new Map<string, { expires: number; result: GhlFormSubmissionsFetchResult }>();
+
+export async function fetchGhlFormSubmissions(opts: { token: string; locationId?: string }): Promise<GhlFormSubmissionsFetchResult> {
+  const { token } = opts;
+  if (!token) throw new GhlError('NO_TOKEN', 'GHL token is not configured for this client.', 400);
+
+  const locationId = opts.locationId?.trim() || tryExtractLocationId(token);
+  if (!locationId) {
+    throw new GhlError('NO_TOKEN', 'GHL location ID is required. Paste it in the admin form next to the PIT.', 400);
+  }
+
+  const cacheKey = `${hashToken(token)}|${locationId}`;
+  const hit = _submissionsCache.get(cacheKey);
+  if (hit && hit.expires > Date.now()) return hit.result;
+
+  const rows: GhlFormSubmissionRow[] = [];
+  let submissionsScanned = 0;
+  let page = 1;
+
+  while (page <= MAX_SUBMISSION_PAGES) {
+    const url = new URL('https://services.leadconnectorhq.com/forms/submissions');
+    url.searchParams.set('locationId', locationId);
+    url.searchParams.set('page', String(page));
+    url.searchParams.set('limit', String(SUBMISSIONS_PAGE_LIMIT));
+
+    const res = await fetch(url.toString(), {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Version: '2021-07-28',
+        Accept: 'application/json',
+      },
+    });
+
+    if (res.status === 401) {
+      let detail = '';
+      try { detail = (await res.json())?.message || ''; } catch { /* ignore */ }
+      if (/scope/i.test(detail)) {
+        throw new GhlError('INSUFFICIENT_SCOPE', 'GHL token is missing required scope. Regenerate the Private Integration token in GHL Settings → Private Integrations with at least the forms.readonly scope.', 403);
+      }
+      throw new GhlError('INVALID_TOKEN', 'GHL token is invalid or expired.', 401);
+    }
+    if (res.status === 422) {
+      let detail = '';
+      try { detail = (await res.json())?.message || ''; } catch { /* ignore */ }
+      throw new GhlError('UPSTREAM_5XX', `GHL rejected the request: ${detail || '422'}`, 502);
+    }
+    if (res.status === 429) throw new GhlError('RATE_LIMIT', 'GHL API rate limit reached. Please wait a minute and reload.', 429);
+    if (res.status >= 500) throw new GhlError('UPSTREAM_5XX', `GHL API returned ${res.status}.`);
+
+    let json: FormSubmissionsResponse;
+    try { json = await res.json(); } catch { throw new GhlError('UPSTREAM_5XX', 'GHL returned a malformed response.'); }
+
+    const submissions = json.submissions || [];
+    if (submissions.length === 0) break;
+
+    for (const s of submissions) {
+      if (!s.contactId || !s.createdAt) continue;
+      submissionsScanned++;
+
+      const tCreated = Date.parse(s.createdAt);
+      if (!Number.isFinite(tCreated)) continue;
+
+      rows.push({
+        campaignId: s.others?.eventData?.url_params?.utm_campaign?.trim() || '',
+        date: s.createdAt,
+        contactId: s.contactId,
+      });
+    }
+
+    if (!json.meta?.nextPage || submissions.length < SUBMISSIONS_PAGE_LIMIT) break;
+    page = json.meta.nextPage;
+  }
+
+  const result: GhlFormSubmissionsFetchResult = { rows, submissionsScanned };
+  _submissionsCache.set(cacheKey, { expires: Date.now() + TTL_MS, result });
   return result;
 }
 

@@ -4,7 +4,7 @@ import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
 import { getAdminClientMetaScope, matchesCampaignFilter, getAccountTimezone } from '@/lib/meta';
-import { fetchGhlLeads, fetchGhlBookings, dayInTimezone, isQualifyingLead, GhlError } from '@/lib/ghl';
+import { fetchGhlLeads, fetchGhlBookings, fetchGhlFormSubmissions, dayInTimezone, isQualifyingLead, GhlError } from '@/lib/ghl';
 import ActiveToggle from '../clients/[id]/ActiveToggle';
 import OverviewRangeSelect from './OverviewRangeSelect';
 import MetricsPicker from './MetricsPicker';
@@ -236,9 +236,10 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
       }
       try {
         const token = decrypt(c.ghl_token_enc);
-        const [leadsResult, bookingsResult] = await Promise.all([
+        const [leadsResult, bookingsResult, submissionsResult] = await Promise.all([
           fetchGhlLeads({ token, locationId: c.ghl_location_id }),
           fetchGhlBookings({ token, locationId: c.ghl_location_id }),
+          fetchGhlFormSubmissions({ token, locationId: c.ghl_location_id }),
         ]);
 
         let timezone = 'UTC';
@@ -248,15 +249,31 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
           timezone = await getAccountTimezone(accountId, decrypt(metaTokenEnc));
         }
 
+        // Tag-qualification lives on the contact (leadsResult), not on a
+        // submission event — a submission row only tells us WHEN a contact
+        // touched the campaign again, not their current tags. Look those up
+        // by contactId so a re-engaged contact is still checked against the
+        // same ghl_leads_tag rule as a brand-new one.
+        const tagsByContactId = new Map(leadsResult.rows.map(r => [r.contactId, r] as const));
+
         const countQualifyingLeadsInRange = (rangeSince: string, rangeUntil: string): number => {
-          const ids = new Set(
-            leadsResult.rows
-              .filter(r => {
-                const day = dayInTimezone(r.date, timezone);
-                return day >= rangeSince && day <= rangeUntil && isQualifyingLead(r, c.ghl_leads_tag);
-              })
-              .map(r => r.contactId)
-          );
+          const ids = new Set<string>();
+          for (const r of leadsResult.rows) {
+            const day = dayInTimezone(r.date, timezone);
+            if (day >= rangeSince && day <= rangeUntil && isQualifyingLead(r, c.ghl_leads_tag)) {
+              ids.add(r.contactId);
+            }
+          }
+          // Submissions catch re-engagement dateAdded alone would miss: an
+          // old contact resubmitting a form THIS week. Real, dated events —
+          // no attribution-snapshot guessing. Still gated by the same
+          // tag-qualification rule via the contact's current tags.
+          for (const s of submissionsResult.rows) {
+            const contact = tagsByContactId.get(s.contactId);
+            if (!contact || !isQualifyingLead(contact, c.ghl_leads_tag)) continue;
+            const day = dayInTimezone(s.date, timezone);
+            if (day >= rangeSince && day <= rangeUntil) ids.add(s.contactId);
+          }
           return ids.size;
         };
         const countBookingsInRange = (rangeSince: string, rangeUntil: string): number => {

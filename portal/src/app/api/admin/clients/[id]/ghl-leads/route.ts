@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
-import { fetchGhlLeads, dayInTimezone, isQualifyingLead, BOOKING_TAG, GhlError } from '@/lib/ghl';
+import { fetchGhlLeads, fetchGhlFormSubmissions, dayInTimezone, isQualifyingLead, BOOKING_TAG, GhlError } from '@/lib/ghl';
 import { getAdminClientMetaScope, getAccountTimezone } from '@/lib/meta';
 
 interface BmConnectionRow {
@@ -43,7 +43,10 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
 
   try {
     const token = decrypt(client.ghl_token_enc);
-    const result = await fetchGhlLeads({ token, locationId: client.ghl_location_id });
+    const [result, submissionsResult] = await Promise.all([
+      fetchGhlLeads({ token, locationId: client.ghl_location_id }),
+      fetchGhlFormSubmissions({ token, locationId: client.ghl_location_id }),
+    ]);
 
     const bmRows = await query<BmConnectionRow>(`SELECT token_enc, account_ids FROM agency_bm_connections`);
     const agencyAccountIds = Array.from(new Set(bmRows.flatMap(r => r.account_ids || [])));
@@ -62,18 +65,31 @@ export async function GET(req: NextRequest, { params }: { params: { id: string }
     }
 
     const bookingTag = BOOKING_TAG.toLowerCase();
+    const byContactId = new Map(result.rows.map(r => [r.contactId, r] as const));
+
+    // Same dateAdded + form-submission combination the count itself uses
+    // (see the Overview page) — a re-engaged contact whose dateAdded
+    // predates the range still shows up here via their submission date, so
+    // the modal's list always agrees with the number that opened it.
     const seen = new Set<string>();
-    const leads = result.rows
-      .map(r => ({ ...r, day: dayInTimezone(r.date, timezone) }))
-      .filter(r => r.day >= since && r.day <= until && isQualifyingLead(r, client.ghl_leads_tag))
-      .filter(r => (seen.has(r.contactId) ? false : (seen.add(r.contactId), true)))
-      .map(r => ({
-        name: r.name || '(no name)',
-        email: r.email,
-        day: r.day,
-        booked: r.tags.some(t => t.toLowerCase() === bookingTag),
-      }))
-      .sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
+    const leads: { name: string; email: string; day: string; booked: boolean }[] = [];
+    for (const r of result.rows) {
+      const day = dayInTimezone(r.date, timezone);
+      if (day < since || day > until || !isQualifyingLead(r, client.ghl_leads_tag)) continue;
+      if (seen.has(r.contactId)) continue;
+      seen.add(r.contactId);
+      leads.push({ name: r.name || '(no name)', email: r.email, day, booked: r.tags.some(t => t.toLowerCase() === bookingTag) });
+    }
+    for (const s of submissionsResult.rows) {
+      if (seen.has(s.contactId)) continue;
+      const contact = byContactId.get(s.contactId);
+      if (!contact || !isQualifyingLead(contact, client.ghl_leads_tag)) continue;
+      const day = dayInTimezone(s.date, timezone);
+      if (day < since || day > until) continue;
+      seen.add(s.contactId);
+      leads.push({ name: contact.name || '(no name)', email: contact.email, day, booked: contact.tags.some(t => t.toLowerCase() === bookingTag) });
+    }
+    leads.sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
 
     return NextResponse.json({ leads });
   } catch (err) {
