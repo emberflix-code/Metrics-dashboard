@@ -1582,15 +1582,19 @@ export async function syncAccountRange(
 ): Promise<{ daysSynced: number; error: string | null }> {
   const claimed = await claimSync(accountId);
   if (!claimed) return { daysSynced: 0, error: 'Sync already in progress' };
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:start', since, until, types }));
   try {
     const token = await tokenForAccountId(accountId);
     let daysSynced = 0;
     if (types.insights) {
       const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
       const campaignIds = await campaignIdsForAccount(accountId);
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:campaignIds', count: campaignIds.length }));
       for (const chunk of chunkRange(since, until, CHUNK_DAYS)) {
         for (const level of levels) {
+          console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:chunk:start', level, chunk }));
           const { written } = await syncInsightsChunk(accountId, token, level, chunk.since, chunk.until, campaignIds);
+          console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:chunk:done', level, chunk, written }));
           if (level === 'campaign') daysSynced += written > 0 ? daysBetween(chunk.since, chunk.until) + 1 : 0;
         }
       }
@@ -1598,9 +1602,12 @@ export async function syncAccountRange(
     if (types.creatives) {
       const yesterday = await yesterdayForAccount(accountId, token);
       const floorDate = floorDateFrom(yesterday);
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:creatives:start' }));
       await syncCreatives(accountId, token, floorDate, yesterday, CREATIVES_ONLY_BUDGET_MS, { since, until });
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:creatives:done' }));
     }
     await finishSync(accountId, { success: true });
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:finished', daysSynced }));
     return { daysSynced, error: null };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : 'Range sync failed';
