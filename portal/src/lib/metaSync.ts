@@ -344,13 +344,20 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
     { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name}' },
     { level: 'ad', path: 'ads', fields: 'id,name,effective_status,campaign{id,name},adset{id,name}' },
   ];
+  // TEMP-DIAG: checkpoint logging to pinpoint an intermittent stall on
+  // large accounts (Omega: ~8k campaigns) — status stays "running" for
+  // 20-45+ min with no DB writes and no error, even with the fetch and DB
+  // timeouts in place. Remove once the stall's location is confirmed.
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:start' }));
   for (const lvl of levels) {
     const u = new URL(`${GRAPH}/act_${accountId}/${lvl.path}`);
     u.searchParams.set('fields', lvl.fields);
     u.searchParams.set('limit', '500');
     u.searchParams.set('filtering', JSON.stringify([{ field: 'effective_status', operator: 'IN', value: ALL_STATUSES }]));
     u.searchParams.set('access_token', token);
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:fetch:start', level: lvl.level }));
     const rows = await fetchMetaWithRetry<EntityRow>(u, true, deadline);
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:fetch:done', level: lvl.level, rows: rows.length }));
     const valid = rows.filter(r => !!r.id);
 
     // Batched upsert via unnest() — one round-trip per DB_BATCH_SIZE rows
@@ -358,7 +365,9 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
     // entities) row-by-row upserts generate enough Postgres log/checkpoint
     // activity to trip Railway's per-second log-rate cap; batching collapses
     // that by 2-3 orders of magnitude.
+    let batchNum = 0;
     for (const batch of chunkArrayGeneric(valid, DB_BATCH_SIZE)) {
+      batchNum++;
       const entityIds = batch.map(r => r.id);
       const names = batch.map(r => r.name || '');
       const campaignIds = batch.map(r => lvl.level === 'campaign' ? r.id : (r.campaign?.id || null));
@@ -367,6 +376,7 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
       const adsetNames = batch.map(r => lvl.level === 'ad' ? (r.adset?.name || null) : (lvl.level === 'adset' ? (r.name || '') : null));
       const statuses = batch.map(r => r.effective_status || 'UNKNOWN');
 
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:start', level: lvl.level, batchNum, batchSize: batch.length }));
       await query(
         `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, updated_at)
          SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, now()
@@ -378,9 +388,11 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
            effective_status = EXCLUDED.effective_status, updated_at = now()`,
         [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses]
       );
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:done', level: lvl.level, batchNum }));
       upserted += batch.length;
     }
   }
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:done', upserted }));
   return upserted;
 }
 
@@ -1368,7 +1380,9 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
   let firstError: string | null = null;
 
   try {
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:token:start' }));
     const token = await tokenForAccountId(accountId);
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:token:done' }));
 
     // Each step runs independently — a huge account (Omega: ~58k entities,
     // ~8k campaigns) can exhaust its rate-limit budget partway through
@@ -1387,6 +1401,7 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'entities', error: firstError }));
     }
 
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:insights:start' }));
     try {
       const result = await syncInsights(accountId, token);
       daysSynced = result.daysSynced;
@@ -1395,6 +1410,7 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
       firstError = firstError ?? (err instanceof Error ? err.message : 'Insights sync failed');
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'insights', error: firstError }));
     }
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:insights:done', daysSynced }));
 
     try {
       const yesterday = await yesterdayForAccount(accountId, token);
@@ -1403,13 +1419,16 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
       // Meta rejects with "(#3018) start date ... cannot be beyond 37 months",
       // the same boundary floorDateFrom() already pads a day inside of.
       const floorDate = floorDateFrom(yesterday);
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:creatives:start' }));
       await syncCreatives(accountId, token, floorDate, yesterday);
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:creatives:done' }));
     } catch (err: unknown) {
       firstError = firstError ?? (err instanceof Error ? err.message : 'Creatives sync failed');
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'creatives', error: firstError }));
     }
 
     await finishSync(accountId, { success: !firstError, error: firstError ?? undefined });
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:finished', error: firstError }));
     return { accountId, entitiesUpserted, daysSynced, newEarliestDate, error: firstError };
   } catch (err: unknown) {
     // Only token resolution reaches here now — the three sync steps above
