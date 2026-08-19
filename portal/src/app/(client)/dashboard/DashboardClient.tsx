@@ -254,6 +254,12 @@ let _dpLY = 0;
 let _dpLM = 0;
 let _dpActivePreset = 'last_30d';
 let _dpRecentlyUsed: string[] = [];
+// Omega-family clients (Omega - California/Florida/Midwest, AF Regional
+// Omega, etc. — anything with "Omega" in the client name) only ever want
+// this year's data: "Maximum" is clamped to Jan 1 of the current year
+// instead of the usual 37-month lookback. Set once per mount from
+// clientName in the DashboardClient component below.
+let _dpCapMaximumToThisYear = false;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 function _dpFmt(d: Date) {
@@ -280,7 +286,13 @@ function _dpPresetRange(key: string): { since: string; until: string } | null {
     case 'last_week': { const sw=sow(t); sw.setDate(sw.getDate()-7); const ew=new Date(sw); ew.setDate(ew.getDate()+6); return {since:_dpFmt(sw),until:_dpFmt(ew)}; }
     case 'this_month': { const s=new Date(t.getFullYear(),t.getMonth(),1); const u=tEnd<s?s:tEnd; return {since:_dpFmt(s),until:_dpFmt(u)}; }
     case 'last_month': { const s=new Date(t.getFullYear(),t.getMonth()-1,1); const e=new Date(t.getFullYear(),t.getMonth(),0); return {since:_dpFmt(s),until:_dpFmt(e)}; }
-    case 'maximum': { const s=new Date(t); s.setMonth(s.getMonth()-37); return {since:_dpFmt(s),until:_dpFmt(tEnd)}; }
+    // Clamp to start-of-range on Jan 1 (tEnd = Dec 31 prior year would
+    // otherwise invert since/until), same pattern as this_week/this_month.
+    case 'maximum': {
+      const s = _dpCapMaximumToThisYear ? new Date(t.getFullYear(), 0, 1) : (() => { const d=new Date(t); d.setMonth(d.getMonth()-37); return d; })();
+      const u = tEnd<s?s:tEnd;
+      return {since:_dpFmt(s),until:_dpFmt(u)};
+    }
     default: return null;
   }
 }
@@ -2267,6 +2279,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _ltvValue = ltvValue;
   _dataSourceByAccount = dataSourceByAccount;
   _isAdminView = isAdminView;
+  _dpCapMaximumToThisYear = /omega/i.test(clientName);
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
