@@ -415,11 +415,32 @@ interface InsightRow {
 // campaign directly targets the thing driving the row count, unlike
 // splitting by date (which doesn't help when the cap is really "too many
 // entities per request", not "too many days").
-async function campaignIdsForAccount(accountId: string): Promise<string[]> {
-  const rows = await query<{ entity_id: string }>(
-    `SELECT entity_id FROM meta_entities WHERE account_id = $1 AND level = 'campaign'`,
-    [accountId]
-  );
+//
+// ARCHIVED-campaign filtering: an account that's been running for years
+// accumulates ARCHIVED campaigns that vastly outnumber the ones still worth
+// querying (Omega: 7,622 ARCHIVED vs. 149 ACTIVE + 228 PAUSED out of 7,999
+// total) — every one of those still gets batched into CAMPAIGN_BATCH_SIZE
+// groups and queried on every single sync, which is what made even a
+// 16-day range sync take 400+ sequential campaign-batches per chunk.
+// meta_entities has no campaign start/end date to filter by relevance
+// precisely, so this uses the requested range's year as a coarse proxy:
+// a range entirely BEFORE the current year skips ARCHIVED campaigns
+// (their historical data, if any, was already captured by an earlier
+// sync covering that period) — a range touching the current year (or
+// later) still includes everyone, since an archived campaign can easily
+// have real spend from earlier this year that hasn't synced yet.
+async function campaignIdsForAccount(accountId: string, range?: { since: string; until: string }): Promise<string[]> {
+  const currentYear = new Date().getFullYear();
+  const rangeIsPastYearsOnly = range ? new Date(range.until + 'T00:00:00').getFullYear() < currentYear : false;
+  const rows = rangeIsPastYearsOnly
+    ? await query<{ entity_id: string }>(
+        `SELECT entity_id FROM meta_entities WHERE account_id = $1 AND level = 'campaign' AND effective_status != 'ARCHIVED'`,
+        [accountId]
+      )
+    : await query<{ entity_id: string }>(
+        `SELECT entity_id FROM meta_entities WHERE account_id = $1 AND level = 'campaign'`,
+        [accountId]
+      );
   return rows.map(r => r.entity_id);
 }
 
@@ -741,7 +762,6 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
   const yesterday = await yesterdayForAccount(accountId, token);
   const floorDate = floorDateFrom(yesterday);
   const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
-  const campaignIds = await campaignIdsForAccount(accountId);
 
   let daysSynced = 0;
   let newEarliest = state?.earliest_synced || null;
@@ -770,7 +790,8 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
 
     if (topUp) {
       topUpDone = true;
-      await runRangeToCompletion(accountId, token, topUp, levels, campaignIds, n => { daysSynced += n; });
+      const topUpCampaignIds = await campaignIdsForAccount(accountId, topUp);
+      await runRangeToCompletion(accountId, token, topUp, levels, topUpCampaignIds, n => { daysSynced += n; });
     }
     if (!backfill) continue; // nothing left to backfill this run
     // Stop backfilling (after top-up, which always gets to run first) once
@@ -783,7 +804,8 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
     // only between whole months isn't fine-grained enough to actually
     // bound one that's already running long.
     if (Date.now() > deadline) break;
-    const result = await runRangeToCompletion(accountId, token, backfill, levels, campaignIds, n => { daysSynced += n; }, deadline);
+    const backfillCampaignIds = await campaignIdsForAccount(accountId, backfill);
+    const result = await runRangeToCompletion(accountId, token, backfill, levels, backfillCampaignIds, n => { daysSynced += n; }, deadline);
     if (result.persisted) newEarliest = result.persisted;
 
     // A month only counts as backfilled (newest_synced advances past it) if
@@ -1588,7 +1610,7 @@ export async function syncAccountRange(
     let daysSynced = 0;
     if (types.insights) {
       const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
-      const campaignIds = await campaignIdsForAccount(accountId);
+      const campaignIds = await campaignIdsForAccount(accountId, { since, until });
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:campaignIds', count: campaignIds.length }));
       for (const chunk of chunkRange(since, until, CHUNK_DAYS)) {
         for (const level of levels) {
