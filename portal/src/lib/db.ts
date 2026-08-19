@@ -10,6 +10,16 @@ function createPool() {
   return new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+    // Without these, a stuck/blocked query (or a connection Railway's proxy
+    // accepted but never really opened) can hang a request forever with no
+    // error and no CPU/memory activity — seen in prod: a Meta sync run sat
+    // at "running" for 45+ minutes with completely flat memory/CPU, which
+    // rules out active-but-slow work and points at exactly this kind of
+    // unbounded await. A hung query now fails after query_timeout instead of
+    // blocking whatever called it indefinitely.
+    connectionTimeoutMillis: 10_000, // fail fast if a pool connection can't be acquired/opened
+    statement_timeout: 60_000,       // server-side: abort any single query running longer than this
+    query_timeout: 65_000,           // client-side backstop, slightly above statement_timeout
   });
 }
 
