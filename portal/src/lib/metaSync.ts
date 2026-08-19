@@ -935,9 +935,19 @@ async function syncCreatives(
   explicitRange?: { since: string; until: string }
 ): Promise<void> {
   // 1) Ads + their creative metadata — derive asset identity per ad.
+  // limit=50 (already 10x smaller than the plain insights calls' limit=500,
+  // since object_story_spec is a large nested object per row) still trips
+  // Meta's per-page data-size cap on huge accounts (Omega: 25k+ ads) —
+  // confirmed in prod via repeated code 1 "reduce the amount of data"
+  // errors mid-pagination, which fetchMetaWithRetry treats as transient and
+  // eventually gives up on (keeping only what it already had) — so those
+  // ads silently never get creative metadata, showing as "NO PREVIEW" in
+  // the dashboard even though their spend/leads did sync correctly via the
+  // separate breakdown fetch. Halved again to reduce how often a single
+  // page trips the cap.
   const adsUrl = new URL(`${GRAPH}/act_${accountId}/ads`);
   adsUrl.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
-  adsUrl.searchParams.set('limit', '50');
+  adsUrl.searchParams.set('limit', '25');
   adsUrl.searchParams.set('filtering', JSON.stringify([{ field: 'effective_status', operator: 'IN', value: ['ACTIVE','PAUSED','CAMPAIGN_PAUSED','ADSET_PAUSED'] }]));
   adsUrl.searchParams.set('access_token', token);
   const ads = await fetchMetaWithRetry<AdCreativeResp>(adsUrl);
