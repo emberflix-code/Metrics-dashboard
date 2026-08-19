@@ -95,6 +95,17 @@ class RowCapError extends Error {
 // bit and try again," and the live dashboard's humanizeMetaError() already
 // documents code 17 as "recoverable, retryable" — this sync module can
 // afford to actually wait instead of surfacing it to a user immediately.
+// Per-attempt cap on a single fetch() call. Meta normally responds in
+// seconds even for huge accounts (the multi-minute cost on Omega-sized
+// accounts comes from PAGE COUNT, not any one page hanging) — this exists
+// to catch a connection that never resolves at all (seen in prod: a sync
+// run sat at "running" for 20+ minutes with zero progress, zero logged
+// error, because the bare fetch() below has no timeout and Meta
+// occasionally accepts a connection without ever completing the response).
+// A hung request now aborts and falls into the same networkErr retry path
+// as any other transient failure, instead of blocking the sync forever.
+const FETCH_TIMEOUT_MS = 30_000;
+
 async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true, deadline?: number): Promise<T[]> {
   const out: T[] = [];
   let next: string | null = url.toString();
@@ -113,17 +124,23 @@ async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true, dea
     const MAX_ATTEMPTS = 6;
     for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
       networkErr = undefined;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
       try {
-        const res = await fetch(next);
+        const res = await fetch(next, { signal: controller.signal });
         json = await res.json();
       } catch (e) {
-        // Network failure or a non-JSON/truncated body (e.g. a dropped
-        // connection on a very large response) — not a Meta-shaped error, so
-        // it wouldn't otherwise hit the retry logic below. Treat as transient.
+        // Network failure, timeout abort, or a non-JSON/truncated body (e.g.
+        // a dropped connection on a very large response) — not a Meta-shaped
+        // error, so it wouldn't otherwise hit the retry logic below. Treat
+        // as transient (a timeout here is presumptively a hung connection,
+        // not a slow-but-alive one — see FETCH_TIMEOUT_MS above).
         networkErr = e;
         json = undefined;
         if (attempt < MAX_ATTEMPTS - 1) { await new Promise(r => setTimeout(r, 800 * (attempt + 1))); continue; }
         break;
+      } finally {
+        clearTimeout(timer);
       }
       const err = json?.error;
       if (!err) break;
@@ -183,9 +200,18 @@ async function yesterdayForAccount(accountId: string, token: string): Promise<st
     const u = new URL(`${GRAPH}/act_${accountId}`);
     u.searchParams.set('fields', 'timezone_name');
     u.searchParams.set('access_token', token);
-    const res = await fetch(u.toString());
-    const json = await res.json() as { timezone_name?: string };
-    if (json.timezone_name) timezone = json.timezone_name;
+    // This runs first, ahead of everything else in a sync — a hang here
+    // (not just a rejection) would block the whole run before it starts.
+    // Same FETCH_TIMEOUT_MS guard as fetchMetaWithRetry.
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    try {
+      const res = await fetch(u.toString(), { signal: controller.signal });
+      const json = await res.json() as { timezone_name?: string };
+      if (json.timezone_name) timezone = json.timezone_name;
+    } finally {
+      clearTimeout(timer);
+    }
   } catch { /* fall back to UTC */ }
   const parts = new Intl.DateTimeFormat('en-US', { timeZone: timezone, year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
   const y = Number(parts.find(p => p.type === 'year')?.value);
