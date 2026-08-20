@@ -36,6 +36,9 @@ export async function GET(req: NextRequest) {
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
     if (!accountId) return NextResponse.json({ error: { message: 'Missing account_id' } }, { status: 400 });
     if (!accountIds.includes(accountId)) return NextResponse.json({ error: { message: 'Account not authorized' } }, { status: 403 });
+    // See asset-breakdown/route.ts's identical param — Creatives v3 opts
+    // into byte-backed thumbnails; v2's existing calls (no param) unaffected.
+    const thumbnailMode = sp.get('thumbnailMode') === 'bytes' ? 'bytes' : 'url';
 
     let since = '', until = '';
     try {
@@ -86,8 +89,10 @@ export async function GET(req: NextRequest) {
     const assetKeys = Array.from(new Set(mapRows.map(r => r.asset_key)));
     if (assetKeys.length === 0) return NextResponse.json({ data: [] });
 
-    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null }>(
-      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; has_bytes: boolean }>(
+      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash,
+              (thumbnail_bytes IS NOT NULL) AS has_bytes
+       FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
       [accountId, assetKeys]
     );
     const assetByKey = new Map(assetRows.map(a => [a.asset_key, a] as const));
@@ -113,10 +118,15 @@ export async function GET(req: NextRequest) {
         // whichever original asset_key this loop iteration happened to hit
         // first — deterministic regardless of mapRows ordering.
         const canonicalAsset = assetByKey.get(canonicalKey) || asset;
+        const thumbnail = thumbnailMode === 'bytes'
+          ? (canonicalAsset.has_bytes
+              ? `/api/meta/db/asset-thumbnail/${encodeURIComponent(accountId)}/${encodeURIComponent(canonicalKey)}`
+              : null)
+          : canonicalAsset.thumbnail;
         row = {
           assetKey: canonicalKey,
           type: (canonicalAsset.type as CreativeRow['type']) || 'unknown',
-          thumbnail: canonicalAsset.thumbnail,
+          thumbnail,
           videoSource: canonicalAsset.video_source,
           videoId: canonicalAsset.video_id,
           body: canonicalAsset.body,

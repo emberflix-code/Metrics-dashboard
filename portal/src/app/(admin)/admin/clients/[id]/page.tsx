@@ -6,6 +6,7 @@ import CampaignFilterForm from './CampaignFilterForm';
 import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
 import ShowCreativeCampaignBreakdownToggle from './ShowCreativeCampaignBreakdownToggle';
+import ShowCreativesV3Toggle from './ShowCreativesV3Toggle';
 import HideAdsetAdTabsToggle from './HideAdsetAdTabsToggle';
 import ActiveToggle from './ActiveToggle';
 import SheetConfigForm from './SheetConfigForm';
@@ -50,6 +51,7 @@ interface ClientDetail {
   show_ltv: boolean;
   active: boolean;
   show_creative_campaign_breakdown: boolean;
+  show_creatives_v3: boolean;
   hide_adset_ad_tabs: boolean;
   meta_kpi_sheet_id: string;
   meta_kpi_sheet_tab: string;
@@ -96,7 +98,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id, c.ghl_leads_tag,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
-           c.ltv_value, c.show_ltv, c.active, c.show_creative_campaign_breakdown, c.hide_adset_ad_tabs,
+           c.ltv_value, c.show_ltv, c.active, c.show_creative_campaign_breakdown, c.show_creatives_v3, c.hide_adset_ad_tabs,
            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
@@ -284,6 +286,9 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             <ShowAccountToggle clientId={client.id} current={client.show_account ?? false} />
             <div className="pt-4">
               <ShowCreativeCampaignBreakdownToggle clientId={client.id} current={client.show_creative_campaign_breakdown ?? false} />
+            </div>
+            <div className="pt-4">
+              <ShowCreativesV3Toggle clientId={client.id} current={client.show_creatives_v3 ?? false} />
             </div>
             <div className="pt-4">
               <HideAdsetAdTabsToggle clientId={client.id} current={client.hide_adset_ad_tabs ?? false} />

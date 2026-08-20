@@ -43,6 +43,17 @@ interface Props {
   // each asset showing its full campaign-by-campaign breakdown inline.
   // Admin-togglable per client — see ShowCreativeCampaignBreakdownToggle.
   showCreativeCampaignBreakdown?: boolean;
+  // Off by default. Same card grid as Creatives v2, but thumbnails are
+  // served from meta_creative_assets.thumbnail_bytes (a byte-serving route)
+  // instead of a Meta-sourced URL that can expire/403 — see
+  // /api/meta/db/asset-thumbnail/[accountId]/[assetKey]. A SEPARATE flag
+  // from v2 (not a variant of it) so production clients on v2 are
+  // completely unaffected while the byte backfill for existing rows
+  // catches up over several sync runs. Admin-togglable per client — see
+  // ShowCreativesV3Toggle. Only ever rendered when every one of this
+  // client's accounts is on cached mode (see _showCreativesV3Tab below) —
+  // bytes only ever exist on the cached sync path, never the live one.
+  showCreativesV3?: boolean;
   // Off by default. When true, only the Campaigns level tab is shown —
   // Adset Sets and Ads are hidden. Independent of showCreativeCampaignBreakdown.
   // Admin-togglable per client — see HideAdsetAdTabsToggle.
@@ -119,6 +130,12 @@ let _leadsSource: 'meta' | 'sheet' | 'ghl' = 'meta';
 let _showBookings = false;
 let _showBookRate = false;
 let _showCreativeCampaignBreakdown = false;
+// Derived, not a raw prop: v3's byte-backed thumbnails only exist on the
+// cached sync path, so the tab is only ever shown when EVERY one of this
+// client's accounts is on cached mode, even if the admin toggle is on —
+// avoids a confusing empty/broken tab for a live-mode client. Set once in
+// DashboardClient() alongside the other prop-derived module vars.
+let _showCreativesV3Tab = false;
 let _hideAdsetAdTabs = true;
 // True only when an admin is viewing via impersonation — gates internal
 // diagnostic banners real clients shouldn't see (see Props.isAdminView).
@@ -250,6 +267,19 @@ let _creativesV2Sort: 'spend' | 'results' | 'cpl' | 'ctr' = 'cpl';
 // Mirrors _dcoOnlyWithResults from the original Creatives tab — on by
 // default, hides assets with zero leads for the current date range.
 let _creativesV2OnlyWithResults = true;
+// Creatives v3 — same shape as the v2 vars above, kept fully separate
+// rather than shared so switching sort/type/filter on one tab never
+// affects the other's last-used state.
+let _creativesV3Type: 'video' | 'image' = 'image';
+let _creativesV3Sort: 'spend' | 'results' | 'cpl' | 'ctr' = 'cpl';
+let _creativesV3OnlyWithResults = true;
+// v3-only fetch state — separate from _dcoAssets/_staticAssets (v1/v2's
+// data) since v3's fetches always force thumbnailMode=bytes regardless of
+// this client's data_source, even when v1/v2 are on live mode elsewhere.
+let _dcoAssetsV3: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsTotal: number; adsWithSpec: number; reason?: string } | null = null;
+let _staticAssetsV3: CreativeRow[] | null = null;
+let _dcoLoadingV3 = false;
+let _staticLoadingV3 = false;
 // Client-side visual-duplicate hash cache for Creatives v2 only (v1 keeps
 // its existing server-side phash, which only covers DCO assets — see
 // clusterByPerceptualHash in lib/phash.ts). Static (non-DCO) image cards
@@ -1413,6 +1443,28 @@ function _ensureCreativesV2Phashes(images: AssetBreakdownRow[]) {
   });
 }
 
+let _creativesV3PhashInFlight = false;
+// v3 equivalent of _ensureCreativesV2Phashes — same client-side dHash
+// dedup, but keyed against the same shared _creativesV2PhashCache (safe:
+// the cache key is the thumbnail URL itself, and v3's byte-route URLs
+// never collide with v2's Meta URLs) with its own in-flight flag and its
+// own render call, so v2 and v3 never block or re-render each other.
+function _ensureCreativesV3Phashes(images: AssetBreakdownRow[]) {
+  if (_creativesV3PhashInFlight) return;
+  const missing = images.filter(r => r.thumbnail && !_creativesV2PhashCache.has(r.thumbnail));
+  if (missing.length === 0) return;
+  _creativesV3PhashInFlight = true;
+  const BATCH = 60;
+  const batch = missing.slice(0, BATCH);
+  Promise.all(batch.map(async r => {
+    const hash = await _computeClientPhash(r.thumbnail!);
+    _creativesV2PhashCache.set(r.thumbnail!, hash);
+  })).then(() => {
+    _creativesV3PhashInFlight = false;
+    renderCreativesV3();
+  });
+}
+
 // ── Creatives v2 — video/image split, campaign breakdown built into each card ─
 // Reuses the same _dcoAssets/_staticAssets data the existing Creatives tab
 // already fetches (fetchDcoAssets/fetchStaticAssets) — no separate endpoint.
@@ -1632,7 +1684,7 @@ function renderCreativesV2() {
     const campaignRows = [...r.campaigns].sort((a, b) => b.spend - a.spend).map(cm => {
       const ccpl = cm.results > 0 ? '$'+(cm.spend/cm.results).toFixed(2) : '—';
       return `<tr class="border-t border-slate-800/50">
-        <td class="px-2.5 py-1.5 text-slate-200 truncate max-w-[200px]" title="${cm.name.replace(/"/g,'&quot;')}">${cm.name}</td>
+        <td class="px-2.5 py-1.5 text-slate-200 whitespace-normal break-words">${cm.name.replace(/"/g,'&quot;')}</td>
         <td class="px-2.5 py-1.5 text-right font-mono text-slate-400">${cm.adCount}</td>
         <td class="px-2.5 py-1.5 text-right font-mono text-emerald-300">$${cm.spend.toFixed(2)}</td>
         <td class="px-2.5 py-1.5 text-right font-mono text-slate-400">${cm.impressions.toLocaleString('en-US')}</td>
@@ -1648,6 +1700,279 @@ function renderCreativesV2() {
     // Theme / UGC tags — manual admin-only classification, no Meta equivalent.
     // Everyone sees the badges (when set); only admins (impersonation view)
     // get the edit dropdowns to set/change/clear them.
+    const themeUgcLine = _isAdminView
+      ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
+          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
+            <option value="">Theme…</option>
+            ${THEME_OPTIONS.map(o => `<option value="${o.value}"${r.theme===o.value?' selected':''}>${o.label}</option>`).join('')}
+          </select>
+          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','ugcStatus',this.value)">
+            <option value="">Type…</option>
+            ${UGC_OPTIONS.map(o => `<option value="${o.value}"${r.ugcStatus===o.value?' selected':''}>${o.label}</option>`).join('')}
+          </select>
+        </div>`
+      : (r.theme || r.ugcStatus)
+        ? `<div class="flex items-center gap-1 mb-2 flex-wrap">
+            ${r.theme ? `<span class="text-[10px] font-medium bg-indigo-500/15 text-indigo-300 px-1.5 py-0.5 rounded">${_themeLabel(r.theme)}</span>` : ''}
+            ${r.ugcStatus ? `<span class="text-[10px] font-medium bg-fuchsia-500/15 text-fuchsia-300 px-1.5 py-0.5 rounded">${_ugcLabel(r.ugcStatus)}</span>` : ''}
+          </div>`
+        : '';
+    return `
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
+        <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
+          ${thumb}
+          <button type="button" class="low-res-reveal-btn" title="Meta only provided a low-resolution preview for this creative — click to view it anyway" onclick="event.stopPropagation();this.closest('.thumb-wrap').classList.add('low-res-revealed')">
+            <i data-lucide="eye" class="w-5 h-5"></i>
+            <span class="low-res-reveal-label">Low-res preview — click to view</span>
+          </button>
+          <div class="absolute top-2 left-2">${_typeBadge(r.type)}</div>
+          ${r.adCount > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${r.adCount} ad variants</div>` : ''}
+        </div>
+        <div class="p-3">
+          ${nameLine}
+          ${themeUgcLine}
+          <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mb-2">
+            <div class="text-slate-500">Spend</div><div class="text-right font-mono text-emerald-300">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
+            <div class="text-slate-500">Impressions</div><div class="text-right font-mono text-slate-300">${r.impressions.toLocaleString('en-US')}</div>
+            <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
+            <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
+            <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+          </div>
+          ${campaignCount > 0 ? `
+            <details class="text-[11px]" onclick="event.stopPropagation()">
+              <summary class="cursor-pointer text-slate-400 hover:text-slate-200 select-none">Used in ${campaignCount} campaign${campaignCount!==1?'s':''}</summary>
+              <div class="mt-2 border border-slate-800 rounded-lg overflow-hidden">
+                <div class="overflow-x-auto max-h-56 overflow-y-auto">
+                  <table class="w-full text-[10.5px]">
+                    <thead class="bg-slate-800/60 sticky top-0">
+                      <tr>
+                        <th class="text-left px-2.5 py-1.5 font-semibold uppercase tracking-wider text-slate-500">Campaign</th>
+                        <th class="text-right px-2.5 py-1.5 font-semibold uppercase tracking-wider text-slate-500">Ads</th>
+                        <th class="text-right px-2.5 py-1.5 font-semibold uppercase tracking-wider text-slate-500">Spend</th>
+                        <th class="text-right px-2.5 py-1.5 font-semibold uppercase tracking-wider text-slate-500">Impr.</th>
+                        <th class="text-right px-2.5 py-1.5 font-semibold uppercase tracking-wider text-slate-500">Leads</th>
+                        <th class="text-right px-2.5 py-1.5 font-semibold uppercase tracking-wider text-slate-500">CPL</th>
+                      </tr>
+                    </thead>
+                    <tbody>${campaignRows}</tbody>
+                  </table>
+                </div>
+              </div>
+              ${r.campaignsTruncated ? `<div class="text-[10px] text-slate-500 mt-1.5">Showing top 50 campaigns by spend.</div>` : ''}
+            </details>
+          ` : `<div class="text-[11px] text-slate-600">No campaign breakdown available</div>`}
+        </div>
+      </div>`;
+  }).join('');
+
+  if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+// ── Creatives v3 — same as v2 above, but thumbnails come from the
+// byte-serving route instead of a Meta URL (see fetchDcoAssetsV3 /
+// fetchStaticAssetsV3, which request ?thumbnailMode=bytes). Deliberately a
+// full duplicate of renderCreativesV2 rather than a shared/parameterized
+// function — v2 must render identically to how it does today with zero
+// risk of an accidental behavior change leaking in from this tab, and the
+// two are expected to diverge further once v3 fully replaces v2 later.
+function renderCreativesV3() {
+  const summaryWrap = document.getElementById('creatives-v3-summary');
+  const reconWrap = document.getElementById('creatives-v3-recon');
+  const grid = document.getElementById('creatives-v3-grid');
+  if (!grid) return;
+
+  document.getElementById('creatives-v3-tab-video')?.classList.toggle('active-view-btn', _creativesV3Type === 'video');
+  document.getElementById('creatives-v3-tab-image')?.classList.toggle('active-view-btn', _creativesV3Type === 'image');
+
+  if (_dcoLoadingV3 || _staticLoadingV3) {
+    grid.innerHTML = Array.from({length:4}, () => `
+      <div class="bg-slate-900/40 border border-slate-800 rounded-xl overflow-hidden">
+        <div class="skeleton aspect-video w-full"></div>
+        <div class="p-3 space-y-2">
+          <div class="skeleton h-4 w-3/4"></div>
+          <div class="skeleton h-3 w-1/2"></div>
+        </div>
+      </div>`).join('');
+    if (summaryWrap) summaryWrap.innerHTML = '';
+    if (reconWrap) reconWrap.textContent = '';
+    return;
+  }
+
+  const staticAsBreakdown: AssetBreakdownRow[] = (_staticAssetsV3 || []).map(s => ({
+    assetKey: s.assetKey,
+    type: s.type === 'image' || s.type === 'video' ? s.type : 'image',
+    thumbnail: s.thumbnail,
+    videoSource: s.videoSource,
+    videoId: s.videoId,
+    body: s.body,
+    title: s.title,
+    name: s.sampleAdName || null,
+    spend: s.spend,
+    results: s.results,
+    impressions: s.impressions,
+    linkClicks: s.linkClicks,
+    ctr: s.ctr,
+    cpl: s.cpl,
+    adCount: s.ads.length,
+    adIds: s.ads.map(a => a.id),
+    ads: s.ads,
+    campaigns: s.campaigns,
+    campaignsTruncated: s.campaignsTruncated,
+    hidden: s.thumbnail === null,
+    accountId: s.accountId,
+    theme: s.theme,
+    ugcStatus: s.ugcStatus,
+  }));
+  const dcoImages = _dcoAssetsV3?.images || [];
+  const dcoVideos = _dcoAssetsV3?.videos || [];
+  const staticImages = staticAsBreakdown.filter(r => r.type === 'image');
+  const staticVideos = staticAsBreakdown.filter(r => r.type === 'video');
+  let images = [...dcoImages, ...staticImages];
+  let videos = [...dcoVideos, ...staticVideos];
+  if (_dcoVisibleAdIds) {
+    const visible = _dcoVisibleAdIds;
+    const keep = (r: AssetBreakdownRow) => r.adIds.some(id => visible.has(id));
+    images = images.filter(keep);
+    videos = videos.filter(keep);
+  }
+
+  _ensureCreativesV3Phashes(images);
+  const phashOf = (assetKey: string) => {
+    const row = images.find(r => r.assetKey === assetKey);
+    return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
+  };
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf);
+  if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
+    const merged = new Map<string, AssetBreakdownRow>();
+    for (const row of images) {
+      const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
+      const existing = merged.get(canonicalKey);
+      if (!existing) {
+        const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
+        merged.set(canonicalKey, { ...row, assetKey: canonicalKey, thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title });
+        continue;
+      }
+      existing.spend += row.spend;
+      existing.results += row.results;
+      existing.impressions += row.impressions;
+      existing.linkClicks += row.linkClicks;
+      existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
+      existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+      existing.adCount += row.adCount;
+      existing.adIds = [...existing.adIds, ...row.adIds];
+      existing.ads = [...existing.ads, ...row.ads];
+      const campaignByName = new Map(existing.campaigns.map(c => [c.name, { ...c }]));
+      for (const c of row.campaigns) {
+        const cur = campaignByName.get(c.name);
+        if (cur) {
+          cur.adCount += c.adCount; cur.spend += c.spend; cur.results += c.results;
+          cur.impressions += c.impressions; cur.linkClicks += c.linkClicks;
+        } else {
+          campaignByName.set(c.name, { ...c });
+        }
+      }
+      existing.campaigns = Array.from(campaignByName.values()).sort((a, b) => b.spend - a.spend);
+      existing.campaignsTruncated = existing.campaignsTruncated || row.campaignsTruncated;
+    }
+    images = Array.from(merged.values());
+  }
+
+  const sumOf = (rows: AssetBreakdownRow[], field: 'spend'|'impressions'|'results') =>
+    rows.reduce((acc, r) => acc + r[field], 0);
+  const videoLeads = sumOf(videos, 'results');
+  const imageLeads = sumOf(images, 'results');
+  const combinedLeads = videoLeads + imageLeads;
+
+  if (summaryWrap) {
+    const fmtMoney = (n: number) => `$${n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
+    const stat = (label: string, value: string, accent = false) => `
+      <div class="bg-slate-900/60 border border-slate-800 rounded-lg p-3">
+        <div class="text-[10px] text-slate-500 uppercase tracking-wider">${label}</div>
+        <div class="text-base font-mono font-semibold ${accent ? 'text-amber-300' : 'text-slate-100'} mt-0.5">${value}</div>
+      </div>`;
+    summaryWrap.innerHTML = [
+      stat('Account Spend', _kpiSpendTotal !== null ? fmtMoney(_kpiSpendTotal) : '—'),
+      stat('Account Impressions', _kpiImpressionsTotal !== null ? _kpiImpressionsTotal.toLocaleString('en-US') : '—'),
+      stat('Video Leads', `${videoLeads}`),
+      stat('Image Leads', `${imageLeads}`),
+      stat('Account Leads', _kpiResultsTotal !== null ? `${_kpiResultsTotal}` : '—', true),
+    ].join('');
+  }
+
+  if (reconWrap) {
+    if (_kpiResultsTotal !== null && _kpiResultsTotal > 0) {
+      const delta = Math.abs(_kpiResultsTotal - combinedLeads);
+      const pct = (delta / Math.max(_kpiResultsTotal, combinedLeads, 1)) * 100;
+      if (pct >= 5) {
+        const hiddenCount = images.filter(r => r.hidden).length + videos.filter(r => r.hidden).length;
+        const leadSourceIsExternal = (_useSheetForLeads && _sheetLeadsByDay) || _leadsSource === 'ghl' || _platform === 'google';
+        const reasons: string[] = [];
+        if (leadSourceIsExternal) {
+          const sourceLabel = _leadsSource === 'ghl' ? 'your CRM' : 'your leads sheet';
+          reasons.push(`Your total leads count comes from ${sourceLabel}, while this tab shows leads Meta itself recorded for each ad. The two don&apos;t always match one-to-one.`);
+        } else {
+          reasons.push(`Some leads come from placements (like Reels or in-feed video) that Meta doesn&apos;t break out by individual creative, so they count toward your total but aren&apos;t attributed to a specific video or image below.`);
+        }
+        if (hiddenCount > 0) {
+          reasons.push(`${hiddenCount} creative${hiddenCount !== 1 ? 's are' : ' is'} not shown because a preview image for ${hiddenCount !== 1 ? 'them' : 'it'} hasn&apos;t finished downloading yet &mdash; ${hiddenCount !== 1 ? 'their' : 'its'} leads still count toward your total.`);
+        }
+        reconWrap.innerHTML = `
+          <div class="flex items-start gap-2 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+            <i data-lucide="info" class="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
+            <div class="text-amber-200/90 leading-relaxed">
+              <span class="font-semibold">Heads up:</span> your Account Leads total is <span class="font-mono">${_kpiResultsTotal}</span>, but videos and images below add up to <span class="font-mono">${combinedLeads}</span>. ${reasons.join(' ')}
+              <div class="mt-1 text-slate-500">Your Account Leads number at the top is always the accurate total &mdash; this tab is best used to compare creatives against each other, not as a second total.</div>
+            </div>
+          </div>`;
+      } else {
+        reconWrap.innerHTML = `<span class="text-slate-600">Video (${videoLeads}) + Image (${imageLeads}) leads match your Account Leads total.</span>`;
+      }
+    } else {
+      reconWrap.textContent = '';
+    }
+  }
+
+  document.getElementById('creatives-v3-tab-video')!.textContent = `Videos (${videos.length})`;
+  document.getElementById('creatives-v3-tab-image')!.textContent = `Images (${images.length})`;
+
+  let active = _creativesV3Type === 'video' ? videos : images;
+  const activeBeforeResultsFilter = active;
+  if (_creativesV3OnlyWithResults) {
+    active = active.filter(r => r.results > 0);
+  }
+
+  if (active.length === 0) {
+    if (activeBeforeResultsFilter.length > 0 && _creativesV3OnlyWithResults) {
+      grid.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No ${_creativesV3Type}s have leads for this date range with &ldquo;Has results only&rdquo; on. Turn it off above to see all ${activeBeforeResultsFilter.length} ${_creativesV3Type}${activeBeforeResultsFilter.length !== 1 ? 's' : ''}.</div>`;
+      return;
+    }
+    grid.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">No ${_creativesV3Type}s to show for this date range.</div>`;
+    return;
+  }
+
+  const sorted = [...active].sort((a, b) => b[_creativesV3Sort] - a[_creativesV3Sort]);
+  grid.innerHTML = sorted.map((r, i) => {
+    const thumb = r.thumbnail
+      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" onload="if(this.naturalWidth&&this.naturalWidth<200){this.classList.add('low-res-thumb');this.closest('.thumb-wrap')?.classList.add('low-res-detected')}" class="w-full h-full object-cover" />`
+      : '';
+    const noThumbClass = r.thumbnail ? '' : ' no-thumb';
+    const cpl = r.results > 0 ? `$${r.cpl.toFixed(2)}` : '—';
+    const ctr = `${r.ctr.toFixed(2)}%`;
+    const campaignCount = r.campaigns.length;
+    const campaignRows = [...r.campaigns].sort((a, b) => b.spend - a.spend).map(cm => {
+      const ccpl = cm.results > 0 ? '$'+(cm.spend/cm.results).toFixed(2) : '—';
+      return `<tr class="border-t border-slate-800/50">
+        <td class="px-2.5 py-1.5 text-slate-200 whitespace-normal break-words">${cm.name.replace(/"/g,'&quot;')}</td>
+        <td class="px-2.5 py-1.5 text-right font-mono text-slate-400">${cm.adCount}</td>
+        <td class="px-2.5 py-1.5 text-right font-mono text-emerald-300">$${cm.spend.toFixed(2)}</td>
+        <td class="px-2.5 py-1.5 text-right font-mono text-slate-400">${cm.impressions.toLocaleString('en-US')}</td>
+        <td class="px-2.5 py-1.5 text-right font-mono text-amber-300">${cm.results}</td>
+        <td class="px-2.5 py-1.5 text-right font-mono text-violet-300">${ccpl}</td>
+      </tr>`;
+    }).join('');
+    const nameLine = _isAdminView
+      ? `<div class="text-xs font-semibold text-slate-200 truncate mb-2" title="${(r.name||r.title||'').replace(/"/g,'&quot;')}">${r.name || r.title || 'Untitled'}</div>`
+      : '';
     const themeUgcLine = _isAdminView
       ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
           <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
@@ -1938,6 +2263,159 @@ function renderStaticAssets() {
   // other client on every fetch cycle.
   if (_showCreativeCampaignBreakdown && !document.getElementById('creatives-v2-view')?.classList.contains('hidden')) {
     renderCreativesV2();
+  }
+}
+
+// ── Creatives v3 fetches — deliberately hit the DB-backed routes directly
+// (never metaApiBase/the live route) with ?thumbnailMode=bytes, regardless
+// of this client's data_source. v3's tab is only ever shown when every
+// account is on cached mode anyway (see _showCreativesV3Tab), so this
+// isn't reachable for a live-mode client, but hardcoding /api/meta/db here
+// (rather than branching on metaApiBase like v1/v2 do) is the actual
+// guarantee that a byte-route URL is never requested against the live
+// route, which has no notion of thumbnailMode at all.
+async function fetchDcoAssetsV3() {
+  _dcoLoadingV3 = true;
+  _dcoAssetsV3 = null;
+  renderCreativesV3();
+  try {
+    const {since,until} = getDateRange();
+    const timeRange = JSON.stringify({since,until});
+    const select = document.getElementById('ad-account') as HTMLSelectElement;
+    const selectedAccount = select?.value || 'all';
+    const accountIds = selectedAccount === 'all'
+      ? Array.from(select?.options || []).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i,''))
+      : [selectedAccount.replace(/^act_/i,'')];
+
+    let firstBreakdownError: string | null = null;
+    const responses = await Promise.all(accountIds.map(async acc => {
+      const url = `/api/meta/db/asset-breakdown?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}&thumbnailMode=bytes`;
+      try {
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json.error && !json.images && !json.videos) {
+          if (!firstBreakdownError) firstBreakdownError = json.error.message || 'Creatives fetch failed';
+          return null;
+        }
+        if (json.error?.message && !firstBreakdownError) firstBreakdownError = json.error.message;
+        const parsed = json as { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsWithSpec: number; adsTotal: number; reason?: string; dcoAdIds?: string[] };
+        for (const row of parsed.images || []) row.accountId = acc;
+        for (const row of parsed.videos || []) row.accountId = acc;
+        return parsed;
+      } catch (e) {
+        if (!firstBreakdownError) firstBreakdownError = e instanceof Error ? e.message : 'Creatives fetch failed';
+        return null;
+      }
+    }));
+    if (firstBreakdownError) {
+      showNotification('Creatives v3 partial load: ' + firstBreakdownError, 'error');
+    }
+
+    const imageMap = new Map<string, AssetBreakdownRow>();
+    const videoMap = new Map<string, AssetBreakdownRow>();
+    let adsTotal = 0, adsWithSpec = 0;
+    let allReason: string | undefined;
+    for (const r of responses) {
+      if (!r) continue;
+      adsTotal += r.adsTotal || 0;
+      adsWithSpec += r.adsWithSpec || 0;
+      if (r.reason && !allReason) allReason = r.reason;
+      const mergeInto = (map: Map<string, AssetBreakdownRow>, rows: AssetBreakdownRow[]) => {
+        for (const a of rows) {
+          const existing = map.get(a.assetKey);
+          if (!existing) { map.set(a.assetKey, { ...a }); continue; }
+          existing.spend += a.spend;
+          existing.results += a.results;
+          existing.impressions += a.impressions;
+          existing.linkClicks += a.linkClicks;
+          existing.adCount += a.adCount;
+          existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
+          existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+          if (!existing.thumbnail && a.thumbnail) existing.thumbnail = a.thumbnail;
+        }
+      };
+      mergeInto(imageMap, r.images || []);
+      mergeInto(videoMap, r.videos || []);
+    }
+    _dcoAssetsV3 = {
+      images: Array.from(imageMap.values()),
+      videos: Array.from(videoMap.values()),
+      adsTotal,
+      adsWithSpec,
+      reason: allReason,
+    };
+  } catch {
+    _dcoAssetsV3 = { images: [], videos: [], adsTotal: 0, adsWithSpec: 0 };
+  } finally {
+    _dcoLoadingV3 = false;
+    renderCreativesV3();
+    fetchStaticAssetsV3();
+  }
+}
+
+async function fetchStaticAssetsV3() {
+  _staticLoadingV3 = true;
+  _staticAssetsV3 = null;
+  renderCreativesV3();
+  try {
+    const {since,until} = getDateRange();
+    const timeRange = JSON.stringify({since,until});
+    const select = document.getElementById('ad-account') as HTMLSelectElement;
+    const selectedAccount = select?.value || 'all';
+    const accountIds = selectedAccount === 'all'
+      ? Array.from(select?.options || []).filter(o => o.value !== 'all').map(o => o.value.replace(/^act_/i,''))
+      : [selectedAccount.replace(/^act_/i,'')];
+
+    let firstStaticError: string | null = null;
+    const responses = await Promise.all(accountIds.map(async acc => {
+      const url = `/api/meta/db/creatives?account_id=${encodeURIComponent(acc)}&time_range=${encodeURIComponent(timeRange)}&thumbnailMode=bytes`;
+      try {
+        const res = await fetch(url);
+        const json = await res.json();
+        if (json.error) {
+          if (!firstStaticError) firstStaticError = json.error.message || 'Creatives fetch failed';
+          return null;
+        }
+        const parsed = json as { data: CreativeRow[] };
+        for (const row of parsed.data || []) (row as any).accountId = acc;
+        return parsed;
+      } catch (e) {
+        if (!firstStaticError) firstStaticError = e instanceof Error ? e.message : 'Creatives fetch failed';
+        return null;
+      }
+    }));
+    if (firstStaticError) {
+      showNotification('Static ads v3 partial load: ' + firstStaticError, 'error');
+    }
+
+    const dcoAssetKeys = new Set<string>();
+    if (_dcoAssetsV3) {
+      for (const a of _dcoAssetsV3.images) dcoAssetKeys.add(a.assetKey);
+      for (const a of _dcoAssetsV3.videos) dcoAssetKeys.add(a.assetKey);
+    }
+    const merged = new Map<string, CreativeRow>();
+    for (const r of responses) {
+      if (!r?.data) continue;
+      for (const row of r.data) {
+        if (dcoAssetKeys.has(row.assetKey)) continue;
+        const existing = merged.get(row.assetKey);
+        if (!existing) { merged.set(row.assetKey, { ...row, campaigns: row.campaigns || [], campaignsTruncated: false, theme: row.theme ?? null, ugcStatus: row.ugcStatus ?? null }); continue; }
+        existing.spend += row.spend;
+        existing.results += row.results;
+        existing.impressions += row.impressions;
+        existing.linkClicks += row.linkClicks;
+        existing.reach += row.reach;
+        existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
+        existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+        if (!existing.thumbnail && row.thumbnail) existing.thumbnail = row.thumbnail;
+      }
+    }
+    _staticAssetsV3 = Array.from(merged.values());
+  } catch {
+    _staticAssetsV3 = [];
+  } finally {
+    _staticLoadingV3 = false;
+    renderCreativesV3();
   }
 }
 
@@ -2764,12 +3242,39 @@ if (typeof window !== 'undefined') {
     } else {
       media = `<div class="w-full h-full flex items-center justify-center text-slate-500 text-sm">No preview available</div>`;
     }
-    const statusBadge = (s: string) => {
-      const colors: Record<string,string> = { ACTIVE:'#34d399', PAUSED:'#94a3b8', CAMPAIGN_PAUSED:'#94a3b8', ADSET_PAUSED:'#94a3b8', WITH_ISSUES:'#fbbf24', IN_PROCESS:'#60a5fa', ARCHIVED:'#475569' };
-      const dot = colors[s] || '#475569';
-      return `<span style="color:${dot}">●</span> <span class="text-slate-300">${s.toLowerCase().replace(/_/g,' ')}</span>`;
-    };
-    const adsSorted = [...c.ads].sort((a,b) => b.spend - a.spend);
+    const campaignsSorted = [...c.campaigns].sort((a,b) => b.spend - a.spend);
+    const campaignsTableHtml = campaignsSorted.length > 0 ? `
+      <div class="border border-slate-800 rounded-lg overflow-hidden">
+        <div class="overflow-x-auto max-h-80 overflow-y-auto">
+          <table class="w-full text-xs">
+            <thead class="bg-slate-800/60 sticky top-0">
+              <tr>
+                <th class="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Campaign</th>
+                <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Ads</th>
+                <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Spend</th>
+                <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Impressions</th>
+                <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Leads</th>
+                <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">CPL</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${campaignsSorted.map(cm => {
+                const ccpl = cm.results > 0 ? '$'+(cm.spend/cm.results).toFixed(2) : '—';
+                return `<tr class="border-t border-slate-800/50 hover:bg-slate-800/30">
+                  <td class="px-3 py-2 text-slate-200 whitespace-normal break-words">${cm.name.replace(/"/g,'&quot;')}</td>
+                  <td class="px-3 py-2 text-right font-mono text-slate-400">${cm.adCount}</td>
+                  <td class="px-3 py-2 text-right font-mono text-emerald-300">$${cm.spend.toFixed(2)}</td>
+                  <td class="px-3 py-2 text-right font-mono text-slate-400">${cm.impressions.toLocaleString('en-US')}</td>
+                  <td class="px-3 py-2 text-right font-mono text-amber-300">${cm.results}</td>
+                  <td class="px-3 py-2 text-right font-mono text-violet-300">${ccpl}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      ${c.campaignsTruncated ? `<div class="text-[10px] text-slate-500 mt-1.5">Showing top 50 campaigns by spend.</div>` : ''}
+    ` : `<div class="text-[11px] text-slate-600">No campaign breakdown available</div>`;
     body.innerHTML = `
       <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
         <div class="md:col-span-2">
@@ -2804,37 +3309,8 @@ if (typeof window !== 'undefined') {
             </div>
           </div>
           <div>
-            <div class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">${c.ads.length} ad${c.ads.length!==1?'s':''} using this creative</div>
-            <div class="border border-slate-800 rounded-lg overflow-hidden">
-              <div class="overflow-x-auto max-h-80 overflow-y-auto">
-                <table class="w-full text-xs">
-                  <thead class="bg-slate-800/60 sticky top-0">
-                    <tr>
-                      <th class="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Ad</th>
-                      <th class="text-left px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Status</th>
-                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Spend</th>
-                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">Leads</th>
-                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">CPL</th>
-                      <th class="text-right px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-400">CTR</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    ${adsSorted.map(a => {
-                      const cpl = a.results > 0 ? '$'+(a.spend/a.results).toFixed(2) : '—';
-                      const ctr = a.impressions > 0 ? ((a.linkClicks/a.impressions)*100).toFixed(2)+'%' : '0.00%';
-                      return `<tr class="border-t border-slate-800/50 hover:bg-slate-800/30">
-                        <td class="px-3 py-2 text-slate-200 truncate max-w-[200px]" title="${a.name.replace(/"/g,'&quot;')}">${a.name}</td>
-                        <td class="px-3 py-2">${statusBadge(a.status)}</td>
-                        <td class="px-3 py-2 text-right font-mono text-emerald-300">$${a.spend.toFixed(2)}</td>
-                        <td class="px-3 py-2 text-right font-mono text-amber-300">${a.results}</td>
-                        <td class="px-3 py-2 text-right font-mono text-violet-300">${cpl}</td>
-                        <td class="px-3 py-2 text-right font-mono text-rose-300">${ctr}</td>
-                      </tr>`;
-                    }).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <div class="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-2">${c.campaigns.length} campaign${c.campaigns.length!==1?'s':''} using this creative</div>
+            ${campaignsTableHtml}
           </div>
         </div>
       </div>
@@ -2872,6 +3348,37 @@ if (typeof window !== 'undefined') {
       const s = _staticAssets.find(x => x.assetKey === assetKey);
       if (s) asCreative = s;
     }
+    // v3 cards use the same window._openAsset(...) onclick as v1/v2, but
+    // their data lives in the separate _dcoAssetsV3/_staticAssetsV3 vars
+    // (see fetchDcoAssetsV3/fetchStaticAssetsV3) — check those too when the
+    // asset wasn't found above (v1/v2's data won't contain a v3-only fetch).
+    if (!asCreative) {
+      const dcoV3 = _dcoAssetsV3 ? [..._dcoAssetsV3.images, ..._dcoAssetsV3.videos].find(x => x.assetKey === assetKey) : null;
+      if (dcoV3) {
+        asCreative = {
+          assetKey: dcoV3.assetKey,
+          type: dcoV3.type,
+          thumbnail: dcoV3.thumbnail,
+          videoSource: dcoV3.videoSource,
+          videoId: dcoV3.videoId,
+          body: dcoV3.body,
+          title: dcoV3.title,
+          sampleAdName: dcoV3.name || (dcoV3.type === 'video' ? 'Video asset' : 'Image asset'),
+          sampleAdId: dcoV3.ads[0]?.id || '',
+          spend: dcoV3.spend, results: dcoV3.results, impressions: dcoV3.impressions, linkClicks: dcoV3.linkClicks, reach: 0,
+          ctr: dcoV3.ctr, cpl: dcoV3.cpl,
+          ads: dcoV3.ads,
+          campaigns: dcoV3.campaigns,
+          campaignsTruncated: dcoV3.campaignsTruncated,
+          accountId: dcoV3.accountId,
+          theme: dcoV3.theme,
+          ugcStatus: dcoV3.ugcStatus,
+        };
+      } else if (_staticAssetsV3) {
+        const s = _staticAssetsV3.find(x => x.assetKey === assetKey);
+        if (s) asCreative = s;
+      }
+    }
     if (!asCreative) return;
     const modal = document.getElementById('creative-modal');
     if (!modal) return;
@@ -2896,6 +3403,7 @@ if (typeof window !== 'undefined') {
       }
       const patch = (row: AssetBreakdownRow) => { if (row.assetKey === assetKey) (row as any)[field] = value || null; };
       if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
+      if (_dcoAssetsV3) { _dcoAssetsV3.images.forEach(patch); _dcoAssetsV3.videos.forEach(patch); }
       showNotification(`${field === 'theme' ? 'Theme' : 'Type'} saved`, 'success', 2000);
     } catch (e) {
       showNotification(e instanceof Error ? e.message : 'Save failed', 'error');
@@ -2955,7 +3463,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, hideAdsetAdTabs = true, showMetaKpiSheet = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, showMetaKpiSheet = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -2968,6 +3476,10 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _dataSourceByAccount = dataSourceByAccount;
   _isAdminView = isAdminView;
   _showCreativeCampaignBreakdown = showCreativeCampaignBreakdown;
+  // Bytes only ever exist on the cached sync path — hide the tab even if
+  // the admin toggle is on when any of this client's accounts is still on
+  // live mode, rather than show an empty/broken grid (see Props.showCreativesV3).
+  _showCreativesV3Tab = showCreativesV3 && accountIds.every(id => dataSourceByAccount[id] === 'cached');
   _hideAdsetAdTabs = hideAdsetAdTabs;
   _showMetaKpiSheet = showMetaKpiSheet;
   _dpCapMaximumToThisYear = /omega/i.test(clientName);
@@ -3147,6 +3659,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               // per-asset data so it stays in sync with the new date/filter.
               const creativesVisible = !document.getElementById('creatives-view')?.classList.contains('hidden');
               if (creativesVisible) fetchDcoAssets();
+              const creativesV3Visible = !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
+              if (creativesV3Visible) fetchDcoAssetsV3();
             }} className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold px-5 py-2 rounded-lg transition-colors flex items-center gap-2 self-end mb-[20px]">
               <i data-lucide="refresh-cw" className="w-4 h-4"></i> Apply
             </button>
@@ -3201,11 +3715,14 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   // active, even when the level didn't change — the user may have
                   // been on Creatives and just wants to come back to this tab.
                   const wasOnCreatives = !document.getElementById('creatives-view')?.classList.contains('hidden')
-                    || !document.getElementById('creatives-v2-view')?.classList.contains('hidden');
+                    || !document.getElementById('creatives-v2-view')?.classList.contains('hidden')
+                    || !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
                   document.getElementById('creatives-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives')?.classList.remove('active-tab');
                   document.getElementById('creatives-v2-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
+                  document.getElementById('creatives-v3-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
                   const lo=['campaign','adset','ad'];
                   lo.forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.toggle('active-tab',x===l);});
                   // Show whichever main view the user last had open.
@@ -3234,6 +3751,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('creatives-view')?.classList.remove('hidden');
                   document.getElementById('creatives-v2-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
+                  document.getElementById('creatives-v3-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives')?.classList.add('active-tab');
                   fetchDcoAssets();
@@ -3249,6 +3768,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('creatives-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives')?.classList.remove('active-tab');
                   document.getElementById('creatives-v2-view')?.classList.remove('hidden');
+                  document.getElementById('creatives-v3-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives-v2')?.classList.add('active-tab');
                   // Reuses the same DCO+static fetches as the existing Creatives
@@ -3262,6 +3783,27 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   fetchDcoAssets();
                 }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
                   Creatives v2
+                </button>
+              )}
+              {platform === 'meta' && _showCreativesV3Tab && (
+                <button id="tab-creatives-v3" onClick={() => {
+                  // Hide other views, show creatives v3.
+                  document.getElementById('table-view')?.classList.add('hidden');
+                  document.getElementById('analytics-view')?.classList.add('hidden');
+                  document.getElementById('creatives-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives')?.classList.remove('active-tab');
+                  document.getElementById('creatives-v2-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
+                  document.getElementById('creatives-v3-view')?.classList.remove('hidden');
+                  ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
+                  document.getElementById('tab-creatives-v3')?.classList.add('active-tab');
+                  // Own fetch functions (fetchDcoAssetsV3/fetchStaticAssetsV3) —
+                  // always hit the DB-backed byte-serving routes regardless of
+                  // this client's data_source, unlike v1/v2's metaApiBase-based
+                  // fetches. Always refetch on click, same rationale as v2.
+                  fetchDcoAssetsV3();
+                }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
+                  Creatives v3
                 </button>
               )}
               {platform === 'google' && (
@@ -3282,6 +3824,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     document.getElementById('tab-creatives')?.classList.remove('active-tab');
                     document.getElementById('creatives-v2-view')?.classList.add('hidden');
                     document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
+                    document.getElementById('creatives-v3-view')?.classList.add('hidden');
+                    document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
                     document.getElementById(`tab-${_currentLevel}`)?.classList.add('active-tab');
                     document.getElementById('table-view')?.classList.remove('hidden');
                     document.getElementById('analytics-view')?.classList.add('hidden');
@@ -3295,6 +3839,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     document.getElementById('tab-creatives')?.classList.remove('active-tab');
                     document.getElementById('creatives-v2-view')?.classList.add('hidden');
                     document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
+                    document.getElementById('creatives-v3-view')?.classList.add('hidden');
+                    document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
                     document.getElementById(`tab-${_currentLevel}`)?.classList.add('active-tab');
                     document.getElementById('table-view')?.classList.add('hidden');
                     document.getElementById('analytics-view')?.classList.remove('hidden');
@@ -3474,6 +4020,46 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 <button id="creatives-v2-tab-image" onClick={() => { _creativesV2Type='image'; renderCreativesV2(); }} className="view-btn active-view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Images</button>
               </div>
               <div id="creatives-v2-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
+            </div>
+
+            {/* Creatives v3 — same layout as v2, byte-backed thumbnails */}
+            <div id="creatives-v3-view" className="hidden p-5">
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <i data-lucide="layers" className="w-3.5 h-3.5 text-amber-400"></i> Creatives v3 — video &amp; image results, separated
+                </h3>
+                <div className="flex items-center gap-1 flex-wrap">
+                  <span className="text-[10px] text-slate-500 mr-2">Sort by</span>
+                  {([
+                    ['spend','Spend'],['results','Leads'],['cpl','CPL'],['ctr','CTR'],
+                  ] as const).map(([k,label]) => (
+                    <button key={k} data-creatives-v3-sort={k} onClick={() => {
+                      _creativesV3Sort = k;
+                      document.querySelectorAll('[data-creatives-v3-sort]').forEach(b => b.classList.toggle('active-sort-btn', (b as HTMLElement).dataset.creativesV3Sort === k));
+                      renderCreativesV3();
+                    }} className={`sort-btn ${k==='cpl'?'active-sort-btn':''}`}>{label}</button>
+                  ))}
+                  <button
+                    id="creatives-v3-only-results-btn"
+                    className="sort-btn active-sort-btn ml-2"
+                    onClick={(e) => {
+                      _creativesV3OnlyWithResults = !_creativesV3OnlyWithResults;
+                      (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _creativesV3OnlyWithResults);
+                      renderCreativesV3();
+                    }}
+                  >Has results only</button>
+                </div>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1 mb-3">
+                Every video and every image this account ran, viewed separately. Each card shows the asset&apos;s totals plus its full campaign-by-campaign breakdown &mdash; no click-through needed. Thumbnails here are a stored copy of the image, so they won&apos;t go blank the way a Meta link sometimes does &mdash; though a few may still say &quot;NO PREVIEW&quot; until this client&apos;s backlog finishes downloading.
+              </p>
+              <div id="creatives-v3-summary" className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-2"></div>
+              <div id="creatives-v3-recon" className="text-[11px] text-slate-500 mb-3"></div>
+              <div className="flex items-center gap-1 mb-3 bg-slate-800/60 rounded-lg p-0.5 w-fit">
+                <button id="creatives-v3-tab-video" onClick={() => { _creativesV3Type='video'; renderCreativesV3(); }} className="view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Videos</button>
+                <button id="creatives-v3-tab-image" onClick={() => { _creativesV3Type='image'; renderCreativesV3(); }} className="view-btn active-view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Images</button>
+              </div>
+              <div id="creatives-v3-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
             </div>
           </div>
         </div>

@@ -272,6 +272,14 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_ltv BOOLEAN NOT NU
 // tab (spend/leads/campaign-breakdown per asset, videos and images shown
 // separately). Off by default — existing clients see no change.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_creative_campaign_breakdown BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+// Creatives v3: same card grid as v2, but thumbnails are served from the
+// new thumbnail_bytes column instead of a Meta URL (see the ALTERs above).
+// A SEPARATE tab/flag from v2 rather than an in-place swap — the byte
+// backfill for existing rows takes several sync runs to catch up, so
+// flipping v2 itself would mean production clients see cards flicker
+// between old-URL and new-byte-route rendering (or more gaps than today)
+// mid-backfill. Off by default; v2 is completely unaffected by this flag.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_creatives_v3 BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 // Independent toggle: hides the Adset Sets / Ads level tabs, leaving only
 // Campaigns (+ Creatives / Creatives v2, unaffected). Not tied to the v2
 // flag above — a client can have either, both, or neither.
@@ -375,6 +383,20 @@ pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS phash TEXT
 // validation over DB constraints for admin-form-driven fixed option lists.
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS theme TEXT`).catch(() => {});
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS ugc_status TEXT`).catch(() => {});
+
+// Creatives v3: store the actual thumbnail image bytes instead of just a
+// Meta-sourced URL. The existing `thumbnail` URL decays — Meta's CDN URLs
+// are signed with a ~4-day expiry (`oe=` param), some are session-gated
+// `facebook.com/ads/image/?d=...` links that 403 without an active Meta
+// login, and cross-account video lookups fail outright — so on a large,
+// slow-to-sync account a meaningful share of cards go permanently blank.
+// Storing bytes once (see the extended phash-backfill pass in metaSync.ts)
+// means a thumbnail never expires once downloaded. `thumbnail` itself is
+// kept as-is: it remains the fetch INPUT for this backfill, plus a
+// debugging aid — not replaced or repurposed.
+pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_bytes BYTEA`).catch(() => {});
+pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_content_type TEXT`).catch(() => {});
+pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_bytes_fetched_at TIMESTAMPTZ`).catch(() => {});
 
 export async function query<T = Record<string, unknown>>(
   sql: string,

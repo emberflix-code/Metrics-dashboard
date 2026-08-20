@@ -50,6 +50,12 @@ export async function GET(req: NextRequest) {
     const accountId = sp.get('account_id')?.replace(/^act_/i, '');
     if (!accountId) return NextResponse.json({ error: { message: 'Missing account_id' } }, { status: 400 });
     if (!accountIds.includes(accountId)) return NextResponse.json({ error: { message: 'Account not authorized' } }, { status: 403 });
+    // Creatives v3 opts into byte-backed thumbnails (see
+    // /api/meta/db/asset-thumbnail/[accountId]/[assetKey]) instead of the
+    // Meta-sourced URL v2 still gets by default — same query/aggregation,
+    // only the emitted `thumbnail` field and `hidden` semantics differ, so
+    // v2's existing calls (no param) are completely unaffected.
+    const thumbnailMode = sp.get('thumbnailMode') === 'bytes' ? 'bytes' : 'url';
 
     const adIdsParam = sp.get('ad_ids');
     const accountWide = !adIdsParam;
@@ -120,8 +126,10 @@ export async function GET(req: NextRequest) {
     }
 
     const assetKeys = Array.from(new Set(breakdownRows.map(r => r.asset_key)));
-    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; theme: string | null; ugc_status: string | null }>(
-      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash, theme, ugc_status FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; theme: string | null; ugc_status: string | null; has_bytes: boolean }>(
+      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash, theme, ugc_status,
+              (thumbnail_bytes IS NOT NULL) AS has_bytes
+       FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
       [accountId, assetKeys]
     );
     const assetByKey = new Map(assetRows.map(a => [a.asset_key, a] as const));
@@ -192,10 +200,15 @@ export async function GET(req: NextRequest) {
         // whichever original asset_key this loop iteration happened to hit
         // first — deterministic regardless of breakdownRows ordering.
         const canonicalAsset = assetByKey.get(canonicalKey) ?? assetByKey.get(r.asset_key);
+        const thumbnail = thumbnailMode === 'bytes'
+          ? (canonicalAsset?.has_bytes
+              ? `/api/meta/db/asset-thumbnail/${encodeURIComponent(accountId)}/${encodeURIComponent(canonicalKey)}`
+              : null)
+          : (canonicalAsset?.thumbnail ?? null);
         row = {
           assetKey: canonicalKey,
           type: isVideo ? 'video' : 'image',
-          thumbnail: canonicalAsset?.thumbnail ?? null,
+          thumbnail,
           videoSource: canonicalAsset?.video_source ?? null,
           videoId: canonicalAsset?.video_id ?? null,
           body: canonicalAsset?.body ?? null,

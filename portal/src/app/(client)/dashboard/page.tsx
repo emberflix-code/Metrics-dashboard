@@ -30,6 +30,7 @@ interface ClientRow {
   show_ltv: boolean;
   ltv_value: number;
   show_creative_campaign_breakdown: boolean;
+  show_creatives_v3: boolean;
   hide_adset_ad_tabs: boolean;
   meta_kpi_sheet_id: string;
   meta_kpi_sheet_tab: string;
@@ -70,7 +71,7 @@ export default async function DashboardPage() {
             c.leads_source, c.show_bookings, c.show_book_rate,
             (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
             c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value,
-            c.show_creative_campaign_breakdown, c.hide_adset_ad_tabs,
+            c.show_creative_campaign_breakdown, c.show_creatives_v3, c.hide_adset_ad_tabs,
             c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
@@ -143,6 +144,7 @@ export default async function DashboardPage() {
         showLtv={!!(client?.show_ltv && client?.cpa_sheet_tab)}
         ltvValue={client?.ltv_value ?? 0}
         showCreativeCampaignBreakdown={!!client?.show_creative_campaign_breakdown}
+        showCreativesV3={!!client?.show_creatives_v3}
         hideAdsetAdTabs={!!client?.hide_adset_ad_tabs}
         showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id && client?.meta_kpi_sheet_tab)}
         dataSourceByAccount={dataSourceByAccount}

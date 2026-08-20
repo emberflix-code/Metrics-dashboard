@@ -43,13 +43,24 @@ const ENTITIES_BUDGET_MS = 90_000;
 // request) can afford a much larger budget than the 3-minute slice it gets
 // inside the combined "Sync now" — it's the only thing running.
 const CREATIVES_ONLY_BUDGET_MS = 10 * 60_000;
-// Perceptual-hash backfill for image assets (see 014_creative_asset_phash.sql)
-// — capped and time-boxed like AD_METADATA_BACKFILL_*. Competes for the same
-// run's budget as everything else in syncCreatives, but the WHERE phash IS
-// NULL query naturally shrinks each sync as rows get hashed, so a small bite
-// every run converges without ever dominating one.
-const PHASH_BACKFILL_LIMIT = 300;
-const PHASH_BACKFILL_BUDGET_MS = 45_000;
+// Combined thumbnail-bytes + perceptual-hash backfill (see
+// 027_creative_asset_bytes.sql and 014_creative_asset_phash.sql) — capped
+// and time-boxed like AD_METADATA_BACKFILL_*. Competes for the same run's
+// budget as everything else in syncCreatives, but the candidate query
+// naturally shrinks each sync as rows get filled in, so a small bite every
+// run converges without ever dominating one.
+//
+// Lower than the old phash-only limit (300) because each row now also
+// transfers real image bytes into memory and into a bytea UPDATE, not just
+// a hash computation over already-fetched bytes.
+const THUMBNAIL_BYTES_BACKFILL_LIMIT = 200;
+const THUMBNAIL_BYTES_BACKFILL_BUDGET_MS = 45_000;
+// Bytes, once downloaded, don't expire the way a signed Meta CDN URL does
+// (~4 days) — so this window is much longer than THUMBNAIL_STALE_DAYS
+// (which only refreshes the URL itself). Re-fetching this rarely is purely
+// to pick up the rare case where Meta's underlying creative image changes
+// under a still-running ad.
+const THUMBNAIL_BYTES_STALE_DAYS = 30;
 
 export interface SyncAccountResult {
   accountId: string;
@@ -938,6 +949,7 @@ function deriveAssets(adId: string, creative: AdCreativeResp['creative']): Asset
 
 interface BreakdownRow {
   ad_id?: string; date_start?: string; spend?: string; impressions?: string; inline_link_clicks?: string;
+  campaign_name?: string;
   actions?: { action_type: string; value: string }[];
   image_asset?: { hash?: string }; video_asset?: { video_id?: string };
 }
@@ -1025,12 +1037,19 @@ async function syncCreatives(
   // `oe=` param) — an ad that already HAS a meta_creative_asset_ad_map row
   // is invisible to the "missing metadata" backfill above (its LEFT JOIN
   // only catches ad_ids with no map entry at all), so an asset fetched once
-  // and never touched again just silently goes dead a few days later,
-  // showing "NO PREVIEW" in the dashboard even though the DB row is
-  // populated. Re-fetches assets whose thumbnail hasn't been refreshed in
-  // over 3 days, via the same by-ID lookup (works for DELETED/ARCHIVED ads
-  // too). Time-boxed and capped independently from the missing-metadata
-  // pass so one large backlog can't starve the other.
+  // and never touched again just silently goes dead a few days later.
+  // Re-fetches assets whose thumbnail hasn't been refreshed in over 3 days,
+  // via the same by-ID lookup (works for DELETED/ARCHIVED ads too).
+  // Time-boxed and capped independently from the missing-metadata pass so
+  // one large backlog can't starve the other.
+  //
+  // Post-bytea (see thumbnail_bytes above): this loop no longer directly
+  // determines whether the dashboard shows "NO PREVIEW" — it refreshes the
+  // URL so the thumbnail-bytes backfill pass has something current to
+  // download from. Still worth keeping: Meta's underlying creative can
+  // genuinely change (a new image swapped into a still-running ad), and a
+  // URL that's never refreshed means the bytes pass keeps re-downloading
+  // the same stale image forever.
   const THUMBNAIL_STALE_DAYS = 3;
   // Raised from 500/45s — a large account's backlog (Omega: 478 of 809
   // images stale after being untouched for a month) took several sync runs
@@ -1291,34 +1310,58 @@ async function syncCreatives(
     } catch { /* leave stored video source as-is */ }
   }
 
-  // 1b) Perceptual-hash backfill for image assets -- lets read-time grouping
-  // merge two asset_key rows that are the same visual photo uploaded twice
-  // under different Meta image_hash values (Meta hashes uploaded file bytes,
-  // not pixel content; see 014_creative_asset_phash.sql). Runs after the
-  // full-res thumbnail enrichment above so it always hashes the best
-  // available image, not a stale low-res one. try/catch per row: one broken
-  // or unreachable thumbnail URL must not abort the batch or the rest of
-  // the sync.
-  const phashCandidates = await query<{ asset_key: string; thumbnail: string }>(
-    `SELECT asset_key, thumbnail FROM meta_creative_assets
-     WHERE account_id = $1 AND type = 'image' AND phash IS NULL AND thumbnail IS NOT NULL
-     LIMIT ${PHASH_BACKFILL_LIMIT}`,
+  // 1b) Thumbnail-bytes + perceptual-hash backfill. Downloads the actual
+  // image bytes behind the stored `thumbnail` URL and persists them
+  // (thumbnail_bytes/thumbnail_content_type) so the dashboard never shows
+  // "NO PREVIEW" again once a row has been through this pass — Meta's CDN
+  // URLs expire (~4 days via the `oe=` param), some are session-gated
+  // facebook.com/ads/image/?d=... links that 403 without an active Meta
+  // login, and cross-account video lookups fail outright, but a
+  // downloaded byte never expires (see 027_creative_asset_bytes.sql).
+  // Covers both image and video assets, since videos have a poster
+  // thumbnail too — this is a strict superset of the old phash-only query,
+  // which only ever ran for type = 'image'.
+  //
+  // Perceptual-hash computation (lets read-time grouping merge two
+  // asset_key rows that are the same visual photo uploaded twice under
+  // different Meta image_hash values, since Meta hashes uploaded file
+  // bytes, not pixel content; see 014_creative_asset_phash.sql) rides
+  // along on the SAME fetch for image assets only — a real consolidation,
+  // since both used to fetch the same bytes independently (this block, and
+  // separately lib/phash.ts's live-route equivalent, which is unaffected).
+  // Runs after the full-res thumbnail enrichment above so it always
+  // downloads the best available image, not a stale low-res one. try/catch
+  // per row: one broken or unreachable thumbnail URL must not abort the
+  // batch or the rest of the sync.
+  const thumbnailBytesCandidates = await query<{ asset_key: string; thumbnail: string; type: string }>(
+    `SELECT asset_key, thumbnail, type FROM meta_creative_assets
+     WHERE account_id = $1 AND thumbnail IS NOT NULL
+       AND (
+         thumbnail_bytes IS NULL
+         OR thumbnail_bytes_fetched_at < now() - interval '${THUMBNAIL_BYTES_STALE_DAYS} days'
+         OR (type = 'image' AND phash IS NULL)
+       )
+     LIMIT ${THUMBNAIL_BYTES_BACKFILL_LIMIT}`,
     [accountId]
   );
-  if (phashCandidates.length > 0) {
-    const phashDeadline = Date.now() + PHASH_BACKFILL_BUDGET_MS;
-    for (const row of phashCandidates) {
-      if (Date.now() > phashDeadline) break;
+  if (thumbnailBytesCandidates.length > 0) {
+    const thumbnailBytesDeadline = Date.now() + THUMBNAIL_BYTES_BACKFILL_BUDGET_MS;
+    for (const row of thumbnailBytesCandidates) {
+      if (Date.now() > thumbnailBytesDeadline) break;
       try {
         const res = await fetch(row.thumbnail);
         if (!res.ok) continue;
         const bytes = Buffer.from(await res.arrayBuffer());
-        const hash = await computePhash(bytes);
+        const contentType = res.headers.get('content-type') || 'image/jpeg';
+        const hash = row.type === 'image' ? await computePhash(bytes) : null;
         await query(
-          `UPDATE meta_creative_assets SET phash = $3 WHERE account_id = $1 AND asset_key = $2`,
-          [accountId, row.asset_key, hash]
+          `UPDATE meta_creative_assets
+           SET thumbnail_bytes = $3, thumbnail_content_type = $4, thumbnail_bytes_fetched_at = now(),
+               phash = COALESCE($5, phash)
+           WHERE account_id = $1 AND asset_key = $2`,
+          [accountId, row.asset_key, bytes, contentType, hash]
         );
-      } catch { /* leave phash NULL, retried next sync since it still won't match */ }
+      } catch { /* leave bytes/phash as-is, retried next sync */ }
     }
   }
 
@@ -1359,7 +1402,7 @@ async function syncCreatives(
       const u = new URL(`${GRAPH}/act_${accountId}/insights`);
       u.searchParams.set('level', 'ad');
       u.searchParams.set('breakdowns', breakdown);
-      u.searchParams.set('fields', 'ad_id,spend,impressions,inline_link_clicks,actions');
+      u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,actions');
       u.searchParams.set('time_range', JSON.stringify(chunk));
       u.searchParams.set('time_increment', '1');
       u.searchParams.set('limit', '500');
@@ -1368,7 +1411,7 @@ async function syncCreatives(
       let rows: BreakdownRow[] = [];
       try { rows = await fetchMetaWithRetry<BreakdownRow>(u); } catch { /* leave chunk incomplete, retried on the next sync */ }
 
-      interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number }
+      interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number; campaignName: string }
       // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
       // can return the same (asset, ad, day) combination more than once within
       // a single breakdown fetch (e.g. across attribution-window buckets), and
@@ -1386,14 +1429,18 @@ async function syncCreatives(
         const impressions = parseInt(r.impressions || '0', 10) || 0;
         const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
         const results = resolveResultsFromActions(r.actions);
+        const campaignName = r.campaign_name || '';
         const existing = preparedByKey.get(key);
         if (existing) {
           existing.spend += spend;
           existing.impressions += impressions;
           existing.linkClicks += linkClicks;
           existing.results += results;
+          // campaignName isn't part of the aggregation key and Meta returns
+          // the same name for the same ad+day across attribution buckets —
+          // first-seen value is fine, no need to overwrite on collision.
         } else {
-          preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results });
+          preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results, campaignName });
         }
       }
       const prepared = Array.from(preparedByKey.values());
@@ -1403,16 +1450,18 @@ async function syncCreatives(
       // Postgres log flood this batching pass fixes.
       for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
         await query(
-          `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results)
-           SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results
-           FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[])
-             AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results)
+          `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results, campaign_name)
+           SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results, campaign_name
+           FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[], $9::text[])
+             AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results, campaign_name)
            ON CONFLICT (account_id, asset_key, ad_id, date) DO UPDATE SET
-             spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results`,
+             spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results,
+             campaign_name = EXCLUDED.campaign_name`,
           [
             accountId,
             batch.map(p => p.assetKey), batch.map(p => p.adId), batch.map(p => p.date),
             batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results),
+            batch.map(p => p.campaignName),
           ]
         );
       }
