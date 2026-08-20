@@ -12,6 +12,12 @@ interface AssetSummary {
   body: string | null;
   title: string | null;
   name: string | null;
+  // Admin-only manual tags (Theme, UGC status) — see POST /api/admin/creative-tags.
+  // Null = untagged. Read-only for real clients (shown as a badge if set,
+  // see DashboardClient.tsx's Creatives v2 card template); the edit
+  // dropdowns only render while _isAdminView is true.
+  theme: string | null;
+  ugcStatus: string | null;
   spend: number;
   results: number;
   impressions: number;
@@ -114,8 +120,8 @@ export async function GET(req: NextRequest) {
     }
 
     const assetKeys = Array.from(new Set(breakdownRows.map(r => r.asset_key)));
-    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null }>(
-      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; theme: string | null; ugc_status: string | null }>(
+      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash, theme, ugc_status FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
       [accountId, assetKeys]
     );
     const assetByKey = new Map(assetRows.map(a => [a.asset_key, a] as const));
@@ -195,6 +201,8 @@ export async function GET(req: NextRequest) {
           body: canonicalAsset?.body ?? null,
           title: canonicalAsset?.title ?? null,
           name: canonicalAsset?.title ?? null,
+          theme: canonicalAsset?.theme ?? null,
+          ugcStatus: canonicalAsset?.ugc_status ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0,
           adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,

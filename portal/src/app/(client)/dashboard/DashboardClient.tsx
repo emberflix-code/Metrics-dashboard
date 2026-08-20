@@ -181,6 +181,14 @@ interface CreativeRow {
   // show_creative_campaign_breakdown flag is on.
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
+  // Theme/UGC tagging (see AssetBreakdownRow below) reuses this same card
+  // template for static (non-DCO) assets too. /api/meta/creatives never
+  // returns these — they're stamped client-side (accountId) or left null
+  // (theme/ugcStatus, since that route has no DB read path — see
+  // /api/meta/asset-breakdown for the cached-mode equivalent that does).
+  accountId: string;
+  theme: string | null;
+  ugcStatus: string | null;
 }
 interface AssetBreakdownRow {
   assetKey: string;
@@ -191,6 +199,17 @@ interface AssetBreakdownRow {
   body: string | null;
   title: string | null;
   name: string | null;
+  // Admin-only manual tags — see POST /api/admin/creative-tags. Null =
+  // untagged. Read-only display (badge) for real clients; edit dropdowns
+  // gated on _isAdminView, same as the internal-filename nameLine below.
+  theme: string | null;
+  ugcStatus: string | null;
+  // Which ad account this asset came from — the route response doesn't
+  // include it (it's implicit in which account was queried), so it's
+  // stamped on here at merge time, before per-account identity is lost.
+  // Needed so the tag-save call knows which account_id row to UPDATE when
+  // an admin tags a creative from the merged multi-account Creatives view.
+  accountId: string;
   spend: number; results: number; impressions: number; linkClicks: number;
   ctr: number; cpl: number;
   adCount: number;
@@ -1030,6 +1049,26 @@ function renderAnalytics() {
 }
 
 // ── Creatives (asset-level breakdown) ─────────────────────────────────────────
+// Admin-only manual creative tags — Theme and UGC status. Value/label pairs
+// shared between the read-only badge (shown to every viewer) and the
+// admin-only edit dropdowns (see the Creatives v2 card template below).
+const THEME_OPTIONS: { value: string; label: string }[] = [
+  { value: 'non-active', label: 'Non-Active' },
+  { value: 'strength', label: 'Strength' },
+  { value: 'tread', label: 'Tread' },
+  { value: 'strength+tread', label: 'Strength + Tread' },
+];
+const UGC_OPTIONS: { value: string; label: string }[] = [
+  { value: 'ugc', label: 'UGC' },
+  { value: 'non-ugc', label: 'Non-UGC' },
+];
+function _themeLabel(v: string | null | undefined): string {
+  return THEME_OPTIONS.find(o => o.value === v)?.label || '';
+}
+function _ugcLabel(v: string | null | undefined): string {
+  return UGC_OPTIONS.find(o => o.value === v)?.label || '';
+}
+
 function _typeBadge(t: CreativeRow['type']) {
   const m = {
     image: { label: 'Image', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
@@ -1086,6 +1125,9 @@ function renderDcoAssets() {
     campaigns: s.campaigns,
     campaignsTruncated: s.campaignsTruncated,
     hidden: s.thumbnail === null,
+    accountId: s.accountId,
+    theme: s.theme,
+    ugcStatus: s.ugcStatus,
   }));
 
   // Bucket static rows by type so they merge with the DCO image/video arrays.
@@ -1421,6 +1463,9 @@ function renderCreativesV2() {
     campaigns: s.campaigns,
     campaignsTruncated: s.campaignsTruncated,
     hidden: s.thumbnail === null,
+    accountId: s.accountId,
+    theme: s.theme,
+    ugcStatus: s.ugcStatus,
   }));
   const dcoImages = _dcoAssets?.images || [];
   const dcoVideos = _dcoAssets?.videos || [];
@@ -1597,6 +1642,26 @@ function renderCreativesV2() {
     const nameLine = _isAdminView
       ? `<div class="text-xs font-semibold text-slate-200 truncate mb-2" title="${(r.name||r.title||'').replace(/"/g,'&quot;')}">${r.name || r.title || 'Untitled'}</div>`
       : '';
+    // Theme / UGC tags — manual admin-only classification, no Meta equivalent.
+    // Everyone sees the badges (when set); only admins (impersonation view)
+    // get the edit dropdowns to set/change/clear them.
+    const themeUgcLine = _isAdminView
+      ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
+          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
+            <option value="">Theme…</option>
+            ${THEME_OPTIONS.map(o => `<option value="${o.value}"${r.theme===o.value?' selected':''}>${o.label}</option>`).join('')}
+          </select>
+          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','ugcStatus',this.value)">
+            <option value="">Type…</option>
+            ${UGC_OPTIONS.map(o => `<option value="${o.value}"${r.ugcStatus===o.value?' selected':''}>${o.label}</option>`).join('')}
+          </select>
+        </div>`
+      : (r.theme || r.ugcStatus)
+        ? `<div class="flex items-center gap-1 mb-2 flex-wrap">
+            ${r.theme ? `<span class="text-[10px] font-medium bg-indigo-500/15 text-indigo-300 px-1.5 py-0.5 rounded">${_themeLabel(r.theme)}</span>` : ''}
+            ${r.ugcStatus ? `<span class="text-[10px] font-medium bg-fuchsia-500/15 text-fuchsia-300 px-1.5 py-0.5 rounded">${_ugcLabel(r.ugcStatus)}</span>` : ''}
+          </div>`
+        : '';
     return `
       <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
@@ -1610,6 +1675,7 @@ function renderCreativesV2() {
         </div>
         <div class="p-3">
           ${nameLine}
+          ${themeUgcLine}
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mb-2">
             <div class="text-slate-500">Spend</div><div class="text-right font-mono text-emerald-300">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
             <div class="text-slate-500">Impressions</div><div class="text-right font-mono text-slate-300">${r.impressions.toLocaleString('en-US')}</div>
@@ -1710,7 +1776,13 @@ async function fetchDcoAssets() {
         // Partial error: some chunks failed, rest succeeded. Surface it and
         // still render what we got.
         if (json.error?.message && !firstBreakdownError) firstBreakdownError = json.error.message;
-        return json as { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsWithSpec: number; adsTotal: number; reason?: string; dcoAdIds?: string[] };
+        const parsed = json as { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsWithSpec: number; adsTotal: number; reason?: string; dcoAdIds?: string[] };
+        // Stamp the account each row came from — the route response has no
+        // notion of it (it's implicit in which account URL was hit), and
+        // it's lost once rows from multiple accounts are merged below.
+        for (const row of parsed.images || []) row.accountId = acc;
+        for (const row of parsed.videos || []) row.accountId = acc;
+        return parsed;
       } catch (e) {
         if (!firstBreakdownError) firstBreakdownError = e instanceof Error ? e.message : 'Creatives fetch failed';
         return null;
@@ -1799,7 +1871,11 @@ async function fetchStaticAssets() {
           if (!firstStaticError) firstStaticError = json.error.message || 'Creatives fetch failed';
           return null;
         }
-        return json as { data: CreativeRow[] };
+        const parsed = json as { data: CreativeRow[] };
+        // Stamp the originating account — see AssetBreakdownRow's accountId
+        // for why (this route has no notion of it either).
+        for (const row of parsed.data || []) (row as any).accountId = acc;
+        return parsed;
       } catch (e) {
         if (!firstStaticError) firstStaticError = e instanceof Error ? e.message : 'Creatives fetch failed';
         return null;
@@ -1829,7 +1905,7 @@ async function fetchStaticAssets() {
         // /api/meta/creatives (this route) has no campaign dimension — default
         // explicitly rather than trust the `as CreativeRow[]` cast above, since
         // the API genuinely never sends these fields for static/non-DCO rows.
-        if (!existing) { merged.set(row.assetKey, { ...row, campaigns: row.campaigns || [], campaignsTruncated: false }); continue; }
+        if (!existing) { merged.set(row.assetKey, { ...row, campaigns: row.campaigns || [], campaignsTruncated: false, theme: row.theme ?? null, ugcStatus: row.ugcStatus ?? null }); continue; }
         // Cross-account same-asset merge (rare but defensive).
         existing.spend += row.spend;
         existing.results += row.results;
@@ -2785,6 +2861,9 @@ if (typeof window !== 'undefined') {
         ads: dco.ads,
         campaigns: dco.campaigns,
         campaignsTruncated: dco.campaignsTruncated,
+        accountId: dco.accountId,
+        theme: dco.theme,
+        ugcStatus: dco.ugcStatus,
       };
     } else if (_staticAssets) {
       const s = _staticAssets.find(x => x.assetKey === assetKey);
@@ -2796,6 +2875,28 @@ if (typeof window !== 'undefined') {
     _renderModalAdsTab(asCreative);
     modal.classList.remove('hidden');
     document.body.style.overflow = 'hidden';
+  };
+
+  // Admin-only (see _isAdminView gating on the dropdowns that call this):
+  // saves a single Theme or UGC tag for one creative asset, then patches the
+  // in-memory row so the badge/dropdown reflects it without a full refetch.
+  (window as any)._saveCreativeTag = async (accountId: string, assetKey: string, field: 'theme' | 'ugcStatus', value: string) => {
+    try {
+      const res = await fetch('/api/admin/creative-tags', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId, assetKey, [field]: value || null }),
+      });
+      if (!res.ok) {
+        const json = await res.json().catch(() => ({}));
+        throw new Error(json.error || 'Save failed');
+      }
+      const patch = (row: AssetBreakdownRow) => { if (row.assetKey === assetKey) (row as any)[field] = value || null; };
+      if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
+      showNotification(`${field === 'theme' ? 'Theme' : 'Type'} saved`, 'success', 2000);
+    } catch (e) {
+      showNotification(e instanceof Error ? e.message : 'Save failed', 'error');
+    }
   };
 
   (window as any)._closeCreative = () => {

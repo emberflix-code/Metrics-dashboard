@@ -366,6 +366,16 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_meta_kpi_sheet BOO
 // routes merge near-identical rows into one card. See src/lib/phash.ts.
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS phash TEXT`).catch(() => {});
 
+// Admin-only manual tagging (while impersonating a client — see
+// _isAdminView in DashboardClient.tsx): Theme and UGC status, neither of
+// which Meta's API has any concept of. Nullable — untagged is a real state,
+// not an implicit 5th/3rd value, and both are constrained at the
+// application layer (POST /api/admin/creative-tags) rather than a DB CHECK
+// constraint, matching this codebase's existing style of app-layer
+// validation over DB constraints for admin-form-driven fixed option lists.
+pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS theme TEXT`).catch(() => {});
+pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS ugc_status TEXT`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]
