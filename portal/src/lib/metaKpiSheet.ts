@@ -11,10 +11,12 @@
 // 31 columns don't fit it. Only the low-level, format-agnostic primitives
 // (parseCsv, normalizeDay, parseNum, the gviz CSV URL) are reused.
 //
-// Single-tab-per-client only (no multi-tab pipe-union like fetchSheetRows) —
-// this sheet's "Account" tab already spans every location for a client
-// group, so there's no need to aggregate across multiple tabs the way the
-// "Alloy Ops" umbrella client does for the leads sheet.
+// This module fetches ONE tab at a time — the sheet is organized as one tab
+// per calendar month (not one tab per client-group like the leads sheet's
+// "Alloy Ops" pattern), so the month->tab mapping and multi-month
+// aggregation live one layer up, in /api/sheets/meta-kpi/route.ts
+// (client_meta_kpi_sheet_tabs) — this function has no concept of "month" at
+// all, it just parses whatever tab name it's given.
 
 import { parseCsv, normalizeDay, parseNum, SheetError } from './sheets';
 

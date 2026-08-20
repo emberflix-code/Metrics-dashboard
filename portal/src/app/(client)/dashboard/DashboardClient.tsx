@@ -1970,10 +1970,14 @@ async function fetchCpaAcquisitionsForClient(since: string, until: string): Prom
 }
 
 // Meta KPI sheet — fetched once (not per date-range change like the
-// GHL/CPA fetches above): the route returns the whole sheet's rows
-// unfiltered, and both the date-range clipping AND the five dropdown
-// filters are applied client-side in renderCards()/the filter bar, so
-// there's nothing date-range-specific to ask the server for.
+// GHL/CPA fetches above). Called with NO since/until params deliberately:
+// the route's no-range form returns every month this client has either a
+// configured tab OR any cached data (see /api/sheets/meta-kpi's module
+// comment) — i.e. the full all-time dataset — and both the date-range
+// clipping AND the five dropdown filters are applied client-side in
+// renderCards()/the filter bar. This also means the dropdown option lists
+// stay all-time (a70fbbe) even though the sheet itself is one-tab-per-month
+// under the hood; the client never needs to know about that split.
 async function fetchMetaKpiSheetForClient(): Promise<void> {
   if (!_showMetaKpiSheet) { _metaKpiSheetRows = null; return; }
   if (_metaKpiSheetRows !== null) return; // already fetched this session

@@ -2,6 +2,8 @@ import { query } from './db';
 import { decrypt } from './crypto';
 import { resolveResultsFromActions } from './meta';
 import { computePhash } from './phash';
+import { fetchMetaKpiSheetRows } from './metaKpiSheet';
+import { SheetError } from './sheets';
 
 // Session-free Meta → Postgres sync for the DB-backed dashboard cache.
 // Mirrors getClientConnection()'s token resolution but without a session —
@@ -1724,6 +1726,60 @@ export async function syncAccountRange(
   }
 }
 
+// Refreshes meta_kpi_sheet_cache for every month this client has a tab
+// configured for (client_meta_kpi_sheet_tabs) — the fallback source
+// /api/sheets/meta-kpi falls back to when a date range's month has no live
+// tab configured, or the live fetch fails. One failed month's fetch doesn't
+// block the others; each month is independent, same posture as every other
+// step in this file that shouldn't let one bad chunk sink the whole run.
+async function syncMetaKpiSheetCache(clientId: string): Promise<void> {
+  const [client] = await query<{ meta_kpi_sheet_id: string; show_meta_kpi_sheet: boolean }>(
+    `SELECT meta_kpi_sheet_id, show_meta_kpi_sheet FROM clients WHERE id = $1`,
+    [clientId]
+  );
+  if (!client?.show_meta_kpi_sheet || !client.meta_kpi_sheet_id) return;
+
+  const tabRows = await query<{ month: string; tab_name: string }>(
+    `SELECT to_char(month, 'YYYY-MM-DD') AS month, tab_name FROM client_meta_kpi_sheet_tabs WHERE client_id = $1`,
+    [clientId]
+  );
+  if (tabRows.length === 0) return;
+
+  for (const { tab_name } of tabRows) {
+    try {
+      const { rows } = await fetchMetaKpiSheetRows(client.meta_kpi_sheet_id, tab_name);
+      if (rows.length === 0) continue;
+      for (const batch of chunkArrayGeneric(rows, DB_BATCH_SIZE)) {
+        await query(
+          `INSERT INTO meta_kpi_sheet_cache
+             (client_id, day, campaign, spend, results, bookings, joins, campaign_type, offer, location_name, state, landing_page, synced_at)
+           SELECT $1, day::date, campaign, spend, results, bookings, joins, campaign_type, offer, location_name, state, landing_page, now()
+           FROM unnest($2::text[], $3::text[], $4::numeric[], $5::int[], $6::int[], $7::int[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[])
+             AS t(day, campaign, spend, results, bookings, joins, campaign_type, offer, location_name, state, landing_page)
+           ON CONFLICT (client_id, day, campaign) DO UPDATE SET
+             spend = EXCLUDED.spend, results = EXCLUDED.results, bookings = EXCLUDED.bookings, joins = EXCLUDED.joins,
+             campaign_type = EXCLUDED.campaign_type, offer = EXCLUDED.offer, location_name = EXCLUDED.location_name,
+             state = EXCLUDED.state, landing_page = EXCLUDED.landing_page, synced_at = now()`,
+          [
+            clientId,
+            batch.map(r => r.day), batch.map(r => r.campaign), batch.map(r => r.spend),
+            batch.map(r => r.results), batch.map(r => r.bookings), batch.map(r => r.joins),
+            batch.map(r => r.campaignType), batch.map(r => r.offer), batch.map(r => r.locationName),
+            batch.map(r => r.state), batch.map(r => r.landingPage),
+          ]
+        );
+      }
+    } catch (err) {
+      // A missing/renamed tab (SheetError) or a transient fetch failure for
+      // one month shouldn't stop the others — the admin-side warning
+      // (mirroring the existing sheetTabWarning check) is what surfaces
+      // this, not this background sync path.
+      const message = err instanceof SheetError ? err.message : (err instanceof Error ? err.message : 'Unknown error');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ clientId, step: 'metaKpiSheetCache', tab: tab_name, error: message }));
+    }
+  }
+}
+
 export async function syncClientAccounts(clientId: string): Promise<SyncAccountResult[]> {
   const [client] = await query<{ ad_account_ids: string[] | null }>(
     `SELECT ad_account_ids FROM clients WHERE id = $1`,
@@ -1737,6 +1793,14 @@ export async function syncClientAccounts(clientId: string): Promise<SyncAccountR
   const results: SyncAccountResult[] = [];
   for (const accountId of accountIds) {
     results.push(await syncAccount(accountId));
+  }
+  // Independent of the Meta account sync above (different data source
+  // entirely) — failure here must never affect the returned Meta sync
+  // results, so it's awaited but not folded into `results`.
+  try {
+    await syncMetaKpiSheetCache(clientId);
+  } catch (err) {
+    console.error('[META-SYNC-ERR]', JSON.stringify({ clientId, step: 'metaKpiSheetCache', error: err instanceof Error ? err.message : 'Unknown error' }));
   }
   return results;
 }

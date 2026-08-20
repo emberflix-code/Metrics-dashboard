@@ -131,19 +131,32 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
     }
   }
 
+  // Meta KPI sheet's month->tab mapping. Fetched here (not just the raw
+  // sheet_id) since the admin form now needs a full row list, and the
+  // mismatch check below needs to walk every configured month, not just one.
+  const metaKpiSheetTabDbRows = await query<{ month: string; tab_name: string }>(
+    `SELECT to_char(month, 'YYYY-MM') AS month, tab_name FROM client_meta_kpi_sheet_tabs WHERE client_id = $1 ORDER BY month DESC`,
+    [client.id]
+  );
+  const metaKpiSheetTabs = metaKpiSheetTabDbRows.map(r => ({ month: r.month, tabName: r.tab_name }));
+
   // Same silent-fallback risk as the leads sheet above, for the Meta KPI
   // sheet (Bookings/Joins + filter dimensions) — this one has no
-  // tabLikelyMatches-style safety net (single-tab, no campaign-name check
-  // in metaKpiSheet.ts), so a MISSING_COLUMNS or fetch failure is the only
+  // tabLikelyMatches-style safety net (no campaign-name check in
+  // metaKpiSheet.ts), so a MISSING_COLUMNS or fetch failure is the only
   // signal available; surface it here rather than let it fail silently on
-  // first dashboard load.
-  let metaKpiSheetWarning: string | null = null;
-  if (client.meta_kpi_sheet_id && client.meta_kpi_sheet_tab) {
-    try {
-      await fetchMetaKpiSheetRows(client.meta_kpi_sheet_id, client.meta_kpi_sheet_tab);
-    } catch (err) {
-      if (err instanceof SheetError) {
-        metaKpiSheetWarning = `Meta KPI sheet tab "${client.meta_kpi_sheet_tab}" failed to load: ${err.message}`;
+  // first dashboard load. Checks every configured month, not just one —
+  // a typo in any single month's tab name would otherwise go unnoticed
+  // (the dashboard just silently falls back to cache for that month).
+  const metaKpiSheetWarnings: string[] = [];
+  if (client.meta_kpi_sheet_id) {
+    for (const { month, tabName } of metaKpiSheetTabs) {
+      try {
+        await fetchMetaKpiSheetRows(client.meta_kpi_sheet_id, tabName);
+      } catch (err) {
+        if (err instanceof SheetError) {
+          metaKpiSheetWarnings.push(`${month}: tab "${tabName}" failed to load — ${err.message}`);
+        }
       }
     }
   }
@@ -351,16 +364,19 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           <p className="text-sm text-slate-400 mb-5">
             Connect the Apps-Script-exported Account sheet to add Bookings and Joins KPI cards, filterable by Campaign Type, Offer, Location Name, State, and Landing Page &mdash; fields Meta&apos;s own API doesn&apos;t carry.
           </p>
-          {metaKpiSheetWarning && (
-            <div className="mb-4 p-3 bg-amber-950/40 border border-amber-800/60 rounded-lg text-xs text-amber-300">
-              <strong>Sheet error.</strong> {metaKpiSheetWarning}
+          {metaKpiSheetWarnings.length > 0 && (
+            <div className="mb-4 p-3 bg-amber-950/40 border border-amber-800/60 rounded-lg text-xs text-amber-300 space-y-1">
+              <strong>Sheet error{metaKpiSheetWarnings.length > 1 ? 's' : ''}.</strong>
+              <ul className="list-disc list-inside">
+                {metaKpiSheetWarnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
             </div>
           )}
           <MetaKpiSheetConfigForm
             clientId={client.id}
             currentSheetId={client.meta_kpi_sheet_id ?? ''}
-            currentSheetTab={client.meta_kpi_sheet_tab ?? ''}
             currentEnabled={client.show_meta_kpi_sheet ?? false}
+            currentTabs={metaKpiSheetTabs}
           />
         </div>
 

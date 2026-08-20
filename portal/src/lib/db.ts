@@ -291,12 +291,61 @@ pool.query(`UPDATE clients SET hide_adset_ad_tabs = true, hide_adset_ad_tabs_def
 // fields Meta's API has no concept of — Campaign Type, Offer, Location
 // Name, State, Landing Page, and manually-tallied Bookings/Joins. Off by
 // default; when on, the dashboard shows extra Bookings/Joins KPI cards
-// filterable by those five dimensions. Separate sheet_id/sheet_tab columns
-// (not reusing the existing ones) since this is a structurally different,
-// much wider sheet than the leads-override one.
+// filterable by those five dimensions. Separate sheet_id column (not
+// reusing the existing one) since this is a structurally different, much
+// wider sheet than the leads-override one.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS meta_kpi_sheet_id TEXT NOT NULL DEFAULT ''`).catch(() => {});
+// meta_kpi_sheet_tab (singular) is superseded by client_meta_kpi_sheet_tabs
+// below — the real sheet turned out to have ONE TAB PER MONTH, not one tab
+// covering all time, so a single tab name can't work. Left in place
+// (unused going forward) rather than DROP COLUMN'd — no destructive
+// migration needed, it just stops being read/written.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS meta_kpi_sheet_tab TEXT NOT NULL DEFAULT ''`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_meta_kpi_sheet BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+// One row per calendar month this client has a Meta KPI sheet tab
+// configured for — same shape as client_retainers below (one admin-edited
+// row per month). `month` is always the 1st of the month.
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS client_meta_kpi_sheet_tabs (
+        client_id  UUID NOT NULL,
+        month      DATE NOT NULL,
+        tab_name   TEXT NOT NULL,
+        PRIMARY KEY (client_id, month)
+      )
+    `);
+  } catch { /* surface via routes if it fails */ }
+})();
+// Fallback cache for the Meta KPI sheet — populated by the normal "Sync
+// now" flow (see metaSync.ts) so a date range covering a month with no
+// live tab configured (or whose live fetch fails) still has data instead
+// of going blank. Row grain matches the sheet itself (one row per
+// campaign+day), not pre-aggregated, so the existing client-side
+// filter/aggregation logic in DashboardClient.tsx works unchanged against
+// cached rows.
+(async () => {
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_kpi_sheet_cache (
+        client_id      UUID NOT NULL,
+        day            DATE NOT NULL,
+        campaign       TEXT NOT NULL,
+        spend          NUMERIC(12,2) NOT NULL DEFAULT 0,
+        results        INT NOT NULL DEFAULT 0,
+        bookings       INT NOT NULL DEFAULT 0,
+        joins          INT NOT NULL DEFAULT 0,
+        campaign_type  TEXT NOT NULL DEFAULT '',
+        offer          TEXT NOT NULL DEFAULT '',
+        location_name  TEXT NOT NULL DEFAULT '',
+        state          TEXT NOT NULL DEFAULT '',
+        landing_page   TEXT NOT NULL DEFAULT '',
+        synced_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (client_id, day, campaign)
+      )
+    `);
+  } catch { /* surface via routes if it fails */ }
+})();
 (async () => {
   try {
     await pool.query(`

@@ -161,6 +161,37 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET show_meta_kpi_sheet = $1 WHERE id = $2', [!!body.show_meta_kpi_sheet, params.id]);
   }
 
+  // Meta KPI sheet's month->tab mapping: [{ month: "2026-07", tabName: "..." }, ...].
+  // Unlike `retainers` above, this REPLACES the full set every save rather
+  // than only upserting — MetaKpiSheetConfigForm always submits its entire
+  // current row list (including rows the admin clicked "Remove" on, which
+  // are simply absent from the array), so a delete-then-insert is what the
+  // UI actually needs; upsert-only would let a removed month silently keep
+  // driving live fetches/cache reads forever.
+  if (body.meta_kpi_sheet_tabs !== undefined) {
+    if (!Array.isArray(body.meta_kpi_sheet_tabs)) {
+      return NextResponse.json({ error: 'meta_kpi_sheet_tabs must be an array' }, { status: 400 });
+    }
+    for (const t of body.meta_kpi_sheet_tabs) {
+      const month = String(t?.month ?? '').trim();
+      const tabName = String(t?.tabName ?? '').trim();
+      if (!MONTH_RE.test(month) || !tabName) {
+        return NextResponse.json({ error: `Invalid meta_kpi_sheet_tabs entry: ${JSON.stringify(t)}` }, { status: 400 });
+      }
+    }
+    await query('DELETE FROM client_meta_kpi_sheet_tabs WHERE client_id = $1', [params.id]);
+    for (const t of body.meta_kpi_sheet_tabs) {
+      const month = String(t.month).trim();
+      const tabName = String(t.tabName).trim();
+      await query(
+        `INSERT INTO client_meta_kpi_sheet_tabs (client_id, month, tab_name)
+         VALUES ($1, to_date($2, 'YYYY-MM'), $3)
+         ON CONFLICT (client_id, month) DO UPDATE SET tab_name = EXCLUDED.tab_name`,
+        [params.id, month, tabName]
+      );
+    }
+  }
+
   if (body.retainer_mode !== undefined) {
     const v = String(body.retainer_mode).trim();
     if (!VALID_RETAINER_MODES.has(v)) {
