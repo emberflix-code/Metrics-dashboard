@@ -1242,8 +1242,20 @@ async function syncCreatives(
           );
         }
         if (entry?.picture) {
+          // Unconditional overwrite, NOT COALESCE(thumbnail, ...) — the
+          // earlier /ads pass (deriveAssets) already wrote SOME thumbnail
+          // for this video (its own fallback chain lands on
+          // creative.thumbnail_url when object_story_spec has no
+          // video_data.image_url), but that fallback is Meta's
+          // session-authenticated facebook.com/ads/image/?d=... endpoint —
+          // it 403s/errors for any browser without an active Meta login, so
+          // it renders as a broken image (dashboard's onerror then shows
+          // "NO PREVIEW") even though the DB row looks populated. This
+          // advideos-sourced `picture` field is a public fbcdn.net CDN URL
+          // that works for any viewer, so it must always win over whatever
+          // COALESCE would have protected.
           await query(
-            `UPDATE meta_creative_assets SET thumbnail = COALESCE(thumbnail, $3), thumbnail_fetched_at = now(), updated_at = now() WHERE account_id = $1 AND asset_key = $2`,
+            `UPDATE meta_creative_assets SET thumbnail = $3, thumbnail_fetched_at = now(), updated_at = now() WHERE account_id = $1 AND asset_key = $2`,
             [accountId, `video:${vid}`, entry.picture]
           );
         }
