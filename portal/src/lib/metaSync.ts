@@ -1000,8 +1000,54 @@ async function syncCreatives(
     }
   }
 
+  // Staleness backfill: Meta's thumbnail/image CDN URLs are signed with a
+  // short expiry (confirmed empirically: ~4 days from fetch time, via the
+  // `oe=` param) — an ad that already HAS a meta_creative_asset_ad_map row
+  // is invisible to the "missing metadata" backfill above (its LEFT JOIN
+  // only catches ad_ids with no map entry at all), so an asset fetched once
+  // and never touched again just silently goes dead a few days later,
+  // showing "NO PREVIEW" in the dashboard even though the DB row is
+  // populated. Re-fetches assets whose thumbnail hasn't been refreshed in
+  // over 3 days, via the same by-ID lookup (works for DELETED/ARCHIVED ads
+  // too). Time-boxed and capped independently from the missing-metadata
+  // pass so one large backlog can't starve the other.
+  const THUMBNAIL_STALE_DAYS = 3;
+  const STALE_THUMBNAIL_BACKFILL_LIMIT = 500;
+  const STALE_THUMBNAIL_BACKFILL_BUDGET_MS = 45_000;
+  const staleAdIdRows = await query<{ ad_id: string }>(
+    `SELECT DISTINCT m.ad_id
+     FROM meta_creative_asset_ad_map m
+     JOIN meta_creative_assets a ON a.account_id = m.account_id AND a.asset_key = m.asset_key
+     WHERE m.account_id = $1
+       AND a.type IN ('image', 'video')
+       AND (a.thumbnail_fetched_at IS NULL OR a.thumbnail_fetched_at < now() - interval '${THUMBNAIL_STALE_DAYS} days')
+     LIMIT ${STALE_THUMBNAIL_BACKFILL_LIMIT}`,
+    [accountId]
+  );
+  const staleAdIds = staleAdIdRows.map(r => r.ad_id);
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:staleThumbnailBackfill', count: staleAdIds.length }));
+  if (staleAdIds.length > 0) {
+    const staleDeadline = Date.now() + STALE_THUMBNAIL_BACKFILL_BUDGET_MS;
+    const AD_LOOKUP_CHUNK = 50;
+    for (const chunk of chunkArrayGeneric(staleAdIds, AD_LOOKUP_CHUNK)) {
+      if (Date.now() > staleDeadline) break;
+      try {
+        const u = new URL(`${GRAPH}/`);
+        u.searchParams.set('ids', chunk.join(','));
+        u.searchParams.set('fields', 'id,effective_status,creative{id,image_url,image_hash,thumbnail_url,video_id,body,title,object_story_spec}');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as Record<string, AdCreativeResp | { error?: unknown }>;
+        for (const id of chunk) {
+          const entry = json[id];
+          if (entry && !('error' in entry) && (entry as AdCreativeResp).id) ads.push(entry as AdCreativeResp);
+        }
+      } catch { /* leave these stale, retried next sync — thumbnail_fetched_at unchanged so it stays in the query above */ }
+    }
+  }
+
   const assetsByKey = new Map<string, AssetDerived & { thumbnail: string | null }>();
-  // Keyed by `${assetKey} ${adId}` — sums weight when the same ad
+  // Keyed by `${assetKey}|${adId}` — sums weight when the same ad
   // references the same asset more than once (e.g. two carousel slides
   // sharing one image hash within a single ad), rather than the later
   // write silently overwriting the earlier one's weight.
@@ -1071,7 +1117,7 @@ async function syncCreatives(
       const existing = assetsByKey.get(derived.assetKey);
       if (!existing) assetsByKey.set(derived.assetKey, derived);
       else if (!existing.thumbnail && derived.thumbnail) existing.thumbnail = derived.thumbnail;
-      const pairKey = `${derived.assetKey} ${derived.adId}`;
+      const pairKey = `${derived.assetKey}|${derived.adId}`;
       const existingPair = adMapByPair.get(pairKey);
       if (existingPair) existingPair.weight += derived.weight;
       else adMapByPair.set(pairKey, { assetKey: derived.assetKey, adId: derived.adId, weight: derived.weight });
