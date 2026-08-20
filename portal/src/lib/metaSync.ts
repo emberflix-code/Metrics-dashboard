@@ -656,8 +656,17 @@ function buildSyncRanges(
   lastSuccessUntil: string | null, newestSynced: string | null, earliestSynced: string | null, backfillComplete: boolean
 ): { since: string; until: string; kind: 'topup' | 'backfill' }[] {
   const ranges: { since: string; until: string; kind: 'topup' | 'backfill' }[] = [];
-  const topUpSince = lastSuccessUntil
-    ? (daysBetween(floorDate, addDays(lastSuccessUntil, -7)) > 0 ? addDays(lastSuccessUntil, -7) : floorDate)
+  // A stored watermark ahead of yesterday should never happen (this run owns
+  // that value end-to-end), but a stale/bad write from before this clamp
+  // existed — or a future clock/timezone glitch — can leave one sitting in
+  // the DB indefinitely, since nothing else here ever corrects it going
+  // forward. Clamp defensively rather than trust the stored value: a
+  // request built from it is what produced Meta's "(#100) since cannot be
+  // in the future" on AF Regional Omega's account (last_success_until had
+  // been persisted as 2026-08-31).
+  const clampedLastSuccessUntil = lastSuccessUntil && daysBetween(lastSuccessUntil, yesterday) < 0 ? yesterday : lastSuccessUntil;
+  const topUpSince = clampedLastSuccessUntil
+    ? (daysBetween(floorDate, addDays(clampedLastSuccessUntil, -7)) > 0 ? addDays(clampedLastSuccessUntil, -7) : floorDate)
     : floorDate;
   if (daysBetween(topUpSince, yesterday) >= 0) ranges.push({ since: topUpSince, until: yesterday, kind: 'topup' });
 
