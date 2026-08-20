@@ -29,6 +29,8 @@ interface ClientRow {
   cpa_sheet_tab: string;
   show_ltv: boolean;
   ltv_value: number;
+  show_creative_campaign_breakdown: boolean;
+  hide_adset_ad_tabs: boolean;
 }
 
 export default async function DashboardPage() {
@@ -64,7 +66,8 @@ export default async function DashboardPage() {
             c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
             c.leads_source, c.show_bookings, c.show_book_rate,
             (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
-            c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value
+            c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value,
+            c.show_creative_campaign_breakdown, c.hide_adset_ad_tabs
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -135,6 +138,8 @@ export default async function DashboardPage() {
         showCpa={!!(client?.show_cpa && client?.cpa_sheet_tab)}
         showLtv={!!(client?.show_ltv && client?.cpa_sheet_tab)}
         ltvValue={client?.ltv_value ?? 0}
+        showCreativeCampaignBreakdown={!!client?.show_creative_campaign_breakdown}
+        hideAdsetAdTabs={!!client?.hide_adset_ad_tabs}
         dataSourceByAccount={dataSourceByAccount}
         isAdminView={!!impersonatedBy}
       />

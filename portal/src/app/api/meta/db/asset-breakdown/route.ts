@@ -21,8 +21,14 @@ interface AssetSummary {
   adCount: number;
   adIds: string[];
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+  // Mirrors the live route's campaigns[]/campaignsTruncated — see
+  // /api/meta/asset-breakdown/route.ts for the shape and cap rationale.
+  campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
+  campaignsTruncated: boolean;
   hidden: boolean;
 }
+
+const CAMPAIGNS_CAP = 50;
 
 // DB-backed mirror of /api/meta/asset-breakdown. Aggregates
 // meta_asset_breakdown_daily for the requested range, joins asset metadata
@@ -84,6 +90,29 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ images: [], videos: [], reason: 'no_asset_feed_spec', adsWithSpec: 0, adsTotal: 0, dcoAdIds: [] });
     }
 
+    // Separate aggregate grouped by campaign instead of by ad, for the "By
+    // Campaign" creative breakdown. Kept as its own query (rather than adding
+    // campaign_name to the GROUP BY above) so the existing per-ad path can't
+    // regress — campaign_name defaults to '' for rows synced before migration
+    // 022, which would otherwise fragment one ad's per-ad total across a real
+    // campaign name AND an empty-string bucket if it were mixed into the same
+    // grouped query.
+    const campaignRows = await query<{ asset_key: string; campaign_name: string; ad_count: string; spend: string; impressions: string; link_clicks: string; results: string }>(
+      `SELECT asset_key, campaign_name, COUNT(DISTINCT ad_id)::text AS ad_count,
+              SUM(spend)::text AS spend, SUM(impressions)::text AS impressions,
+              SUM(link_clicks)::text AS link_clicks, SUM(results)::text AS results
+       FROM meta_asset_breakdown_daily
+       WHERE account_id = $1 AND date BETWEEN $2 AND $3 AND ad_id = ANY($4)
+       GROUP BY asset_key, campaign_name`,
+      [accountId, since, until, Array.from(allowedAdIds)]
+    );
+    const campaignRowsByAssetKey = new Map<string, typeof campaignRows>();
+    for (const r of campaignRows) {
+      const list = campaignRowsByAssetKey.get(r.asset_key) || [];
+      list.push(r);
+      campaignRowsByAssetKey.set(r.asset_key, list);
+    }
+
     const assetKeys = Array.from(new Set(breakdownRows.map(r => r.asset_key)));
     const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null }>(
       `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
@@ -109,6 +138,31 @@ export async function GET(req: NextRequest) {
 
     const images = new Map<string, AssetSummary & { _adIdSet: Set<string> }>();
     const videos = new Map<string, AssetSummary & { _adIdSet: Set<string> }>();
+
+    // Per-canonical-asset campaign totals, built alongside the main loop so
+    // phash-merged asset_keys (multiple original hashes -> one canonical
+    // card) fold their campaign rows together the same way spend/results do.
+    const campaignAggByCanonicalKey = new Map<string, Map<string, { adCount: number; spend: number; results: number; impressions: number; linkClicks: number }>>();
+    for (const originalAssetKey of assetKeys) {
+      const canonicalKey = canonicalKeyOf.get(originalAssetKey) || originalAssetKey;
+      const rowsForAsset = campaignRowsByAssetKey.get(originalAssetKey) || [];
+      let campaignMap = campaignAggByCanonicalKey.get(canonicalKey);
+      if (!campaignMap) { campaignMap = new Map(); campaignAggByCanonicalKey.set(canonicalKey, campaignMap); }
+      for (const cr of rowsForAsset) {
+        // '' means this row predates migration 022 and hasn't been re-synced
+        // yet — labeled distinctly from the live route's "(Unknown campaign)"
+        // (which means Meta itself returned no campaign_name) so this reads
+        // as a temporary sync-lag state, not a permanent data gap.
+        const campaignName = cr.campaign_name || '(Not yet synced)';
+        const cur = campaignMap.get(campaignName) || { adCount: 0, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
+        cur.adCount += parseInt(cr.ad_count, 10) || 0;
+        cur.spend += parseFloat(cr.spend) || 0;
+        cur.results += parseInt(cr.results, 10) || 0;
+        cur.impressions += parseInt(cr.impressions, 10) || 0;
+        cur.linkClicks += parseInt(cr.link_clicks, 10) || 0;
+        campaignMap.set(campaignName, cur);
+      }
+    }
 
     for (const r of breakdownRows) {
       // meta_creative_assets is only populated for ads captured by
@@ -143,7 +197,7 @@ export async function GET(req: NextRequest) {
           name: canonicalAsset?.title ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0,
-          adCount: 0, adIds: [], ads: [], hidden: false,
+          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,
           _adIdSet: new Set<string>(),
         };
         bucket.set(canonicalKey, row);
@@ -175,6 +229,21 @@ export async function GET(req: NextRequest) {
         const ctr = row.impressions > 0 ? (row.linkClicks / row.impressions) * 100 : 0;
         const cpl = row.results > 0 ? row.spend / row.results : 0;
         row.ads.sort((a, b) => b.spend - a.spend);
+        const campaignMap = campaignAggByCanonicalKey.get(row.assetKey);
+        const allCampaigns: AssetSummary['campaigns'] = [];
+        campaignMap?.forEach((m, name) => {
+          allCampaigns.push({
+            name,
+            adCount: m.adCount,
+            spend: Math.round(m.spend * 100) / 100,
+            results: m.results,
+            impressions: m.impressions,
+            linkClicks: m.linkClicks,
+          });
+        });
+        allCampaigns.sort((a, b) => b.spend - a.spend);
+        const campaignsTruncated = allCampaigns.length > CAMPAIGNS_CAP;
+        const campaigns = campaignsTruncated ? allCampaigns.slice(0, CAMPAIGNS_CAP) : allCampaigns;
         out.push({
           ...row,
           spend: Math.round(row.spend * 100) / 100,
@@ -182,6 +251,8 @@ export async function GET(req: NextRequest) {
           cpl: Math.round(cpl * 100) / 100,
           adCount: row._adIdSet.size,
           adIds: Array.from(row._adIdSet),
+          campaigns,
+          campaignsTruncated,
           hidden: row.thumbnail === null,
         });
       }

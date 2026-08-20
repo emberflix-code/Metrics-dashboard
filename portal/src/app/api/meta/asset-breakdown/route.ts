@@ -53,6 +53,14 @@ interface AssetSummary {
   adCount: number;             // how many of the input ads use this asset
   adIds: string[];             // distinct ad ids contributing — used by client-side search filter
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+  // Same metrics as `ads`, grouped by campaign instead of ad. Derived from the
+  // same BreakdownRow set as `ads` (same accAd() call), so sum(campaigns[].spend)
+  // equals `spend` exactly except when campaignsTruncated cuts off the long tail.
+  // Gated client-side by the show_creative_campaign_breakdown client flag —
+  // computed unconditionally here since campaign_name is already fetched for
+  // filtering and costs nothing extra to keep.
+  campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
+  campaignsTruncated: boolean; // true when this asset spans more than CAMPAIGNS_CAP campaigns
   hidden: boolean;             // true when no thumbnail AND under $1 spend — client decides whether to show
   phash: string | null;        // perceptual hash for client-side visual-duplicate grouping (image only)
 }
@@ -96,8 +104,9 @@ export async function GET(req: NextRequest) {
     const timeRange = sp.get('time_range') || '{}';
     const attribution = sp.get('action_attribution_windows') || '["7d_click","1d_view","1d_ev"]';
 
-    // v5: investigate-videos diagnostic round.
-    const cacheKey = `v5|${accountId}|${timeRange}|${campaignFilter}|${accountWide ? 'all' : [...adIds].sort().join(',')}`;
+    // v6: added campaigns[]/campaignsTruncated to AssetSummary — bump so any
+    // v5 cache entries (missing those fields) aren't served after deploy.
+    const cacheKey = `v6|${accountId}|${timeRange}|${campaignFilter}|${accountWide ? 'all' : [...adIds].sort().join(',')}`;
     const hit = _cache.get(cacheKey);
     if (hit && hit.expires > Date.now()) {
       return NextResponse.json(hit.payload);
@@ -298,8 +307,14 @@ export async function GET(req: NextRequest) {
     //    we sum metrics and count distinct ad_ids per asset.
     // AggBucket omits `hidden` (computed in finalize() from the final spend
     // total) and `phash` (resolved after aggregation, once thumbnails and
-    // canonical-key merging are known — see step 5b/6).
-    interface AggBucket extends Omit<AssetSummary, 'hidden' | 'phash'> { _adIdSet: Set<string>; _perAd: Map<string, { spend: number; results: number; impressions: number; linkClicks: number }> }
+    // canonical-key merging are known — see step 5b/6), and `campaigns`/
+    // `campaignsTruncated` (built from _perCampaign in finalize(), same as
+    // `ads` is built from _perAd).
+    interface AggBucket extends Omit<AssetSummary, 'hidden' | 'phash' | 'campaigns' | 'campaignsTruncated'> {
+      _adIdSet: Set<string>;
+      _perAd: Map<string, { spend: number; results: number; impressions: number; linkClicks: number }>;
+      _perCampaign: Map<string, { spend: number; results: number; impressions: number; linkClicks: number; _adIdSet: Set<string> }>;
+    }
     const accAd = (row: AggBucket, adId: string, r: BreakdownRow) => {
       const sp = parseFloat(r.spend || '0') || 0;
       const im = parseInt(r.impressions || '0', 10) || 0;
@@ -310,6 +325,12 @@ export async function GET(req: NextRequest) {
       const cur = row._perAd.get(adId) || { spend: 0, results: 0, impressions: 0, linkClicks: 0 };
       cur.spend += sp; cur.impressions += im; cur.linkClicks += lc; cur.results += ld;
       row._perAd.set(adId, cur);
+
+      const campaignName = r.campaign_name || '(Unknown campaign)';
+      const curC = row._perCampaign.get(campaignName) || { spend: 0, results: 0, impressions: 0, linkClicks: 0, _adIdSet: new Set<string>() };
+      curC.spend += sp; curC.impressions += im; curC.linkClicks += lc; curC.results += ld;
+      curC._adIdSet.add(adId);
+      row._perCampaign.set(campaignName, curC);
     };
 
     const imageAgg = new Map<string, AggBucket>();
@@ -335,6 +356,7 @@ export async function GET(req: NextRequest) {
           ads: [],
           _adIdSet: new Set<string>(),
           _perAd: new Map(),
+          _perCampaign: new Map(),
         };
         imageAgg.set(hash, row);
       }
@@ -363,6 +385,7 @@ export async function GET(req: NextRequest) {
           ads: [],
           _adIdSet: new Set<string>(),
           _perAd: new Map(),
+          _perCampaign: new Map(),
         };
         videoAgg.set(vid, row);
       }
@@ -537,7 +560,18 @@ export async function GET(req: NextRequest) {
         cur.spend += m.spend; cur.results += m.results; cur.impressions += m.impressions; cur.linkClicks += m.linkClicks;
         existing._perAd.set(adId, cur);
       }
+      for (const [campaignName, m] of Array.from(row._perCampaign)) {
+        const cur = existing._perCampaign.get(campaignName) || { spend: 0, results: 0, impressions: 0, linkClicks: 0, _adIdSet: new Set<string>() };
+        cur.spend += m.spend; cur.results += m.results; cur.impressions += m.impressions; cur.linkClicks += m.linkClicks;
+        for (const adId of Array.from(m._adIdSet)) cur._adIdSet.add(adId);
+        existing._perCampaign.set(campaignName, cur);
+      }
     }
+
+    // Any asset can span far more campaigns than are useful to show — cap the
+    // per-campaign breakdown to the top N by spend so payload size stays
+    // bounded even for creatives reused across 100+ location campaigns.
+    const CAMPAIGNS_CAP = 50;
 
     // 6) Materialize, round, derive CTR/CPL, drop the internal Set/Map, materialize per-ad rows.
     const finalize = (rows: Iterable<AggBucket>): AssetSummary[] => {
@@ -559,6 +593,20 @@ export async function GET(req: NextRequest) {
           });
         });
         ads.sort((a, b) => b.spend - a.spend);
+        const allCampaigns: AssetSummary['campaigns'] = [];
+        r._perCampaign.forEach((m, name) => {
+          allCampaigns.push({
+            name,
+            adCount: m._adIdSet.size,
+            spend: Math.round(m.spend * 100) / 100,
+            results: m.results,
+            impressions: m.impressions,
+            linkClicks: m.linkClicks,
+          });
+        });
+        allCampaigns.sort((a, b) => b.spend - a.spend);
+        const campaignsTruncated = allCampaigns.length > CAMPAIGNS_CAP;
+        const campaigns = campaignsTruncated ? allCampaigns.slice(0, CAMPAIGNS_CAP) : allCampaigns;
         const roundedSpend = Math.round(r.spend * 100) / 100;
         out.push({
           assetKey: r.assetKey,
@@ -578,6 +626,8 @@ export async function GET(req: NextRequest) {
           adCount: r._adIdSet.size,
           adIds: Array.from(r._adIdSet),
           ads,
+          campaigns,
+          campaignsTruncated,
           // Marked hidden when there's no thumbnail at all. Assets with a
           // preview stay visible regardless of status (DELETED/ARCHIVED ads
           // keep their thumbnail). The client's "Show hidden assets" toggle

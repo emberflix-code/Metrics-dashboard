@@ -37,6 +37,14 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET show_account = $1 WHERE id = $2', [!!body.show_account, params.id]);
   }
 
+  if (body.show_creative_campaign_breakdown !== undefined) {
+    await query('UPDATE clients SET show_creative_campaign_breakdown = $1 WHERE id = $2', [!!body.show_creative_campaign_breakdown, params.id]);
+  }
+
+  if (body.hide_adset_ad_tabs !== undefined) {
+    await query('UPDATE clients SET hide_adset_ad_tabs = $1 WHERE id = $2', [!!body.hide_adset_ad_tabs, params.id]);
+  }
+
   if (body.active !== undefined) {
     await query('UPDATE clients SET active = $1 WHERE id = $2', [!!body.active, params.id]);
   }

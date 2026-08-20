@@ -39,11 +39,17 @@ export async function GET(req: NextRequest) {
     maxAge,
   });
 
+  // Prod (HTTPS): cookie must be SameSite=None; Secure for GHL iframe embed.
+  // Dev (HTTP localhost): browsers reject Secure cookies on plain HTTP, so
+  // fall back to non-Secure/SameSite=lax when not on HTTPS — matches auth.ts.
+  const isProd = (process.env.NEXTAUTH_URL || '').startsWith('https://');
+  const cookieName = isProd ? '__Secure-next-auth.session-token' : 'next-auth.session-token';
+
   const res = NextResponse.json({ ok: true });
-  res.cookies.set('__Secure-next-auth.session-token', jwt, {
+  res.cookies.set(cookieName, jwt, {
     httpOnly: true,
-    sameSite: 'none',
-    secure: true,
+    sameSite: isProd ? 'none' : 'lax',
+    secure: isProd,
     path: '/',
     maxAge,
   });

@@ -44,6 +44,25 @@ body { background: #020617; color: #e2e8f0; }
 .no-thumb { background:linear-gradient(135deg,#1e293b 0%,#0f172a 100%); }
 .no-thumb::after { content:'No preview'; position:absolute; inset:0; display:flex; align-items:center; justify-content:center; color:#475569; font-size:10px; letter-spacing:.1em; text-transform:uppercase; }
 
+/* Applied (via JS, after measuring naturalWidth) to thumbnails Meta only
+   gave us a small raw preview for — mainly DCO-fallback creatives with no
+   real image_hash, so there's no sharper /adimages lookup available. Hidden
+   by default behind a blurred/dimmed cover rather than shown degraded —
+   .low-res-revealed (toggled by the eye-icon button) lifts the cover. */
+.low-res-thumb { filter: blur(14px) brightness(0.55) saturate(1.1); transform: scale(1.15); transition: filter 0.2s ease, transform 0.2s ease; }
+.low-res-revealed .low-res-thumb { filter: none; transform: none; }
+.low-res-reveal-btn {
+  display: none; position: absolute; inset: 0; flex-direction: column; align-items: center;
+  justify-content: center; gap: 6px; background: transparent; border: none; cursor: pointer;
+  color: #e2e8f0; z-index: 2;
+}
+.low-res-detected .low-res-reveal-btn { display: flex; }
+.low-res-reveal-btn .low-res-reveal-label {
+  font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; font-weight: 600;
+  color: #cbd5e1; background: rgba(2,6,23,0.55); padding: 3px 8px; border-radius: 999px;
+}
+.low-res-revealed .low-res-reveal-btn { display: none; }
+
 /* ── Table / level tabs ── */
 .level-tab { color:#94a3b8; background:transparent; border-bottom:2px solid transparent; margin-bottom:-1px; }
 .level-tab:hover { color:#e2e8f0; }

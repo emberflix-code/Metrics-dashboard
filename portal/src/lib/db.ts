@@ -241,6 +241,11 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_asset_breakdown_daily_range ON meta_asset_breakdown_daily (account_id, date)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_asset_breakdown_daily_ad ON meta_asset_breakdown_daily (account_id, ad_id)`);
+    // Added for the "By Campaign" creative breakdown feature — not part of the
+    // primary key (an ad has one campaign at a time in practice), just a plain
+    // last-write-wins descriptive column. Existing rows read '' until the sync
+    // job re-walks their date range and starts populating it (see metaSync.ts).
+    await pool.query(`ALTER TABLE meta_asset_breakdown_daily ADD COLUMN IF NOT EXISTS campaign_name TEXT NOT NULL DEFAULT ''`).catch(() => {});
   } catch { /* surface via routes if it fails */ }
 })();
 
@@ -262,6 +267,24 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS retainer_flat_amount NU
 // ltv_value stores that per-sale dollar amount, not a final total.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS ltv_value NUMERIC(12,2) NOT NULL DEFAULT 0`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_ltv BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
+// Creatives v2: per-client toggle for the new video/image creative report
+// tab (spend/leads/campaign-breakdown per asset, videos and images shown
+// separately). Off by default — existing clients see no change.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_creative_campaign_breakdown BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+// Independent toggle: hides the Adset Sets / Ads level tabs, leaving only
+// Campaigns (+ Creatives / Creatives v2, unaffected). Not tied to the v2
+// flag above — a client can have either, both, or neither.
+//
+// Shipped defaulting to false (visible), then flipped to hidden for
+// everyone per product decision — ADD COLUMN's DEFAULT only applies to rows
+// inserted after this runs, so existing rows need an explicit one-shot
+// UPDATE too. The guard column tracks whether that one-shot has already
+// run, so a later admin who deliberately re-enables the tabs for a client
+// doesn't get silently reverted on the next deploy.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_adset_ad_tabs BOOLEAN NOT NULL DEFAULT true`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_adset_ad_tabs_defaulted BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+pool.query(`UPDATE clients SET hide_adset_ad_tabs = true, hide_adset_ad_tabs_defaulted = true WHERE hide_adset_ad_tabs_defaulted = false`).catch(() => {});
 (async () => {
   try {
     await pool.query(`

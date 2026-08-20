@@ -5,6 +5,8 @@ import { query } from '@/lib/db';
 import CampaignFilterForm from './CampaignFilterForm';
 import AdAccountSelector from './AdAccountSelector';
 import ShowAccountToggle from './ShowAccountToggle';
+import ShowCreativeCampaignBreakdownToggle from './ShowCreativeCampaignBreakdownToggle';
+import HideAdsetAdTabsToggle from './HideAdsetAdTabsToggle';
 import ActiveToggle from './ActiveToggle';
 import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
@@ -45,6 +47,8 @@ interface ClientDetail {
   ltv_value: number;
   show_ltv: boolean;
   active: boolean;
+  show_creative_campaign_breakdown: boolean;
+  hide_adset_ad_tabs: boolean;
 }
 
 interface RetainerRow {
@@ -87,7 +91,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id, c.ghl_leads_tag,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
-           c.ltv_value, c.show_ltv, c.active,
+           c.ltv_value, c.show_ltv, c.active, c.show_creative_campaign_breakdown, c.hide_adset_ad_tabs,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -240,7 +244,15 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
           <h2 className="text-base font-semibold text-white mb-1">Dashboard Display</h2>
           <p className="text-sm text-slate-400 mb-5">Control what this client sees on their dashboard.</p>
-          <ShowAccountToggle clientId={client.id} current={client.show_account ?? false} />
+          <div className="space-y-4 divide-y divide-slate-800">
+            <ShowAccountToggle clientId={client.id} current={client.show_account ?? false} />
+            <div className="pt-4">
+              <ShowCreativeCampaignBreakdownToggle clientId={client.id} current={client.show_creative_campaign_breakdown ?? false} />
+            </div>
+            <div className="pt-4">
+              <HideAdsetAdTabsToggle clientId={client.id} current={client.hide_adset_ad_tabs ?? false} />
+            </div>
+          </div>
         </div>
 
         {/* Google Sheet config */}

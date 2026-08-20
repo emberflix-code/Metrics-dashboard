@@ -220,6 +220,43 @@ export async function GET(req: NextRequest) {
           return [] as AdInsight[];
         })
     );
+    // TEMP diagnostic: isolate whether ad.effective_status + campaign.name
+    // combined filtering is what zeroes out results, by trying the same
+    // first chunk with each filter alone. Fire-and-forget, doesn't affect
+    // the real response.
+    if (chunks.length > 0) {
+      const diagChunk = chunks[0];
+      const diagRange = JSON.stringify({ since: diagChunk.since, until: diagChunk.until });
+      const noNameUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
+      noNameUrl.searchParams.set('fields', 'ad_id,spend');
+      noNameUrl.searchParams.set('level', 'ad');
+      noNameUrl.searchParams.set('time_range', diagRange);
+      noNameUrl.searchParams.set('limit', '500');
+      noNameUrl.searchParams.set('filtering', JSON.stringify([{ field: 'ad.effective_status', operator: 'IN', value: INSIGHTS_ALL_STATUSES }]));
+      const noStatusUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
+      noStatusUrl.searchParams.set('fields', 'ad_id,spend');
+      noStatusUrl.searchParams.set('level', 'ad');
+      noStatusUrl.searchParams.set('time_range', diagRange);
+      noStatusUrl.searchParams.set('limit', '500');
+      if (campaignFilter && !multiKeyword) noStatusUrl.searchParams.set('filtering', JSON.stringify([{ field: 'campaign.name', operator: 'CONTAIN', value: campaignFilter }]));
+      const bareUrl = new URL(`https://graph.facebook.com/v22.0/act_${accountId}/insights`);
+      bareUrl.searchParams.set('fields', 'ad_id,spend');
+      bareUrl.searchParams.set('level', 'ad');
+      bareUrl.searchParams.set('time_range', diagRange);
+      bareUrl.searchParams.set('limit', '500');
+      Promise.all([
+        fetch(`${noNameUrl.toString()}&access_token=${token}`).then(r => r.json()).catch(e => ({ error: String(e) })),
+        fetch(`${noStatusUrl.toString()}&access_token=${token}`).then(r => r.json()).catch(e => ({ error: String(e) })),
+        fetch(`${bareUrl.toString()}&access_token=${token}`).then(r => r.json()).catch(e => ({ error: String(e) })),
+      ]).then(([statusOnly, nameOnly, bare]) => {
+        console.log('[CREATIVES-DIAG-ISOLATE]', JSON.stringify({
+          range: diagRange,
+          statusOnlyCount: statusOnly?.data?.length ?? null, statusOnlyErr: statusOnly?.error ?? null,
+          nameOnlyCount: nameOnly?.data?.length ?? null, nameOnlyErr: nameOnly?.error ?? null,
+          bareCount: bare?.data?.length ?? null, bareErr: bare?.error ?? null,
+        }));
+      }).catch(() => {});
+    }
     // Same non-fatal treatment as the insights chunks: a rate-limited or
     // failed /ads call shouldn't kill the whole response — rows still render
     // via the CASE 5 fallback (no thumbnail) using insights alone, and the
