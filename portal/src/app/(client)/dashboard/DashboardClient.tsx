@@ -597,11 +597,18 @@ function _filteredMetaKpiSheetRows(): MetaKpiSheetRow[] {
 // combination that's guaranteed to return zero rows. Called on initial data
 // load and after every dropdown change (see the onChange handlers in the
 // JSX filter bar).
+//
+// Deliberately NOT clipped to the selected date range — an admin/client
+// should always see every Campaign Type/Offer/Location/State/Landing Page
+// that has EVER appeared in the sheet, not just whatever happens to fall in
+// the current date window (e.g. a promo that only ran last quarter would
+// otherwise silently vanish from the Offer dropdown the moment the date
+// range moved forward). The KPI card totals (_filteredMetaKpiSheetRows,
+// used by renderCards) still clip to the date range — only the dropdown
+// OPTIONS are all-time.
 function populateMetaKpiFilterBar() {
   if (!_metaKpiSheetRows) return;
-  let since = '', until = '';
-  try { ({ since, until } = getDateRange()); } catch { return; }
-  const inRange = _metaKpiSheetRows.filter(r => r.day >= since && r.day <= until);
+  const allRows = _metaKpiSheetRows;
 
   const dims: { key: 'campaignType'|'offer'|'locationName'|'state'|'landingPage'; elId: string; current: string }[] = [
     { key: 'campaignType', elId: 'kpi-filter-campaignType', current: _kpiFilterCampaignType },
@@ -614,7 +621,7 @@ function populateMetaKpiFilterBar() {
   for (const dim of dims) {
     // Filter by every OTHER active dimension (not this one) to get the
     // option list for this dropdown.
-    const rows = inRange.filter(r => {
+    const rows = allRows.filter(r => {
       if (dim.key !== 'campaignType' && _kpiFilterCampaignType !== 'all' && r.campaignType !== _kpiFilterCampaignType) return false;
       if (dim.key !== 'offer' && _kpiFilterOffer !== 'all' && r.offer !== _kpiFilterOffer) return false;
       if (dim.key !== 'locationName' && _kpiFilterLocation !== 'all' && r.locationName !== _kpiFilterLocation) return false;
@@ -761,17 +768,11 @@ function renderCards(t: any, selCount=0) {
   // never runs, so a client without this configured sees no blank/zero
   // cards and no layout gap — nothing renders at all for them.
   //
-  // Labeled "Sheet Bookings" rather than plain "Bookings" — a client could
-  // have the GHL-sourced Bookings card (_showBookings, above) on at the
-  // same time as this one, and the two are computed from entirely
-  // different sources (live GHL contacts vs. a manually-tallied sheet
-  // column), so an identical label would be actively misleading if both
-  // are ever visible together.
   if (_showMetaKpiSheet && _metaKpiSheetRows && _platform === 'meta') {
     const filtered = _filteredMetaKpiSheetRows();
     const bookingsSum = filtered.reduce((sum, r) => sum + r.bookings, 0);
     const joinsSum = filtered.reduce((sum, r) => sum + r.joins, 0);
-    cards.push({label:'Sheet Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:''});
+    cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:''});
     cards.push({label:'Joins', value:fmt(joinsSum), icon:'user-plus', color:'sky', delta:''});
   }
   const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20',sky:'from-sky-500/20 to-sky-500/5 border-sky-500/20'};
