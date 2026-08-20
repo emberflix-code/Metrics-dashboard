@@ -1021,8 +1021,16 @@ async function syncCreatives(
   // too). Time-boxed and capped independently from the missing-metadata
   // pass so one large backlog can't starve the other.
   const THUMBNAIL_STALE_DAYS = 3;
-  const STALE_THUMBNAIL_BACKFILL_LIMIT = 500;
-  const STALE_THUMBNAIL_BACKFILL_BUDGET_MS = 45_000;
+  // Raised from 500/45s — a large account's backlog (Omega: 478 of 809
+  // images stale after being untouched for a month) took several sync runs
+  // to clear at the old cap, each visit only getting through a fraction of
+  // even the 500 candidates within 45s. This still competes with everything
+  // else in syncCreatives on a combined "Sync now" (entities + insights +
+  // creatives sharing one request), but a creatives-only run (the common
+  // case for clearing a backlog like this) has CREATIVES_ONLY_BUDGET_MS
+  // (10 min) of headroom to spend here.
+  const STALE_THUMBNAIL_BACKFILL_LIMIT = 1500;
+  const STALE_THUMBNAIL_BACKFILL_BUDGET_MS = 180_000;
   const staleAdIdRows = await query<{ ad_id: string }>(
     `SELECT DISTINCT m.ad_id
      FROM meta_creative_asset_ad_map m
