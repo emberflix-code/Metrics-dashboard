@@ -10,6 +10,7 @@ import OverviewRangeSelect from './OverviewRangeSelect';
 import MetricsPicker from './MetricsPicker';
 import { parseMetricsParam } from './metrics';
 import GhlConfigModal from './GhlConfigModal';
+import DeployHistoryPanel from './DeployHistoryPanel';
 import GhlLeadsListModal from './GhlLeadsListModal';
 import InlineTextField from './InlineTextField';
 import InlineNumberField from './InlineNumberField';
@@ -592,6 +593,9 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
             <p className="text-sm text-slate-400 mt-0.5">
               Active clients — leads &amp; bookings from GoHighLevel, spend from Meta, CPL computed per client.
             </p>
+            <div className="mt-1.5">
+              <DeployHistoryPanel />
+            </div>
           </div>
           <a
             href="/admin"
