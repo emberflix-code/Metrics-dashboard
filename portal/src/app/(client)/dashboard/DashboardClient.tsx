@@ -3321,64 +3321,53 @@ if (typeof window !== 'undefined') {
   // Opens the modal for a card in either asset grid (DCO or Static).
   // DCO rows have an AssetBreakdownRow shape; we convert them to CreativeRow so
   // the modal render code doesn't branch. Static rows are already CreativeRow.
-  (window as any)._openAsset = (assetKey: string) => {
-    let asCreative: CreativeRow | null = null;
+  const asCreativeFromDco = (dco: AssetBreakdownRow): CreativeRow => ({
+    assetKey: dco.assetKey,
+    type: dco.type,
+    thumbnail: dco.thumbnail,
+    videoSource: dco.videoSource,
+    videoId: dco.videoId,
+    body: dco.body,
+    title: dco.title,
+    sampleAdName: dco.name || (dco.type === 'video' ? 'Video asset' : 'Image asset'),
+    sampleAdId: dco.ads[0]?.id || '',
+    spend: dco.spend, results: dco.results, impressions: dco.impressions, linkClicks: dco.linkClicks, reach: 0,
+    ctr: dco.ctr, cpl: dco.cpl,
+    ads: dco.ads,
+    campaigns: dco.campaigns,
+    campaignsTruncated: dco.campaignsTruncated,
+    accountId: dco.accountId,
+    theme: dco.theme,
+    ugcStatus: dco.ugcStatus,
+  });
+  const findInV1V2 = (assetKey: string): CreativeRow | null => {
     const dco = _dcoAssets ? [..._dcoAssets.images, ..._dcoAssets.videos].find(x => x.assetKey === assetKey) : null;
-    if (dco) {
-      asCreative = {
-        assetKey: dco.assetKey,
-        type: dco.type,
-        thumbnail: dco.thumbnail,
-        videoSource: dco.videoSource,
-        videoId: dco.videoId,
-        body: dco.body,
-        title: dco.title,
-        sampleAdName: dco.name || (dco.type === 'video' ? 'Video asset' : 'Image asset'),
-        sampleAdId: dco.ads[0]?.id || '',
-        spend: dco.spend, results: dco.results, impressions: dco.impressions, linkClicks: dco.linkClicks, reach: 0,
-        ctr: dco.ctr, cpl: dco.cpl,
-        ads: dco.ads,
-        campaigns: dco.campaigns,
-        campaignsTruncated: dco.campaignsTruncated,
-        accountId: dco.accountId,
-        theme: dco.theme,
-        ugcStatus: dco.ugcStatus,
-      };
-    } else if (_staticAssets) {
+    if (dco) return asCreativeFromDco(dco);
+    if (_staticAssets) {
       const s = _staticAssets.find(x => x.assetKey === assetKey);
-      if (s) asCreative = s;
+      if (s) return s;
     }
-    // v3 cards use the same window._openAsset(...) onclick as v1/v2, but
-    // their data lives in the separate _dcoAssetsV3/_staticAssetsV3 vars
-    // (see fetchDcoAssetsV3/fetchStaticAssetsV3) — check those too when the
-    // asset wasn't found above (v1/v2's data won't contain a v3-only fetch).
-    if (!asCreative) {
-      const dcoV3 = _dcoAssetsV3 ? [..._dcoAssetsV3.images, ..._dcoAssetsV3.videos].find(x => x.assetKey === assetKey) : null;
-      if (dcoV3) {
-        asCreative = {
-          assetKey: dcoV3.assetKey,
-          type: dcoV3.type,
-          thumbnail: dcoV3.thumbnail,
-          videoSource: dcoV3.videoSource,
-          videoId: dcoV3.videoId,
-          body: dcoV3.body,
-          title: dcoV3.title,
-          sampleAdName: dcoV3.name || (dcoV3.type === 'video' ? 'Video asset' : 'Image asset'),
-          sampleAdId: dcoV3.ads[0]?.id || '',
-          spend: dcoV3.spend, results: dcoV3.results, impressions: dcoV3.impressions, linkClicks: dcoV3.linkClicks, reach: 0,
-          ctr: dcoV3.ctr, cpl: dcoV3.cpl,
-          ads: dcoV3.ads,
-          campaigns: dcoV3.campaigns,
-          campaignsTruncated: dcoV3.campaignsTruncated,
-          accountId: dcoV3.accountId,
-          theme: dcoV3.theme,
-          ugcStatus: dcoV3.ugcStatus,
-        };
-      } else if (_staticAssetsV3) {
-        const s = _staticAssetsV3.find(x => x.assetKey === assetKey);
-        if (s) asCreative = s;
-      }
+    return null;
+  };
+  const findInV3 = (assetKey: string): CreativeRow | null => {
+    const dco = _dcoAssetsV3 ? [..._dcoAssetsV3.images, ..._dcoAssetsV3.videos].find(x => x.assetKey === assetKey) : null;
+    if (dco) return asCreativeFromDco(dco);
+    if (_staticAssetsV3) {
+      const s = _staticAssetsV3.find(x => x.assetKey === assetKey);
+      if (s) return s;
     }
+    return null;
+  };
+  (window as any)._openAsset = (assetKey: string) => {
+    // Same asset key can exist in both v1/v2's data (URL-mode thumbnail)
+    // and v3's data (byte-mode thumbnail) at once — checking the wrong one
+    // first would silently show a stale/expired-but-still-working v2 URL
+    // in the modal even though the card was clicked from the v3 grid
+    // (which correctly showed "NO PREVIEW" because ITS thumbnail mode has
+    // no bytes yet for that asset). Whichever grid is actually visible
+    // decides which source is authoritative for this click.
+    const v3Visible = !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
+    const asCreative = v3Visible ? (findInV3(assetKey) ?? findInV1V2(assetKey)) : (findInV1V2(assetKey) ?? findInV3(assetKey));
     if (!asCreative) return;
     const modal = document.getElementById('creative-modal');
     if (!modal) return;
