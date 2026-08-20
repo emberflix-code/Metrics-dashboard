@@ -3732,7 +3732,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   {l.charAt(0).toUpperCase()+l.slice(1)}{l==='adset'?' Sets':l==='ad'?'s':'s'}
                 </button>
               ))}
-              {platform === 'meta' && !showCreativeCampaignBreakdown && (
+              {platform === 'meta' && !showCreativeCampaignBreakdown && !_showCreativesV3Tab && (
                 <button id="tab-creatives" onClick={() => {
                   // Hide other views, show creatives.
                   document.getElementById('table-view')?.classList.add('hidden');
