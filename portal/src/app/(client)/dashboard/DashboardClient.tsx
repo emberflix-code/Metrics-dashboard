@@ -880,10 +880,33 @@ function renderCards(t: any, selCount=0) {
   if (summary) { if (selCount>0){summary.textContent=`${selCount} row${selCount>1?'s':''} selected`;summary.classList.remove('hidden');}else summary.classList.add('hidden'); }
 }
 
+// Campaign names currently passing the 5-dimension filter bar, or null when
+// no filter is active (distinct from an empty Set, which would mean "active
+// but zero matches" — the table needs to tell those apart to decide whether
+// to highlight nothing vs. skip highlighting entirely). Meta's own
+// campaign/adset/ad rows have no notion of Campaign Type/Offer/Location/
+// State/Landing Page, so matching happens by campaign NAME against the
+// sheet's filtered rows — the same linking key the sheet was always keyed
+// on (see MetaKpiSheetRow.campaign).
+function _filteredKpiCampaignNames(): Set<string> | null {
+  const active = _kpiFilterCampaignType !== 'all' || _kpiFilterOffer !== 'all'
+    || _kpiFilterLocation !== 'all' || _kpiFilterState !== 'all' || _kpiFilterLandingPage !== 'all';
+  if (!active || !_showMetaKpiSheet) return null;
+  return new Set(_filteredMetaKpiSheetRows().map(r => r.campaign));
+}
+
 // ── renderTable ───────────────────────────────────────────────────────────────
 function renderTable() {
   const rawData = getFiltered().map(calcMetrics);
+  // Highlight + float matches to the top rather than hiding non-matches —
+  // a campaign-name match against the sheet can miss (renamed campaign,
+  // typo, sheet not yet covering this period) and hiding on a miss would
+  // silently disappear a real campaign with no way to tell it apart from
+  // one that's genuinely excluded by the filter.
+  const filteredNames = _filteredKpiCampaignNames();
+  const matchesFilter = (c: any) => filteredNames ? filteredNames.has(_currentLevel === 'campaign' ? c.name : c.campaignName) : false;
   if (_sortCol) rawData.sort((a,b)=>{const va=a[_sortCol!],vb=b[_sortCol!]; const cmp=typeof va==='string'?va.localeCompare(vb):(va-vb); return _sortDir==='asc'?cmp:-cmp;});
+  if (filteredNames) rawData.sort((a,b)=> Number(matchesFilter(b)) - Number(matchesFilter(a)));
   const data = rawData;
   const tbody = document.getElementById('table-body');
   const tfoot = document.getElementById('table-foot');
@@ -989,10 +1012,12 @@ function renderTable() {
 
   tbody.innerHTML = data.map((c:any,i:number)=>{
     const rowKey=c.id||c.name; const checked=_selectedRows.has(rowKey);
+    const isFilterMatch = matchesFilter(c);
     const subLabel = _currentLevel==='ad'?`<div class="text-[10px] text-slate-500 mt-0.5 truncate max-w-xs">${c.campaignName||''} › ${c.adsetName||''}</div>`:_currentLevel==='adset'?`<div class="text-[10px] text-slate-500 mt-0.5 truncate max-w-xs">${c.campaignName||''}</div>`:'';
-    return `<tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors fade-up ${checked?'bg-blue-500/5':''}" style="animation-delay:${i*30}ms">
+    const filterBadge = isFilterMatch ? `<span class="ml-1.5 inline-flex items-center gap-0.5 text-[9px] font-semibold uppercase tracking-wider text-blue-300 bg-blue-500/15 px-1.5 py-0.5 rounded" title="Matches the active Campaign Type/Offer/Location/State/Landing Page filter"><i data-lucide="filter" class="w-2.5 h-2.5"></i> match</span>` : '';
+    return `<tr class="border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors fade-up ${checked?'bg-blue-500/5':''} ${isFilterMatch?'bg-blue-500/[0.03]':''}" style="animation-delay:${i*30}ms">
       <td class="w-8 px-3 py-3 sticky left-0 bg-inherit"><input type="checkbox" data-key="${rowKey}" onchange="window._handleCheckbox('${rowKey}')" ${checked?'checked':''} class="w-3.5 h-3.5 rounded border-slate-600 bg-slate-800 accent-blue-500 cursor-pointer"></td>
-      <td class="px-4 py-3 sticky left-8 bg-inherit"><div class="font-medium text-white leading-tight">${c.name}</div>${subLabel}</td>
+      <td class="px-4 py-3 sticky left-8 bg-inherit"><div class="font-medium text-white leading-tight flex items-center flex-wrap">${c.name}${filterBadge}</div>${subLabel}</td>
       ${_showAccount ? `<td class="px-4 py-3 text-xs text-slate-400 font-mono">${c.account||''}</td>` : ''}
       <td class="px-4 py-3">${deliveryBadge(c.status)}</td>
       <td class="text-right px-4 py-3 font-mono text-xs">${fmt(c.reach)}</td>
