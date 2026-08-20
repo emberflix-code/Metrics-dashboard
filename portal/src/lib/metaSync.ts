@@ -761,7 +761,16 @@ async function syncInsights(accountId: string, token: string): Promise<{ daysSyn
 
   const yesterday = await yesterdayForAccount(accountId, token);
   const floorDate = floorDateFrom(yesterday);
-  const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
+  // campaign-only: every dashboard read of meta_daily_insights (KPI totals,
+  // level=account, the Campaigns tab) already filters to level='campaign'
+  // exclusively — adset/ad rows here only ever fed the Adset Sets/Ads tabs,
+  // which are hidden for every client by default (hide_adset_ad_tabs).
+  // Campaign-ID batching repeats identically at each level regardless of
+  // date range (~400 batches for an 8k-campaign account), so fetching
+  // adset+ad on top of campaign was tripling insights' API call volume for
+  // data nothing reads — a real contributor to hitting Meta's app-level
+  // rate limit on large accounts.
+  const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign'];
 
   let daysSynced = 0;
   let newEarliest = state?.earliest_synced || null;
@@ -1677,7 +1686,8 @@ export async function syncAccountRange(
     const token = await tokenForAccountId(accountId);
     let daysSynced = 0;
     if (types.insights) {
-      const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign', 'adset', 'ad'];
+      // campaign-only — see the matching comment in syncInsights above.
+      const levels: ('campaign' | 'adset' | 'ad')[] = ['campaign'];
       const campaignIds = await campaignIdsForAccount(accountId, { since, until });
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccountRange:campaignIds', count: campaignIds.length }));
       for (const chunk of chunkRange(since, until, CHUNK_DAYS)) {
