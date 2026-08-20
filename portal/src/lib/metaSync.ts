@@ -2,7 +2,7 @@ import { query } from './db';
 import { decrypt } from './crypto';
 import { resolveResultsFromActions } from './meta';
 import { computePhash } from './phash';
-import { fetchMetaKpiSheetRows } from './metaKpiSheet';
+import { fetchMetaKpiSheetRows, type MetaKpiSheetRow } from './metaKpiSheet';
 import { SheetError } from './sheets';
 
 // Session-free Meta → Postgres sync for the DB-backed dashboard cache.
@@ -1747,8 +1747,30 @@ async function syncMetaKpiSheetCache(clientId: string): Promise<void> {
 
   for (const { tab_name } of tabRows) {
     try {
-      const { rows } = await fetchMetaKpiSheetRows(client.meta_kpi_sheet_id, tab_name);
-      if (rows.length === 0) continue;
+      const { rows: rawRows } = await fetchMetaKpiSheetRows(client.meta_kpi_sheet_id, tab_name);
+      if (rawRows.length === 0) continue;
+      // meta_kpi_sheet_cache is keyed (client_id, day, campaign), but the
+      // sheet itself has no such uniqueness guarantee — the same campaign
+      // can legitimately appear more than once for the same day (e.g. a
+      // duplicated export row). Postgres's ON CONFLICT DO UPDATE errors
+      // ("command cannot affect row a second time") if one INSERT batch
+      // tries to hit the same conflict target twice, so collapse same-key
+      // rows by summing before they ever reach the query.
+      const byKey = new Map<string, MetaKpiSheetRow>();
+      for (const r of rawRows) {
+        const key = `${r.day}|${r.campaign}`;
+        const existing = byKey.get(key);
+        if (!existing) { byKey.set(key, { ...r }); continue; }
+        existing.spend += r.spend;
+        existing.results += r.results;
+        existing.bookings += r.bookings;
+        existing.joins += r.joins;
+        // Non-numeric dimensions can't be summed — keep whichever value was
+        // seen first, same "first wins" default used elsewhere for
+        // cross-source merges (e.g. asset thumbnail fallback in
+        // fetchDcoAssets on the client).
+      }
+      const rows = Array.from(byKey.values());
       for (const batch of chunkArrayGeneric(rows, DB_BATCH_SIZE)) {
         await query(
           `INSERT INTO meta_kpi_sheet_cache
