@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import Script from 'next/script';
 import { signOut } from 'next-auth/react';
 import { ChangePasswordButton } from '@/components/ChangePasswordButton';
+import type { MetaKpiSheetRow } from '@/lib/metaKpiSheet';
 
 declare const Chart: any;
 declare const lucide: { createIcons: () => void };
@@ -46,6 +47,13 @@ interface Props {
   // Adset Sets and Ads are hidden. Independent of showCreativeCampaignBreakdown.
   // Admin-togglable per client — see HideAdsetAdTabsToggle.
   hideAdsetAdTabs?: boolean;
+  // Off by default. When true (and the client has a configured Meta KPI
+  // sheet — see MetaKpiSheetConfigForm), the dashboard fetches
+  // /api/sheets/meta-kpi and shows Bookings/Joins KPI cards plus a filter
+  // bar (Campaign Type, Offer, Location Name, State, Landing Page). Already
+  // resolved server-side to require both the toggle AND a configured
+  // sheet_id/sheet_tab — see dashboard/page.tsx.
+  showMetaKpiSheet?: boolean;
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -136,6 +144,21 @@ let _cpaWonLeads: { day: string; name: string }[] = [];
 // acquisitions fetch above) x an admin-entered value per sale.
 let _showLtv = false;
 let _ltvValue = 0;
+
+// Meta KPI sheet — Bookings/Joins KPI cards + the Campaign Type/Offer/
+// Location Name/State/Landing Page filter bar. Unlike the sheet-leads/
+// GHL-bookings/CPA state above (day-bucketed maps), this keeps the full raw
+// row set: the filter bar needs to recompute distinct dropdown option lists
+// and re-aggregate on every filter change without a re-fetch, and the row
+// count here is small (a client's whole month is ~100 rows per the
+// reference sheet) so holding it all client-side is cheap.
+let _showMetaKpiSheet = false;
+let _metaKpiSheetRows: MetaKpiSheetRow[] | null = null;
+let _kpiFilterCampaignType = 'all';
+let _kpiFilterOffer = 'all';
+let _kpiFilterLocation = 'all';
+let _kpiFilterState = 'all';
+let _kpiFilterLandingPage = 'all';
 
 // Creative breakdown state — one row per asset, populated by /api/meta/creatives
 interface CreativeRow {
@@ -546,6 +569,79 @@ function getFiltered() {
   });
 }
 
+// Meta KPI sheet rows currently in view: clipped to the selected date range
+// AND passing all five active filter-bar selections. Shared by the
+// Bookings/Joins card computation and the filter bar's own dropdown
+// population (so a dropdown only ever offers values that still yield
+// results given the other four filters — avoids a filter combination that
+// silently zeroes out the cards with no explanation).
+function _filteredMetaKpiSheetRows(): MetaKpiSheetRow[] {
+  if (!_metaKpiSheetRows) return [];
+  let since = '', until = '';
+  try { ({ since, until } = getDateRange()); } catch { return []; }
+  return _metaKpiSheetRows.filter(r => {
+    if (r.day < since || r.day > until) return false;
+    if (_kpiFilterCampaignType !== 'all' && r.campaignType !== _kpiFilterCampaignType) return false;
+    if (_kpiFilterOffer !== 'all' && r.offer !== _kpiFilterOffer) return false;
+    if (_kpiFilterLocation !== 'all' && r.locationName !== _kpiFilterLocation) return false;
+    if (_kpiFilterState !== 'all' && r.state !== _kpiFilterState) return false;
+    if (_kpiFilterLandingPage !== 'all' && r.landingPage !== _kpiFilterLandingPage) return false;
+    return true;
+  });
+}
+
+// Populates each of the 5 Meta KPI filter dropdowns with the distinct
+// values available GIVEN THE OTHER FOUR filters' current selections — e.g.
+// changing State first narrows which Landing Pages are even offered, rather
+// than showing every landing page in the sheet and letting the admin pick a
+// combination that's guaranteed to return zero rows. Called on initial data
+// load and after every dropdown change (see the onChange handlers in the
+// JSX filter bar).
+function populateMetaKpiFilterBar() {
+  if (!_metaKpiSheetRows) return;
+  let since = '', until = '';
+  try { ({ since, until } = getDateRange()); } catch { return; }
+  const inRange = _metaKpiSheetRows.filter(r => r.day >= since && r.day <= until);
+
+  const dims: { key: 'campaignType'|'offer'|'locationName'|'state'|'landingPage'; elId: string; current: string }[] = [
+    { key: 'campaignType', elId: 'kpi-filter-campaignType', current: _kpiFilterCampaignType },
+    { key: 'offer',        elId: 'kpi-filter-offer',        current: _kpiFilterOffer },
+    { key: 'locationName', elId: 'kpi-filter-location',     current: _kpiFilterLocation },
+    { key: 'state',        elId: 'kpi-filter-state',        current: _kpiFilterState },
+    { key: 'landingPage',  elId: 'kpi-filter-landingPage',  current: _kpiFilterLandingPage },
+  ];
+
+  for (const dim of dims) {
+    // Filter by every OTHER active dimension (not this one) to get the
+    // option list for this dropdown.
+    const rows = inRange.filter(r => {
+      if (dim.key !== 'campaignType' && _kpiFilterCampaignType !== 'all' && r.campaignType !== _kpiFilterCampaignType) return false;
+      if (dim.key !== 'offer' && _kpiFilterOffer !== 'all' && r.offer !== _kpiFilterOffer) return false;
+      if (dim.key !== 'locationName' && _kpiFilterLocation !== 'all' && r.locationName !== _kpiFilterLocation) return false;
+      if (dim.key !== 'state' && _kpiFilterState !== 'all' && r.state !== _kpiFilterState) return false;
+      if (dim.key !== 'landingPage' && _kpiFilterLandingPage !== 'all' && r.landingPage !== _kpiFilterLandingPage) return false;
+      return true;
+    });
+    const values = Array.from(new Set(rows.map(r => r[dim.key]).filter(Boolean))).sort();
+    const el = document.getElementById(dim.elId) as HTMLSelectElement | null;
+    if (!el) continue;
+    // If the currently-selected value is no longer offered (the other
+    // filters narrowed it out), reset that dimension to "all" rather than
+    // leaving a dropdown showing a value it no longer contains as an
+    // <option> — this can only happen after a different dropdown changed.
+    const selected = values.includes(dim.current) ? dim.current : 'all';
+    if (selected !== dim.current) {
+      if (dim.key === 'campaignType') _kpiFilterCampaignType = 'all';
+      else if (dim.key === 'offer') _kpiFilterOffer = 'all';
+      else if (dim.key === 'locationName') _kpiFilterLocation = 'all';
+      else if (dim.key === 'state') _kpiFilterState = 'all';
+      else _kpiFilterLandingPage = 'all';
+    }
+    el.innerHTML = `<option value="all">All</option>` + values.map(v => `<option value="${v.replace(/"/g,'&quot;')}"${v===selected?' selected':''}>${v}</option>`).join('');
+    el.value = selected;
+  }
+}
+
 function getSelectedTotals(data: any[]) {
   const src = _selectedRows.size>0 ? data.filter(c=>_selectedRows.has(c.id||c.name)) : data;
   return src.reduce((a,c)=>({
@@ -658,6 +754,25 @@ function renderCards(t: any, selCount=0) {
       label:'LTV', value:fmtUsd(sales * _ltvValue), icon:'trending-up', color:'violet',
       delta:`<span class="text-slate-500 text-[11px]">${fmt(sales)} sale${sales===1?'':'s'} &times; ${fmtUsd(_ltvValue)}</span>`,
     });
+  }
+  // Meta KPI sheet cards — Bookings and Joins. Gated on both the admin
+  // toggle AND having actually fetched rows, same guard shape as every
+  // other conditional card above: if either is false the push() simply
+  // never runs, so a client without this configured sees no blank/zero
+  // cards and no layout gap — nothing renders at all for them.
+  //
+  // Labeled "Sheet Bookings" rather than plain "Bookings" — a client could
+  // have the GHL-sourced Bookings card (_showBookings, above) on at the
+  // same time as this one, and the two are computed from entirely
+  // different sources (live GHL contacts vs. a manually-tallied sheet
+  // column), so an identical label would be actively misleading if both
+  // are ever visible together.
+  if (_showMetaKpiSheet && _metaKpiSheetRows && _platform === 'meta') {
+    const filtered = _filteredMetaKpiSheetRows();
+    const bookingsSum = filtered.reduce((sum, r) => sum + r.bookings, 0);
+    const joinsSum = filtered.reduce((sum, r) => sum + r.joins, 0);
+    cards.push({label:'Sheet Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:''});
+    cards.push({label:'Joins', value:fmt(joinsSum), icon:'user-plus', color:'sky', delta:''});
   }
   const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20',sky:'from-sky-500/20 to-sky-500/5 border-sky-500/20'};
   const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400',teal:'text-teal-400',sky:'text-sky-400'};
@@ -1853,6 +1968,23 @@ async function fetchCpaAcquisitionsForClient(since: string, until: string): Prom
   }
 }
 
+// Meta KPI sheet — fetched once (not per date-range change like the
+// GHL/CPA fetches above): the route returns the whole sheet's rows
+// unfiltered, and both the date-range clipping AND the five dropdown
+// filters are applied client-side in renderCards()/the filter bar, so
+// there's nothing date-range-specific to ask the server for.
+async function fetchMetaKpiSheetForClient(): Promise<void> {
+  if (!_showMetaKpiSheet) { _metaKpiSheetRows = null; return; }
+  if (_metaKpiSheetRows !== null) return; // already fetched this session
+  try {
+    const res = await fetch('/api/sheets/meta-kpi');
+    const json = await res.json() as { rows?: MetaKpiSheetRow[]; enabled?: boolean };
+    _metaKpiSheetRows = json.enabled && json.rows ? json.rows : [];
+  } catch {
+    _metaKpiSheetRows = [];
+  }
+}
+
 // ── fetchMetaCampaigns ────────────────────────────────────────────────────────
 async function fetchMetaCampaigns() {
   showLoadingBar();
@@ -1874,6 +2006,10 @@ async function fetchMetaCampaigns() {
     // Same reasoning for CPA acquisitions — needs since/until to clip rows
     // and prorate the retainer server-side.
     const cpaPromise = fetchCpaAcquisitionsForClient(since, until);
+    // Meta KPI sheet has no date-range dependency server-side (see the
+    // function's own comment) — still fired in parallel so it's ready
+    // before renderCards() needs it.
+    const metaKpiSheetPromise = fetchMetaKpiSheetForClient();
 
     if (_platform === 'google') {
       await loadGoogleSheetData(since, until);
@@ -2140,6 +2276,8 @@ async function fetchMetaCampaigns() {
     await sheetPromise;
     await ghlPromise;
     await cpaPromise;
+    await metaKpiSheetPromise;
+    populateMetaKpiFilterBar();
 
     // Join sheet leads by campaign name when the sheet is the Leads source.
     // The sheet's campaign column is a manual/automated log of the exact
@@ -2708,7 +2846,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, hideAdsetAdTabs = true }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, hideAdsetAdTabs = true, showMetaKpiSheet = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -2722,6 +2860,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _isAdminView = isAdminView;
   _showCreativeCampaignBreakdown = showCreativeCampaignBreakdown;
   _hideAdsetAdTabs = hideAdsetAdTabs;
+  _showMetaKpiSheet = showMetaKpiSheet;
   _dpCapMaximumToThisYear = /omega/i.test(clientName);
 
   useEffect(() => {
@@ -2903,6 +3042,38 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <i data-lucide="refresh-cw" className="w-4 h-4"></i> Apply
             </button>
           </div>
+          {/* Meta KPI sheet filter bar — Campaign Type / Offer / Location Name /
+              State / Landing Page. Only meaningful once _metaKpiSheetRows has
+              been fetched, but the dropdowns themselves are safe to render
+              empty before that (populated by populateMetaKpiFilterBar(), which
+              also re-runs whenever the underlying rows change). */}
+          {showMetaKpiSheet && (
+            <div id="meta-kpi-filter-bar" className="flex flex-wrap gap-3 items-end mt-3 pt-3 border-t border-slate-800/60">
+              {(['campaignType','offer','location','state','landingPage'] as const).map(dim => {
+                const labels: Record<string,string> = {campaignType:'Campaign Type', offer:'Offer', location:'Location Name', state:'State', landingPage:'Landing Page'};
+                return (
+                  <div key={dim} className="flex flex-col gap-1.5 min-w-[160px]">
+                    <label className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">{labels[dim]}</label>
+                    <div className="relative">
+                      <select id={`kpi-filter-${dim}`} onChange={(e) => {
+                        const val = e.currentTarget.value;
+                        if (dim==='campaignType') _kpiFilterCampaignType = val;
+                        else if (dim==='offer') _kpiFilterOffer = val;
+                        else if (dim==='location') _kpiFilterLocation = val;
+                        else if (dim==='state') _kpiFilterState = val;
+                        else _kpiFilterLandingPage = val;
+                        populateMetaKpiFilterBar();
+                        renderTable();
+                      }} className="w-full bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 pr-8 text-sm text-white appearance-none focus:outline-none focus:ring-2 focus:ring-blue-500/50 cursor-pointer">
+                        <option value="all">All</option>
+                      </select>
+                      <i data-lucide="chevron-down" className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-500 pointer-events-none"></i>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
         </div>
 
         {/* Summary Cards */}

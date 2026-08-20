@@ -149,6 +149,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET show_cpa = $1 WHERE id = $2', [!!body.show_cpa, params.id]);
   }
 
+  if (body.meta_kpi_sheet_id !== undefined) {
+    await query('UPDATE clients SET meta_kpi_sheet_id = $1 WHERE id = $2', [String(body.meta_kpi_sheet_id).trim(), params.id]);
+  }
+
+  if (body.meta_kpi_sheet_tab !== undefined) {
+    await query('UPDATE clients SET meta_kpi_sheet_tab = $1 WHERE id = $2', [String(body.meta_kpi_sheet_tab).trim(), params.id]);
+  }
+
+  if (body.show_meta_kpi_sheet !== undefined) {
+    await query('UPDATE clients SET show_meta_kpi_sheet = $1 WHERE id = $2', [!!body.show_meta_kpi_sheet, params.id]);
+  }
+
   if (body.retainer_mode !== undefined) {
     const v = String(body.retainer_mode).trim();
     if (!VALID_RETAINER_MODES.has(v)) {

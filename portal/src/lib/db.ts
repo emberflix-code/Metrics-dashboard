@@ -285,6 +285,18 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_creative_campaign_
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_adset_ad_tabs BOOLEAN NOT NULL DEFAULT true`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_adset_ad_tabs_defaulted BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 pool.query(`UPDATE clients SET hide_adset_ad_tabs = true, hide_adset_ad_tabs_defaulted = true WHERE hide_adset_ad_tabs_defaulted = false`).catch(() => {});
+
+// Meta KPI sheet: per-client Google Sheet (same gviz-CSV mechanism as the
+// existing sheet_id/sheet_tab leads override, see lib/sheets.ts) carrying
+// fields Meta's API has no concept of — Campaign Type, Offer, Location
+// Name, State, Landing Page, and manually-tallied Bookings/Joins. Off by
+// default; when on, the dashboard shows extra Bookings/Joins KPI cards
+// filterable by those five dimensions. Separate sheet_id/sheet_tab columns
+// (not reusing the existing ones) since this is a structurally different,
+// much wider sheet than the leads-override one.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS meta_kpi_sheet_id TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS meta_kpi_sheet_tab TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_meta_kpi_sheet BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 (async () => {
   try {
     await pool.query(`

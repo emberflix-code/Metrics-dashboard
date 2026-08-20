@@ -12,12 +12,14 @@ import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
 import CpaConfigForm from './CpaConfigForm';
 import LtvConfigForm from './LtvConfigForm';
+import MetaKpiSheetConfigForm from './MetaKpiSheetConfigForm';
 import ResetPasswordForm from './ResetPasswordForm';
 import AutoLoginLink from './AutoLoginLink';
 import ImpersonateButton from './ImpersonateButton';
 import SyncControlForm, { SyncStateRow } from './SyncControlForm';
 import { computeBackfillProgress } from '@/lib/metaSync';
 import { fetchSheetRows, SheetError } from '@/lib/sheets';
+import { fetchMetaKpiSheetRows } from '@/lib/metaKpiSheet';
 
 interface ClientDetail {
   id: string;
@@ -49,6 +51,9 @@ interface ClientDetail {
   active: boolean;
   show_creative_campaign_breakdown: boolean;
   hide_adset_ad_tabs: boolean;
+  meta_kpi_sheet_id: string;
+  meta_kpi_sheet_tab: string;
+  show_meta_kpi_sheet: boolean;
 }
 
 interface RetainerRow {
@@ -92,6 +97,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
            c.ltv_value, c.show_ltv, c.active, c.show_creative_campaign_breakdown, c.hide_adset_ad_tabs,
+           c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -122,6 +128,23 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
       // Other SheetError codes (NOT_PUBLIC, MISSING_COLUMNS, UPSTREAM_5XX) are
       // left unsurfaced here — they're either already visible on the client
       // dashboard's own error state or not this-tab-name-specific.
+    }
+  }
+
+  // Same silent-fallback risk as the leads sheet above, for the Meta KPI
+  // sheet (Bookings/Joins + filter dimensions) — this one has no
+  // tabLikelyMatches-style safety net (single-tab, no campaign-name check
+  // in metaKpiSheet.ts), so a MISSING_COLUMNS or fetch failure is the only
+  // signal available; surface it here rather than let it fail silently on
+  // first dashboard load.
+  let metaKpiSheetWarning: string | null = null;
+  if (client.meta_kpi_sheet_id && client.meta_kpi_sheet_tab) {
+    try {
+      await fetchMetaKpiSheetRows(client.meta_kpi_sheet_id, client.meta_kpi_sheet_tab);
+    } catch (err) {
+      if (err instanceof SheetError) {
+        metaKpiSheetWarning = `Meta KPI sheet tab "${client.meta_kpi_sheet_tab}" failed to load: ${err.message}`;
+      }
     }
   }
 
@@ -319,6 +342,25 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             clientId={client.id}
             currentLtvValue={client.ltv_value ?? 0}
             currentShowLtv={client.show_ltv ?? false}
+          />
+        </div>
+
+        {/* Meta KPI sheet — Bookings/Joins + Campaign Type/Offer/Location/State/Landing Page filters */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Meta KPI Sheet</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Connect the Apps-Script-exported Account sheet to add Bookings and Joins KPI cards, filterable by Campaign Type, Offer, Location Name, State, and Landing Page &mdash; fields Meta&apos;s own API doesn&apos;t carry.
+          </p>
+          {metaKpiSheetWarning && (
+            <div className="mb-4 p-3 bg-amber-950/40 border border-amber-800/60 rounded-lg text-xs text-amber-300">
+              <strong>Sheet error.</strong> {metaKpiSheetWarning}
+            </div>
+          )}
+          <MetaKpiSheetConfigForm
+            clientId={client.id}
+            currentSheetId={client.meta_kpi_sheet_id ?? ''}
+            currentSheetTab={client.meta_kpi_sheet_tab ?? ''}
+            currentEnabled={client.show_meta_kpi_sheet ?? false}
           />
         </div>
 
