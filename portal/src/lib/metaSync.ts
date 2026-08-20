@@ -1333,14 +1333,29 @@ async function syncCreatives(
   // downloads the best available image, not a stale low-res one. try/catch
   // per row: one broken or unreachable thumbnail URL must not abort the
   // batch or the rest of the sync.
+  // Ordered by total spend (highest first), not left to whatever arbitrary
+  // scan order Postgres happens to return — a large account's backlog
+  // takes several syncs to fully clear (limited per run below), and
+  // without this the exact assets an admin/client is most likely to be
+  // looking at (highest-spend, top-of-list when sorted by CPL/spend) could
+  // sit unbackfilled indefinitely if they simply weren't early in whatever
+  // order an unordered scan happened to return. COALESCE to 0 so an asset
+  // with no matching breakdown row yet (spend not aggregated there) still
+  // gets backfilled, just after everything with known spend.
   const thumbnailBytesCandidates = await query<{ asset_key: string; thumbnail: string; type: string }>(
-    `SELECT asset_key, thumbnail, type FROM meta_creative_assets
-     WHERE account_id = $1 AND thumbnail IS NOT NULL
+    `SELECT a.asset_key, a.thumbnail, a.type
+     FROM meta_creative_assets a
+     LEFT JOIN (
+       SELECT asset_key, SUM(spend) AS total_spend
+       FROM meta_asset_breakdown_daily WHERE account_id = $1 GROUP BY asset_key
+     ) s ON s.asset_key = a.asset_key
+     WHERE a.account_id = $1 AND a.thumbnail IS NOT NULL
        AND (
-         thumbnail_bytes IS NULL
-         OR thumbnail_bytes_fetched_at < now() - interval '${THUMBNAIL_BYTES_STALE_DAYS} days'
-         OR (type = 'image' AND phash IS NULL)
+         a.thumbnail_bytes IS NULL
+         OR a.thumbnail_bytes_fetched_at < now() - interval '${THUMBNAIL_BYTES_STALE_DAYS} days'
+         OR (a.type = 'image' AND a.phash IS NULL)
        )
+     ORDER BY COALESCE(s.total_spend, 0) DESC
      LIMIT ${THUMBNAIL_BYTES_BACKFILL_LIMIT}`,
     [accountId]
   );
