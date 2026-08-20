@@ -729,6 +729,26 @@ function renderCards(t: any, selCount=0) {
       }
     } catch { /* keep Meta value on any error */ }
   }
+  // Filter-bar override: when any of the 5 Campaign Type/Offer/Location/
+  // State/Landing Page dropdowns is active, Amount Spent/Leads/CPL switch
+  // to the Meta KPI sheet's own spend/results totals for the filtered rows
+  // — Meta's API has no concept of those 5 dimensions, so the sheet (which
+  // carries them per-row alongside spend/results) is the only source that
+  // CAN answer "what did this offer/location/etc. spend and generate."
+  // Reverts to Meta's own totals the moment every filter is back to "all",
+  // so the unfiltered numbers are always Meta's, never silently swapped.
+  // Impressions/Link Clicks/CTR have no equivalent in the sheet (see
+  // metaKpiSheet.ts — those columns were never part of the export), so
+  // they're intentionally left out of this override; see the "can't be
+  // filtered" dimming applied to them below instead.
+  const kpiFilterActive = _kpiFilterCampaignType !== 'all' || _kpiFilterOffer !== 'all'
+    || _kpiFilterLocation !== 'all' || _kpiFilterState !== 'all' || _kpiFilterLandingPage !== 'all';
+  if (kpiFilterActive && _showMetaKpiSheet && _metaKpiSheetRows && _metaKpiSheetRows.length > 0 && _platform === 'meta') {
+    const filtered = _filteredMetaKpiSheetRows();
+    const spend = filtered.reduce((sum, r) => sum + r.spend, 0);
+    const results = filtered.reduce((sum, r) => sum + r.results, 0);
+    t = { ...t, spent: spend, results };
+  }
   _kpiResultsTotal = typeof t.results === 'number' ? t.results : null;
   _kpiSpendTotal = typeof t.spent === 'number' ? t.spent : null;
   _kpiImpressionsTotal = typeof t.impressions === 'number' ? t.impressions : null;
@@ -754,11 +774,20 @@ function renderCards(t: any, selCount=0) {
   // enabled show_bookings AND we have GHL data. When show_book_rate is also
   // on, the Bookings card's `delta` slot renders the book rate (bookings /
   // leads × 100) as a subtitle rather than a separate card.
-  const cards: { label: string; value: string; icon: string; color: string; delta: string; onClick?: string }[] = [
+  // notFilterable: true marks cards whose data source has no Campaign
+  // Type/Offer/Location/State/Landing Page columns to filter by at all
+  // (see the kpiFilterActive override above and its comment for which
+  // cards DO respond). Dimmed + tooltipped in the render template below
+  // when a filter is active, so it's visually clear those specific
+  // numbers are still showing the full-period total, not that filtering
+  // silently failed. Impressions/Link Clicks/CTR read from Meta's own
+  // totals either way (never overridden), so they're always accurate for
+  // the full period — just never filtered.
+  const cards: { label: string; value: string; icon: string; color: string; delta: string; onClick?: string; notFilterable?: boolean }[] = [
     {label:'Amount Spent', value:fmtUsd(t.spent),   icon:'dollar-sign',          color:'emerald', delta:makeDelta(t.spent,_comparisonTotals?.spent)},
-    {label:'Impressions',  value:fmt(t.impressions),icon:'eye',                  color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions)},
-    {label:'Link Clicks',  value:fmt(t.linkClicks), icon:'mouse-pointer-click',  color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks)},
-    {label:'CTR',          value:fmtPct(ctr),       icon:'mouse-pointer-click',  color:'rose',    delta:makeDelta(ctr,compCtr)},
+    {label:'Impressions',  value:fmt(t.impressions),icon:'eye',                  color:'indigo',  delta:makeDelta(t.impressions,_comparisonTotals?.impressions),  notFilterable:true},
+    {label:'Link Clicks',  value:fmt(t.linkClicks), icon:'mouse-pointer-click',  color:'blue',    delta:makeDelta(t.linkClicks,_comparisonTotals?.linkClicks),    notFilterable:true},
+    {label:'CTR',          value:fmtPct(ctr),       icon:'mouse-pointer-click',  color:'rose',    delta:makeDelta(ctr,compCtr),                                    notFilterable:true},
     {label:'CPL',          value:fmtUsd(cpl),       icon:'receipt',              color:'violet',  delta:makeDelta(cpl,compCpl,true)},
     {label:leadsLabel,     value:fmt(t.results),    icon:'target',               color:'amber',   delta:makeDelta(t.results,_comparisonTotals?.results)},
   ];
@@ -780,7 +809,7 @@ function renderCards(t: any, selCount=0) {
         subtitle = '<span class="text-slate-500 text-[11px]">— book rate</span>';
       }
     }
-    cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:subtitle});
+    cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:subtitle, notFilterable:true});
   }
   if (_showCpa && _cpaAcquisitionsByDay && _platform === 'meta') {
     let acquisitions = 0;
@@ -796,6 +825,7 @@ function renderCards(t: any, selCount=0) {
       label:'CPA', value:cpaValue, icon:'user-check', color:'sky',
       delta:`<span class="text-slate-500 text-[11px]">${fmt(acquisitions)} won${acquisitions>0?' · click to view':''}</span>`,
       onClick: acquisitions>0 ? '_openCpaModal()' : undefined,
+      notFilterable: true,
     });
   }
   if (_showLtv && _cpaAcquisitionsByDay) {
@@ -809,6 +839,7 @@ function renderCards(t: any, selCount=0) {
     cards.push({
       label:'LTV', value:fmtUsd(sales * _ltvValue), icon:'trending-up', color:'violet',
       delta:`<span class="text-slate-500 text-[11px]">${fmt(sales)} sale${sales===1?'':'s'} &times; ${fmtUsd(_ltvValue)}</span>`,
+      notFilterable: true,
     });
   }
   // Meta KPI sheet cards — Bookings and Joins. Gated on the admin toggle AND
@@ -831,15 +862,19 @@ function renderCards(t: any, selCount=0) {
   const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400',teal:'text-teal-400',sky:'text-sky-400'};
   const selBadge = selCount>0 ? `<span class="text-[10px] text-blue-400 font-normal normal-case">${selCount} selected</span>` : '';
   const grid = document.getElementById('cards-grid');
-  if (grid) grid.innerHTML = cards.map((c,i)=>`
-    <div class="bg-gradient-to-br ${colors[c.color]} border rounded-xl px-4 py-3 fade-up fade-up-${i+1} ${c.onClick?'cursor-pointer hover:brightness-125 transition-[filter]':''}" ${c.onClick?`onclick="window.${c.onClick}"`:''}>
+  if (grid) grid.innerHTML = cards.map((c,i)=>{
+    const dimmed = kpiFilterActive && c.notFilterable;
+    const dimTitle = dimmed ? ` title="Not affected by the Campaign Type/Offer/Location/State/Landing Page filter — showing the full-period total."` : '';
+    return `
+    <div class="bg-gradient-to-br ${colors[c.color]} border rounded-xl px-4 py-3 fade-up fade-up-${i+1} ${c.onClick?'cursor-pointer hover:brightness-125 transition-[filter]':''} ${dimmed?'opacity-50':''}"${dimTitle} ${c.onClick?`onclick="window.${c.onClick}"`:''}>
       <div class="flex items-center justify-between mb-2">
-        <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">${c.label}${i===0?selBadge:''}</span>
+        <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">${c.label}${i===0?selBadge:''}${dimmed?' <i data-lucide="filter-x" class="w-3 h-3 text-slate-500"></i>':''}</span>
         <i data-lucide="${c.icon}" class="w-4 h-4 ${iconColors[c.color]}"></i>
       </div>
       <div class="text-xl font-bold text-white font-mono">${c.value}</div>
       ${c.delta?`<div class="mt-1 h-4">${c.delta}</div>`:'<div class="mt-1 h-4"></div>'}
-    </div>`).join('');
+    </div>`;
+  }).join('');
   lucide.createIcons();
   const summary = document.getElementById('selection-summary');
   if (summary) { if (selCount>0){summary.textContent=`${selCount} row${selCount>1?'s':''} selected`;summary.classList.remove('hidden');}else summary.classList.add('hidden'); }
