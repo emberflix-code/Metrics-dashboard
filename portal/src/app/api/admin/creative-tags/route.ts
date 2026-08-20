@@ -9,6 +9,11 @@ import { query } from '@/lib/db';
 // re-checks role server-side rather than trusting the client not to call it
 // directly.
 //
+// While impersonating, session.user.role is the CLIENT's role ('client'),
+// not 'admin' — the original admin identity only survives in
+// impersonatedBy (see api/admin/impersonate/route.ts). So the actual gate
+// has to accept either a real admin session or an impersonating one.
+//
 // Partial updates: either field can be omitted/null to leave the other
 // unchanged, so the two dropdowns on a creative card can each save
 // independently without clobbering the other's current value.
@@ -18,7 +23,8 @@ const VALID_UGC_STATUSES = new Set(['ugc', 'non-ugc']);
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
-  if (!session || session.user.role !== 'admin') {
+  const isAdmin = session?.user.role === 'admin' || !!session?.user.impersonatedBy;
+  if (!session || !isAdmin) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 

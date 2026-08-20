@@ -781,13 +781,16 @@ function renderCards(t: any, selCount=0) {
       delta:`<span class="text-slate-500 text-[11px]">${fmt(sales)} sale${sales===1?'':'s'} &times; ${fmtUsd(_ltvValue)}</span>`,
     });
   }
-  // Meta KPI sheet cards — Bookings and Joins. Gated on both the admin
-  // toggle AND having actually fetched rows, same guard shape as every
-  // other conditional card above: if either is false the push() simply
-  // never runs, so a client without this configured sees no blank/zero
-  // cards and no layout gap — nothing renders at all for them.
-  //
-  if (_showMetaKpiSheet && _metaKpiSheetRows && _platform === 'meta') {
+  // Meta KPI sheet cards — Bookings and Joins. Gated on the admin toggle AND
+  // having actually fetched *some* rows (any month, all-time — not the
+  // current date-range filter), same guard shape as every other
+  // conditional card above: if either is false the push() simply never
+  // runs, so a client with the toggle on but no tabs/cache ever configured
+  // sees no blank/zero cards and no layout gap — nothing renders at all.
+  // Once there's any all-time data, the range-filtered sum can legitimately
+  // be 0 for the selected period — that's a real value, not a missing-
+  // config state, so it still renders (matches every other KPI card here).
+  if (_showMetaKpiSheet && _metaKpiSheetRows && _metaKpiSheetRows.length > 0 && _platform === 'meta') {
     const filtered = _filteredMetaKpiSheetRows();
     const bookingsSum = filtered.reduce((sum, r) => sum + r.bookings, 0);
     const joinsSum = filtered.reduce((sum, r) => sum + r.joins, 0);
