@@ -53,8 +53,14 @@ const CREATIVES_ONLY_BUDGET_MS = 10 * 60_000;
 // Lower than the old phash-only limit (300) because each row now also
 // transfers real image bytes into memory and into a bytea UPDATE, not just
 // a hash computation over already-fetched bytes.
-const THUMBNAIL_BYTES_BACKFILL_LIMIT = 200;
-const THUMBNAIL_BYTES_BACKFILL_BUDGET_MS = 45_000;
+//
+// Raised from 200/45s after auditing Alloy Ops (a 60+ location shared
+// account, ~2,900 creative assets): the backlog was large enough that the
+// original budget couldn't keep pace with new staleness accruing between
+// syncs — some rows sat 30+ days without ever getting bytes. Same class of
+// scale-tuning as Omega's STALE_THUMBNAIL_BACKFILL_LIMIT bump (500→1500).
+const THUMBNAIL_BYTES_BACKFILL_LIMIT = 500;
+const THUMBNAIL_BYTES_BACKFILL_BUDGET_MS = 120_000;
 // Bytes, once downloaded, don't expire the way a signed Meta CDN URL does
 // (~4 days) — so this window is much longer than THUMBNAIL_STALE_DAYS
 // (which only refreshes the URL itself). Re-fetching this rarely is purely
@@ -1186,23 +1192,35 @@ async function syncCreatives(
   // this whole asset class silently never got a full-res upgrade. Fetching
   // the creative's asset_feed_spec recovers the real image_hash Meta
   // doesn't expose on the top-level creative for these ad types.
+  //
+  // Also covers `creative:`-keyed (deriveAssets' "unknown" fallback) assets
+  // — DCO ads whose top-level creative exposes literally none of
+  // image_hash/image_url/thumbnail_url/link_data.picture (only
+  // object_story_spec.page_id), so deriveAssets falls all the way through
+  // to the last-resort branch with thumbnail: null and no retry path ever
+  // revisits them (the bytes/phash backfill only scans thumbnail IS NOT
+  // NULL rows). Confirmed via direct Graph API probe on a stuck Alloy Ops
+  // sample: every one of these creatives has real hashes sitting in
+  // asset_feed_spec.images[], identical to the thumb: case above — same
+  // root cause (DCO's real image data lives only in asset_feed_spec), same
+  // fix, just a different pre-promotion assetKey prefix to catch.
   const creativeIdByAdId = new Map<string, string>();
   for (const ad of ads) if (ad.id && ad.creative?.id) creativeIdByAdId.set(ad.id, ad.creative.id);
   const thumbOnlyCreativeIds = new Set<string>();
   for (const [adId, derivedList] of Array.from(derivedByAdId.entries())) {
-    if (derivedList.some(d => d.assetKey.startsWith('thumb:'))) {
+    if (derivedList.some(d => d.assetKey.startsWith('thumb:') || d.assetKey.startsWith('creative:'))) {
       const cid = creativeIdByAdId.get(adId);
       if (cid) thumbOnlyCreativeIds.add(cid);
     }
   }
   // Old asset_key values a promotion moves ads AWAY from this run — a
   // previous sync (before this fix existed, or before Meta exposed the
-  // hash) already wrote a "thumb:..." row + ad-map entries for these ads.
-  // Promoting assetKey in-memory here does NOT touch that old row, so
-  // without explicit cleanup the same ad ends up double-mapped to both the
-  // stale thumb: key and the new image:<hash> key (double-counted spend/
-  // leads, and the dashboard groups by whichever row it meets first — the
-  // stale low-res one, in practice). Collected here and deleted after the
+  // hash) already wrote a "thumb:..."/"creative:..." row + ad-map entries
+  // for these ads. Promoting assetKey in-memory here does NOT touch that
+  // old row, so without explicit cleanup the same ad ends up double-mapped
+  // to both the stale key and the new image:<hash> key (double-counted
+  // spend/leads, and the dashboard groups by whichever row it meets first
+  // — the stale one, in practice). Collected here and deleted after the
   // new rows are written below.
   const promotedFromKeys = new Set<string>();
   if (thumbOnlyCreativeIds.size > 0) {
@@ -1214,7 +1232,7 @@ async function syncCreatives(
         const json = await res.json() as { asset_feed_spec?: { images?: { hash?: string }[] } };
         const firstHash = json.asset_feed_spec?.images?.[0]?.hash;
         if (firstHash && /^[a-f0-9]{20,}$/i.test(firstHash)) hashByCreativeId.set(cid, firstHash);
-      } catch { /* leave those ads' assets as thumb: */ }
+      } catch { /* leave those ads' assets as thumb:/creative: */ }
     }));
     if (hashByCreativeId.size > 0) {
       for (const [adId, derivedList] of Array.from(derivedByAdId.entries())) {
@@ -1222,9 +1240,17 @@ async function syncCreatives(
         const hash = cid ? hashByCreativeId.get(cid) : undefined;
         if (!hash) continue;
         for (const d of derivedList) {
-          if (d.assetKey.startsWith('thumb:')) {
+          if (d.assetKey.startsWith('thumb:') || d.assetKey.startsWith('creative:')) {
             promotedFromKeys.add(d.assetKey);
             d.assetKey = `image:${hash}`;
+            // thumb: rows were already type 'image' (CASE 4), so this was a
+            // no-op for them; creative: rows are type 'unknown' at their
+            // deriveAssets source (the last-resort fallback) and must be
+            // corrected here too, or they'd upsert as type='unknown' with a
+            // real image hash/thumbnail — wrong type breaks anything that
+            // branches on `.type === 'image'` downstream (e.g. the
+            // phash-eligibility check a few dozen lines below).
+            d.type = 'image';
           }
         }
       }
@@ -1280,13 +1306,13 @@ async function syncCreatives(
   }
 
   // Clean up stale rows left behind by a promotion (see promotedFromKeys
-  // above) — an earlier sync run wrote these under the old thumb: key
-  // before this run's asset_feed_spec lookup recovered the real hash. The
-  // ad-map's FK ON DELETE CASCADE (meta_creative_asset_ad_map references
-  // meta_creative_assets) handles the ad-map rows automatically once the
-  // asset row is gone. Without this, the same ad stays double-mapped to
-  // both the old thumb: key and the new image:<hash> key forever (double-
-  // counted spend/leads, dashboard grouping picks the stale low-res row).
+  // above) — an earlier sync run wrote these under the old thumb:/creative:
+  // key before this run's asset_feed_spec lookup recovered the real hash.
+  // The ad-map's FK ON DELETE CASCADE (meta_creative_asset_ad_map
+  // references meta_creative_assets) handles the ad-map rows automatically
+  // once the asset row is gone. Without this, the same ad stays double-
+  // mapped to both the old key and the new image:<hash> key forever
+  // (double-counted spend/leads, dashboard grouping picks the stale row).
   if (promotedFromKeys.size > 0) {
     await query(
       `DELETE FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2::text[])`,
@@ -1380,6 +1406,112 @@ async function syncCreatives(
         }
       }
     } catch { /* leave stored video source as-is */ }
+  }
+
+  // 1a) Orphaned-hash backfill — asset_keys with real breakdown/spend
+  // history but NO meta_creative_assets row and, critically, no
+  // meta_creative_asset_ad_map entry either (so the AD_METADATA_BACKFILL
+  // pass above, which keys off missing ad-map rows, can never reach them —
+  // its LEFT JOIN finds zero candidates for these ad_ids since the ad
+  // itself already resolved fine, just under a DIFFERENT image_hash).
+  //
+  // Root cause (confirmed via direct Graph API probe on AF Regional Omega:
+  // 208 of 285 card-rendering assets, ~73%, affected): Meta's DCO
+  // per-asset breakdown insights (image_asset/video_asset) report the
+  // exact image hash that was actually shown for each historical
+  // impression, but the /ads creative{image_hash} fetch above only ever
+  // returns the ad's CURRENT creative image. When an ad's image was
+  // swapped/edited after it already had delivery, the old hash still has
+  // real historical spend in meta_asset_breakdown_daily but is permanently
+  // invisible to any ad-centric fetch — deriveAssets never produces it, so
+  // it has no ad-map entry to backfill from, unlike the DELETED/ARCHIVED-ad
+  // case AD_METADATA_BACKFILL_LIMIT above already handles.
+  //
+  // Fix: resolve these hashes directly via /adimages, which is an
+  // ACCOUNT-level image library lookup (not ad-scoped) — confirmed old
+  // hashes still resolve there with status: ACTIVE even after no longer
+  // being referenced by any current ad creative. No ad_id to attribute a
+  // body/title/ad-map row to, so this inserts a metadata-only
+  // meta_creative_assets row (thumbnail + type) with no ad-map entry; the
+  // asset still renders correctly since the dashboard's card list is
+  // driven by meta_asset_breakdown_daily.asset_key, not the ad-map.
+  const orphanedHashLimit = 300;
+  const orphanedRows = await query<{ asset_key: string }>(
+    `SELECT DISTINCT bd.asset_key
+     FROM meta_asset_breakdown_daily bd
+     LEFT JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
+     WHERE bd.account_id = $1 AND a.asset_key IS NULL
+       AND (bd.asset_key LIKE 'image:%' OR bd.asset_key LIKE 'video:%')
+     LIMIT ${orphanedHashLimit}`,
+    [accountId]
+  );
+  if (orphanedRows.length > 0) {
+    const orphanedImageHashes: string[] = [];
+    const orphanedVideoIds: string[] = [];
+    for (const r of orphanedRows) {
+      if (r.asset_key.startsWith('image:')) orphanedImageHashes.push(r.asset_key.slice('image:'.length));
+      else orphanedVideoIds.push(r.asset_key.slice('video:'.length));
+    }
+    if (orphanedImageHashes.length > 0) {
+      try {
+        const u = new URL(`${GRAPH}/act_${accountId}/adimages`);
+        u.searchParams.set('hashes', JSON.stringify(orphanedImageHashes));
+        u.searchParams.set('fields', 'hash,url,permalink_url');
+        u.searchParams.set('access_token', token);
+        const res = await fetch(u.toString());
+        const json = await res.json() as { data?: { hash?: string; url?: string; permalink_url?: string }[] };
+        for (const img of json.data || []) {
+          const url = img.url || img.permalink_url;
+          if (!img.hash || !url) continue;
+          await query(
+            `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, thumbnail_fetched_at, updated_at)
+             VALUES ($1, $2, 'image', $3, now(), now())
+             ON CONFLICT (account_id, asset_key) DO UPDATE SET
+               thumbnail = COALESCE(meta_creative_assets.thumbnail, EXCLUDED.thumbnail),
+               thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
+               updated_at = now()`,
+            [accountId, `image:${img.hash}`, url]
+          );
+        }
+      } catch { /* leave these asset_keys without metadata this run, retried next sync */ }
+    }
+    if (orphanedVideoIds.length > 0) {
+      // Same account-level-lookup rationale as the image case, but videos
+      // have no /adimages equivalent — reuse the existing ids= video lookup
+      // (source+picture) the enrichment pass above already does per ad;
+      // here there's no ad to key off of, so look the video up directly by
+      // its own id, same fallback to /advideos for cross-account cases.
+      for (const vid of orphanedVideoIds) {
+        try {
+          const u = `${GRAPH}/${vid}?fields=source,picture&access_token=${token}`;
+          const res = await fetch(u);
+          const json = await res.json() as { source?: string; picture?: string; error?: unknown };
+          let picture = !('error' in json) ? json.picture : undefined;
+          let source = !('error' in json) ? json.source : undefined;
+          if (!picture) {
+            try {
+              const u2 = `${GRAPH}/act_${accountId}/advideos/${vid}?fields=source,picture&access_token=${token}`;
+              const res2 = await fetch(u2);
+              const json2 = await res2.json() as { source?: string; picture?: string };
+              picture = picture || json2.picture;
+              source = source || json2.source;
+            } catch { /* leave as-is */ }
+          }
+          if (picture) {
+            await query(
+              `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, thumbnail_fetched_at, video_id, video_source, video_source_fetched_at, updated_at)
+               VALUES ($1, $2, 'video', $3, now(), $4, $5, CASE WHEN $5::text IS NOT NULL THEN now() ELSE NULL END, now())
+               ON CONFLICT (account_id, asset_key) DO UPDATE SET
+                 thumbnail = COALESCE(meta_creative_assets.thumbnail, EXCLUDED.thumbnail),
+                 thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
+                 video_source = COALESCE(meta_creative_assets.video_source, EXCLUDED.video_source),
+                 updated_at = now()`,
+              [accountId, `video:${vid}`, picture, vid, source || null]
+            );
+          }
+        } catch { /* leave this asset_key without metadata this run, retried next sync */ }
+      }
+    }
   }
 
   // 1b) Thumbnail-bytes + perceptual-hash backfill. Downloads the actual

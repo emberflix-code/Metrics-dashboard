@@ -584,7 +584,13 @@ export async function GET(req: NextRequest) {
     // instead of a single image_hash on the parent creative), fetch the spec to extract the
     // actual hashes. We then assign those rows an `image:<hash>` key so the batch adimages
     // lookup below can fetch full-resolution URLs for them.
-    const thumbOnlyRows = rows.filter(r => r.assetKey.startsWith('thumb:'));
+    //
+    // Also covers CASE 5 `creative:`-keyed rows (type 'unknown') — DCO ads whose creative
+    // exposes none of image_hash/image_url/thumbnail_url/link_data.picture, only
+    // object_story_spec.page_id, so CASE 1-4 all miss and this falls to the last resort with
+    // thumbnail: null. Confirmed via direct Graph API probe that these creatives' real image
+    // hashes live in asset_feed_spec.images[], same as the thumb: case — same fix applies.
+    const thumbOnlyRows = rows.filter(r => r.assetKey.startsWith('thumb:') || r.assetKey.startsWith('creative:'));
     if (thumbOnlyRows.length > 0) {
       // Find the originating creative_id for each thumb-only row by walking the ads list.
       // Multiple ads can share a row, but they all point at the same thumbnail/creative family.
@@ -608,11 +614,12 @@ export async function GET(req: NextRequest) {
               const row = rows.find(r => r.assetKey === rowKey);
               if (row) {
                 row.assetKey = `image:${firstHash}`;
+                row.type = 'image';
                 imageHashes.push(firstHash);
               }
             });
           }
-        } catch { /* leave row as thumb: */ }
+        } catch { /* leave row as thumb:/creative: */ }
       }));
     }
 
