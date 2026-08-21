@@ -718,10 +718,25 @@ function renderCards(t: any, selCount=0) {
   // Leads-source override. The admin picks one of three sources via
   // `leads_source`; we substitute t.results with the sum from that source
   // over the current date range. Meta is the default (no override).
+  const searchActive = _searchChips.length > 0 || ((document.getElementById('search-input') as HTMLInputElement)?.value?.trim() || '').length > 0;
   if (_platform === 'meta') {
     try {
       const { since, until } = getDateRange();
-      if (_leadsSource === 'sheet' && _sheetLeadsByDay) {
+      if (_leadsSource === 'sheet' && searchActive && _sheetLeadsRows) {
+        // Search is active: sum from the per-row (day, campaign, leads) data
+        // instead of the pre-summed by-day map, so a campaign-name search
+        // narrows the Leads card the same way it narrows the table. Falls
+        // back to _sheetLeadsByDay below when search is inactive, preserving
+        // the exact dedup-safe total described in the comment further down
+        // (allMapped campaign-name matching, first-row-claims-the-name).
+        let sum = 0;
+        for (const r of _sheetLeadsRows) {
+          if (r.day < since || r.day > until) continue;
+          if (!_matchesSearch(r.campaign)) continue;
+          sum += r.leads;
+        }
+        t = { ...t, results: sum };
+      } else if (_leadsSource === 'sheet' && _sheetLeadsByDay) {
         let sum = 0;
         for (const [day, leads] of Object.entries(_sheetLeadsByDay)) {
           if (day >= since && day <= until) sum += leads;
@@ -748,10 +763,9 @@ function renderCards(t: any, selCount=0) {
   // metaKpiSheet.ts — those columns were never part of the export), so
   // they're intentionally left out of this override; see the "can't be
   // filtered" dimming applied to them below instead.
-  const searchInputActive = ((document.getElementById('search-input') as HTMLInputElement)?.value?.trim() || '').length > 0;
   const kpiFilterActive = _kpiFilterCampaignType !== 'all' || _kpiFilterOffer !== 'all'
     || _kpiFilterLocation !== 'all' || _kpiFilterState !== 'all' || _kpiFilterLandingPage !== 'all'
-    || _searchChips.length > 0 || searchInputActive;
+    || searchActive;
   if (kpiFilterActive && _showMetaKpiSheet && _metaKpiSheetRows && _metaKpiSheetRows.length > 0 && _platform === 'meta') {
     const filtered = _filteredMetaKpiSheetRows();
     const spend = filtered.reduce((sum, r) => sum + r.spend, 0);
