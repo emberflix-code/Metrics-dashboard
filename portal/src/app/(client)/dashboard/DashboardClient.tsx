@@ -1726,7 +1726,10 @@ function renderCreativesV2() {
     return;
   }
 
-  const sorted = [...active].sort((a, b) => b[_creativesV2Sort] - a[_creativesV2Sort]);
+  // CPL is the one sort dimension where lower is better (cost per lead) —
+  // every other option (spend, results, ctr) is "more/higher is more
+  // interesting", so only CPL needs its comparator flipped to ascending.
+  const sorted = [...active].sort((a, b) => _creativesV2Sort === 'cpl' ? a.cpl - b.cpl : b[_creativesV2Sort] - a[_creativesV2Sort]);
   grid.innerHTML = sorted.map((r, i) => {
     // naturalWidth < 200 flags Meta's small raw thumbnail_url (mainly
     // DCO-fallback creatives with no image_hash, so no sharper /adimages
@@ -2010,7 +2013,9 @@ function renderCreativesV3() {
     return;
   }
 
-  const sorted = [...active].sort((a, b) => b[_creativesV3Sort] - a[_creativesV3Sort]);
+  // See the matching comment in renderCreativesV2 — CPL is the one
+  // dimension where lower is better, so it sorts ascending.
+  const sorted = [...active].sort((a, b) => _creativesV3Sort === 'cpl' ? a.cpl - b.cpl : b[_creativesV3Sort] - a[_creativesV3Sort]);
   grid.innerHTML = sorted.map((r, i) => {
     const thumb = r.thumbnail
       ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" onload="if(this.naturalWidth&&this.naturalWidth<200){this.classList.add('low-res-thumb');this.closest('.thumb-wrap')?.classList.add('low-res-detected')}" class="w-full h-full object-cover" />`
