@@ -95,6 +95,17 @@ async function tokenForAccountId(accountId: string): Promise<string> {
 // fetchInsightsChunkWithRowCapFallback) catch this specifically; everything
 // else just fails the sync run same as any other hard error.
 const TOO_MUCH_DATA_SUBCODES = new Set([1487534, 1504018]);
+// A THIRD shape of the same underlying problem: plain code:1 with no
+// subcode at all, message "Please reduce the amount of data you're asking
+// for, then retry your request" — seen live on AF Regional Omega's DCO
+// breakdown fetch (no campaign-batching existed on that path until this
+// fix), where it failed identically on every retry across many separate
+// "Sync now"/range-sync attempts because the request was genuinely too
+// large every single time, not rate-limited. Detected by message text
+// since there's no subcode to key off; classified as a RowCapError the
+// same as the subcode-based variants above so it gets the same
+// halve-and-retry treatment instead of being blindly retried unchanged.
+const TOO_MUCH_DATA_MESSAGE = /reduce the amount of data/i;
 class RowCapError extends Error {
   constructor(message: string) { super(message); this.name = 'RowCapError'; }
 }
@@ -159,7 +170,16 @@ async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true, dea
       if (!err) break;
       const title = (err.error_user_title || '').toLowerCase();
       const rateLimited = err.code === 17;
-      const transient = err.code === 1 || err.code === 2 || rateLimited || title.includes('unknown error') || title.includes('temporarily');
+      // A code:1 "reduce the amount of data" response will fail identically
+      // no matter how many times the SAME request is retried — it's not
+      // rate limiting, the payload is genuinely too large. Don't burn
+      // retry attempts on it here; let it fall through to the RowCapError
+      // classification below immediately so a caller that can shrink the
+      // request (fetchInsightsChunkWithRowCapFallback and the DCO
+      // breakdown fetch) gets the chance to, instead of 6 identical
+      // attempts guaranteeing 6 identical failures.
+      const tooMuchData = err.code === 1 && TOO_MUCH_DATA_MESSAGE.test(err.message || '');
+      const transient = !tooMuchData && (err.code === 1 || err.code === 2 || rateLimited || title.includes('unknown error') || title.includes('temporarily'));
       if (!transient || attempt === MAX_ATTEMPTS - 1) break;
       await new Promise(r => setTimeout(r, rateLimited ? 20_000 * (attempt + 1) : 800 * (attempt + 1)));
     }
@@ -174,7 +194,9 @@ async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true, dea
       const scrubbed = String(next).replace(/access_token=[^&]+/, 'access_token=REDACTED');
       console.error('[META-SYNC-ERR]', JSON.stringify({ url: scrubbed, error: json.error, page: isFirstPage ? 'first' : 'mid' }));
       if (isFirstPage) {
-        if (json.error.error_subcode !== undefined && TOO_MUCH_DATA_SUBCODES.has(json.error.error_subcode)) {
+        const isSubcodeRowCap = json.error.error_subcode !== undefined && TOO_MUCH_DATA_SUBCODES.has(json.error.error_subcode);
+        const isMessageRowCap = json.error.code === 1 && TOO_MUCH_DATA_MESSAGE.test(json.error.message || '');
+        if (isSubcodeRowCap || isMessageRowCap) {
           throw new RowCapError(json.error.message || 'Too many rows');
         }
         throw new Error(json.error.message || 'Meta API error');
@@ -505,15 +527,17 @@ async function fetchInsightsChunk(accountId: string, token: string, level: 'camp
 // for accounts too small to have any campaigns yet (defensive — shouldn't
 // happen since syncEntities always runs first) or when batching is skipped
 // entirely for small campaign counts.
-interface RowCapFallbackResult {
-  rows: InsightRow[];
+// Generic over row shape so fetchBreakdownChunkWithRowCapFallback (below)
+// can reuse the same result shape for BreakdownRow instead of InsightRow.
+interface RowCapFallbackResult<T> {
+  rows: T[];
   /** True if any campaign's data was skipped because the row cap persisted
    * even at single-campaign granularity. Callers must NOT treat the range
    * this chunk belongs to as fully backfilled when this is true. */
   hadGaps: boolean;
 }
 
-async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<RowCapFallbackResult> {
+async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<RowCapFallbackResult<InsightRow>> {
   const out: InsightRow[] = [];
   let hadGaps = false;
   const batches = chunkArray(campaignIds, CAMPAIGN_BATCH_SIZE);
@@ -555,6 +579,54 @@ async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: st
       // Promise.all before that chunk's persistUpTo ever ran.
       const reason = err instanceof RowCapError ? 'row cap persists at single-campaign granularity' : (err instanceof Error ? err.message : 'unknown error');
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, level, since, until, campaignId: batch[0], batchSize: batch.length, error: `skipping batch after failure: ${reason}` }));
+      hadGaps = true;
+    }
+  }
+  return { rows: out, hadGaps };
+}
+
+// Same campaign-batching + row-cap halving as fetchInsightsChunkWithRowCapFallback
+// above, but for the DCO per-asset breakdown fetch (image_asset/video_asset).
+// This call previously had NO campaign filtering or batching at all — one
+// unbounded request for the account's whole breakdown in a date range — so
+// on a large, high-volume window it hit Meta's row cap deterministically on
+// every single attempt (confirmed live on AF Regional Omega: July 28-Aug 10
+// stayed stuck across many repeated "Sync now"/range-sync retries, always
+// the same rows, because retrying an oversized request unchanged can never
+// succeed). Mirrors fetchInsightsChunkWithRowCapFallback's shape/behavior
+// exactly, just with a different fields list and a `breakdown` dimension
+// instead of `level`.
+async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: string, breakdown: 'image_asset' | 'video_asset', since: string, until: string, campaignIds: string[], deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
+  const out: BreakdownRow[] = [];
+  let hadGaps = false;
+  const batches = chunkArray(campaignIds, CAMPAIGN_BATCH_SIZE);
+  for (const batch of batches) {
+    if (deadline !== undefined && Date.now() > deadline) { hadGaps = true; break; }
+    try {
+      const u = new URL(`${GRAPH}/act_${accountId}/insights`);
+      u.searchParams.set('level', 'ad');
+      u.searchParams.set('breakdowns', breakdown);
+      u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,actions');
+      u.searchParams.set('time_range', JSON.stringify({ since, until }));
+      u.searchParams.set('time_increment', '1');
+      u.searchParams.set('limit', '500');
+      u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
+      u.searchParams.set('filtering', JSON.stringify([{ field: 'campaign.id', operator: 'IN', value: batch }]));
+      u.searchParams.set('access_token', token);
+      out.push(...await fetchMetaWithRetry<BreakdownRow>(u));
+    } catch (err) {
+      if (err instanceof RowCapError && batch.length > 1) {
+        const mid = Math.ceil(batch.length / 2);
+        const halves = [batch.slice(0, mid), batch.slice(mid)];
+        for (const half of halves) {
+          const sub = await fetchBreakdownChunkWithRowCapFallback(accountId, token, breakdown, since, until, half, deadline);
+          out.push(...sub.rows);
+          if (sub.hadGaps) hadGaps = true;
+        }
+        continue;
+      }
+      const reason = err instanceof RowCapError ? 'row cap persists at single-campaign granularity' : (err instanceof Error ? err.message : 'unknown error');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, campaignId: batch[0], batchSize: batch.length, error: `skipping batch after failure: ${reason}` }));
       hadGaps = true;
     }
   }
@@ -1395,8 +1467,15 @@ async function syncCreatives(
     // completed[i] flips true once BOTH breakdown types finish for chunk i;
     // the persisted watermark only advances past a gap-free completed
     // prefix, same rationale as syncInsights (a mid-run crash loses at most
-    // a few chunks, not the whole range).
+    // a few chunks, not the whole range). gapped[i] marks a chunk that
+    // completed but had at least one campaign-batch silently skipped after
+    // exhausting the row-cap fallback (see fetchBreakdownChunkWithRowCapFallback)
+    // — the watermark must stop AT, not past, the first gapped chunk so the
+    // next sync retries it, same as syncInsights's own gapped tracking.
+    // Previously this function had no such tracking at all, meaning a
+    // partially-failed chunk could get marked fully done and never revisited.
     const completed = new Array(chunks.length).fill(false);
+    const gapped = new Array(chunks.length).fill(false);
     const typesRemaining = new Array(chunks.length).fill(breakdownTypes.length);
     let persistedIdx = -1;
     let persistedValue: string | null = null;
@@ -1413,18 +1492,21 @@ async function syncCreatives(
     const units: { breakdown: 'image_asset' | 'video_asset'; chunkIdx: number; chunk: { since: string; until: string } }[] = [];
     for (let i = 0; i < chunks.length; i++) for (const b of breakdownTypes) units.push({ breakdown: b, chunkIdx: i, chunk: chunks[i] });
 
+    // Campaign IDs to batch this range's breakdown requests by (see
+    // fetchBreakdownChunkWithRowCapFallback) — resolved once per range,
+    // not per chunk/unit, since it's the same account-wide list either way.
+    const rangeCampaignIds = await campaignIdsForAccount(accountId, { since: range.since, until: range.until });
+
     await runPooled(units, SYNC_CONCURRENCY, async ({ breakdown, chunkIdx, chunk }) => {
-      const u = new URL(`${GRAPH}/act_${accountId}/insights`);
-      u.searchParams.set('level', 'ad');
-      u.searchParams.set('breakdowns', breakdown);
-      u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,actions');
-      u.searchParams.set('time_range', JSON.stringify(chunk));
-      u.searchParams.set('time_increment', '1');
-      u.searchParams.set('limit', '500');
-      u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
-      u.searchParams.set('access_token', token);
-      let rows: BreakdownRow[] = [];
-      try { rows = await fetchMetaWithRetry<BreakdownRow>(u); } catch { /* leave chunk incomplete, retried on the next sync */ }
+      // Previously one unbounded request for the whole account's breakdown
+      // in this 3-day window — on a high-volume window that deterministically
+      // exceeds Meta's row cap, retrying the SAME oversized request (as
+      // fetchMetaWithRetry alone would) can never succeed. Batching by
+      // campaign ID with automatic halving on a row-cap error (same
+      // machinery syncInsights already uses) actually shrinks the request
+      // until it fits.
+      const { rows, hadGaps: chunkHadGaps } = await fetchBreakdownChunkWithRowCapFallback(accountId, token, breakdown, chunk.since, chunk.until, rangeCampaignIds, deadline);
+      if (chunkHadGaps) gapped[chunkIdx] = true;
 
       interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number; campaignName: string }
       // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
@@ -1485,12 +1567,12 @@ async function syncCreatives(
       if (typesRemaining[chunkIdx] === 0) {
         completed[chunkIdx] = true;
         let cursor = persistedIdx + 1;
-        while (cursor < completed.length && completed[cursor]) cursor++;
+        while (cursor < completed.length && completed[cursor] && !gapped[cursor]) cursor++;
         if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
       }
     }, deadline);
 
-    return { persisted: persistedValue, reachedSince: chunks.length > 0 && completed.every(c => c) };
+    return { persisted: persistedValue, reachedSince: chunks.length > 0 && completed.every(c => c) && gapped.every(g => !g) };
   };
 
   if (explicitRange) {
