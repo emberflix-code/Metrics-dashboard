@@ -273,6 +273,12 @@ let _creativesV2OnlyWithResults = true;
 let _creativesV3Type: 'video' | 'image' = 'image';
 let _creativesV3Sort: 'spend' | 'results' | 'cpl' | 'ctr' = 'cpl';
 let _creativesV3OnlyWithResults = true;
+// Mirrors _dcoShowHidden from the original Creatives tab. Unlike v1 (where
+// "hidden" usually means a permanently broken/expired Meta URL) or v2 (which
+// has no hidden concept at all), v3's `hidden` = thumbnail_bytes hasn't
+// finished backfilling yet for that asset — see the descriptive copy near
+// the toggle button. Off by default, same convention as v1.
+let _creativesV3ShowHidden = false;
 // v3-only fetch state — separate from _dcoAssets/_staticAssets (v1/v2's
 // data) since v3's fetches always force thumbnailMode=bytes regardless of
 // this client's data_source, even when v1/v2 are on live mode elsewhere.
@@ -2018,6 +2024,27 @@ function renderCreativesV3() {
     }
   }
 
+  // Hidden-by-default filter, mirroring v1's _dcoShowHidden: `hidden` here
+  // means this asset's thumbnail bytes haven't finished backfilling yet (see
+  // fetchCreativesV3), not a permanently broken URL like v1's usual case —
+  // wording on the toggle button reflects that distinction.
+  const hiddenCount = images.filter(r => r.hidden).length + videos.filter(r => r.hidden).length;
+  if (!_creativesV3ShowHidden) {
+    images = images.filter(r => !r.hidden);
+    videos = videos.filter(r => !r.hidden);
+  }
+  const showHiddenBtn = document.getElementById('creatives-v3-show-hidden-btn');
+  if (showHiddenBtn) {
+    if (hiddenCount === 0) {
+      showHiddenBtn.classList.add('hidden');
+    } else {
+      showHiddenBtn.classList.remove('hidden');
+      showHiddenBtn.textContent = _creativesV3ShowHidden
+        ? `Hide ${hiddenCount} still-downloading asset${hiddenCount !== 1 ? 's' : ''}`
+        : `Show ${hiddenCount} still-downloading asset${hiddenCount !== 1 ? 's' : ''}`;
+    }
+  }
+
   document.getElementById('creatives-v3-tab-video')!.textContent = `Videos (${videos.length})`;
   document.getElementById('creatives-v3-tab-image')!.textContent = `Images (${images.length})`;
 
@@ -2040,8 +2067,12 @@ function renderCreativesV3() {
   // dimension where lower is better, so it sorts ascending.
   const sorted = [...active].sort((a, b) => _creativesV3Sort === 'cpl' ? a.cpl - b.cpl : b[_creativesV3Sort] - a[_creativesV3Sort]);
   grid.innerHTML = sorted.map((r, i) => {
+    // Same reasoning as v1's window._onDcoThumbError — a non-null r.thumbnail
+    // only means the byte-serving route returned SOMETHING, not that it will
+    // keep working. Removes the whole card on failure instead of leaving a
+    // blank placeholder in an otherwise-visible card.
     const thumb = r.thumbnail
-      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" onload="if(this.naturalWidth&&this.naturalWidth<200){this.classList.add('low-res-thumb');this.closest('.thumb-wrap')?.classList.add('low-res-detected')}" class="w-full h-full object-cover" />`
+      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="window._onDcoThumbError(this)" onload="if(this.naturalWidth&&this.naturalWidth<200){this.classList.add('low-res-thumb');this.closest('.thumb-wrap')?.classList.add('low-res-detected')}" class="w-full h-full object-cover" />`
       : '';
     const noThumbClass = r.thumbnail ? '' : ' no-thumb';
     const cpl = r.results > 0 ? `$${r.cpl.toFixed(2)}` : '—';
@@ -2079,7 +2110,7 @@ function renderCreativesV3() {
           </div>`
         : '';
     return `
-      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" data-asset-card onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
           ${thumb}
           <button type="button" class="low-res-reveal-btn" title="Meta only provided a low-resolution preview for this creative — click to view it anyway" onclick="event.stopPropagation();this.closest('.thumb-wrap').classList.add('low-res-revealed')">
@@ -4125,10 +4156,15 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                       renderCreativesV3();
                     }}
                   >Has results only</button>
+                  <button
+                    id="creatives-v3-show-hidden-btn"
+                    className="hidden sort-btn text-[10px]"
+                    onClick={() => { _creativesV3ShowHidden = !_creativesV3ShowHidden; renderCreativesV3(); }}
+                  >Show hidden assets</button>
                 </div>
               </div>
               <p className="text-[11px] text-slate-500 mt-1 mb-3">
-                Every video and every image this account ran, viewed separately. Each card shows the asset&apos;s totals plus its full campaign-by-campaign breakdown &mdash; no click-through needed. Thumbnails here are a stored copy of the image, so they won&apos;t go blank the way a Meta link sometimes does &mdash; though a few may still say &quot;NO PREVIEW&quot; until this client&apos;s backlog finishes downloading.
+                Every video and every image this account ran, viewed separately. Each card shows the asset&apos;s totals plus its full campaign-by-campaign breakdown &mdash; no click-through needed. Thumbnails here are a stored copy of the image, so they won&apos;t go blank the way a Meta link sometimes does &mdash; assets still downloading their preview are hidden by default until then.
               </p>
               <div id="creatives-v3-summary" className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-2"></div>
               <div id="creatives-v3-recon" className="text-[11px] text-slate-500 mb-3"></div>
