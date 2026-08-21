@@ -636,6 +636,7 @@ function _filteredMetaKpiSheetRows(): MetaKpiSheetRow[] {
   try { ({ since, until } = getDateRange()); } catch { return []; }
   return _metaKpiSheetRows.filter(r => {
     if (r.day < since || r.day > until) return false;
+    if (!_matchesSearch(r.campaign)) return false;
     if (_kpiFilterCampaignType !== 'all' && r.campaignType !== _kpiFilterCampaignType) return false;
     if (_kpiFilterOffer !== 'all' && r.offer !== _kpiFilterOffer) return false;
     if (_kpiFilterLocation !== 'all' && r.locationName !== _kpiFilterLocation) return false;
@@ -747,8 +748,10 @@ function renderCards(t: any, selCount=0) {
   // metaKpiSheet.ts — those columns were never part of the export), so
   // they're intentionally left out of this override; see the "can't be
   // filtered" dimming applied to them below instead.
+  const searchInputActive = ((document.getElementById('search-input') as HTMLInputElement)?.value?.trim() || '').length > 0;
   const kpiFilterActive = _kpiFilterCampaignType !== 'all' || _kpiFilterOffer !== 'all'
-    || _kpiFilterLocation !== 'all' || _kpiFilterState !== 'all' || _kpiFilterLandingPage !== 'all';
+    || _kpiFilterLocation !== 'all' || _kpiFilterState !== 'all' || _kpiFilterLandingPage !== 'all'
+    || _searchChips.length > 0 || searchInputActive;
   if (kpiFilterActive && _showMetaKpiSheet && _metaKpiSheetRows && _metaKpiSheetRows.length > 0 && _platform === 'meta') {
     const filtered = _filteredMetaKpiSheetRows();
     const spend = filtered.reduce((sum, r) => sum + r.spend, 0);
@@ -3321,6 +3324,12 @@ function initDashboard(accountIds: string[], campaignFilter: string, showAccount
 if (typeof window !== 'undefined') {
   (window as any)._setSortCol = (col: string) => { if (_sortCol===col) _sortDir=_sortDir==='asc'?'desc':'asc'; else { _sortCol=col; _sortDir='asc'; } renderTable(); };
   (window as any)._handleCheckbox = (key: string) => { if (_selectedRows.has(key)) _selectedRows.delete(key); else _selectedRows.add(key); const data=getFiltered().map(calcMetrics); renderCards(getSelectedTotals(data),_selectedRows.size); const sa=document.getElementById('select-all') as HTMLInputElement; if (sa) sa.checked=data.length>0&&data.every((c:any)=>_selectedRows.has(c.id||c.name)); };
+  // Re-run the KPI cards off the same getFiltered()->calcMetrics->getSelectedTotals
+  // pipeline as _handleCheckbox, so typing/adding/removing a campaign-name
+  // search term reflects in the cards above the table exactly like it
+  // already does in the table itself (renderTable already respects search
+  // via _matchesSearch/getFiltered; the cards previously did not).
+  (window as any)._refreshKpiCardsForSearch = () => { const data=getFiltered().map(calcMetrics); renderCards(getSelectedTotals(data),_selectedRows.size); };
   (window as any)._handleSelectAll = (checked: boolean) => { const data=getFiltered(); if (checked) data.forEach(c=>_selectedRows.add(c.id||c.name)); else _selectedRows.clear(); renderTable(); };
   (window as any)._clearDrilldown = () => { _drilldownParentIds.clear(); _drilldownParentLevel=null; _selectedRows.clear(); renderTable(); };
   (window as any)._dpSelectPreset = (key: string) => { _dpActivePreset=key; const r=_dpPresetRange(key); if (r){_dpSince=r.since;_dpUntil=r.until;} _dpSelecting=false;_dpHover=null; const base=new Date(_dpSince!+'T00:00:00');_dpLY=base.getFullYear();_dpLM=base.getMonth(); dpPopulatePresets();dpPopulateSelects();dpRenderBothCals();dpRenderCompareRange(); };
@@ -3753,9 +3762,9 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     <div id="search-chips" className="flex flex-wrap gap-1"></div>
                     <input type="text" id="search-input" placeholder="Enter a name or keyword..." onKeyDown={(e) => {
                       const input=e.currentTarget; const val=input.value.trim();
-                      if ((e.key==='Enter'||e.key===',')&&val) { e.preventDefault(); if(!_searchChips.includes(val.toLowerCase())){_searchChips.push(val.toLowerCase()); const c=document.getElementById('search-chips'); if(c) c.innerHTML=_searchChips.map((chip,i)=>`<span class="inline-flex items-center gap-1 bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs rounded px-2 py-0.5 font-mono">${chip}<button onclick="window._removeChip(${i})" class="ml-0.5 text-blue-400 hover:text-white leading-none">&times;</button></span>`).join('');} input.value=''; renderTable(); }
-                      else if (e.key==='Backspace'&&!val&&_searchChips.length>0) { _searchChips.pop(); const c=document.getElementById('search-chips'); if(c) c.innerHTML=_searchChips.map((chip,i)=>`<span class="inline-flex items-center gap-1 bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs rounded px-2 py-0.5 font-mono">${chip}<button onclick="window._removeChip(${i})" class="ml-0.5 text-blue-400 hover:text-white leading-none">&times;</button></span>`).join(''); renderTable(); }
-                    }} onInput={() => renderTable()} className="flex-1 min-w-[120px] bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none py-0.5" />
+                      if ((e.key==='Enter'||e.key===',')&&val) { e.preventDefault(); if(!_searchChips.includes(val.toLowerCase())){_searchChips.push(val.toLowerCase()); const c=document.getElementById('search-chips'); if(c) c.innerHTML=_searchChips.map((chip,i)=>`<span class="inline-flex items-center gap-1 bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs rounded px-2 py-0.5 font-mono">${chip}<button onclick="window._removeChip(${i})" class="ml-0.5 text-blue-400 hover:text-white leading-none">&times;</button></span>`).join('');} input.value=''; renderTable(); (window as any)._refreshKpiCardsForSearch(); }
+                      else if (e.key==='Backspace'&&!val&&_searchChips.length>0) { _searchChips.pop(); const c=document.getElementById('search-chips'); if(c) c.innerHTML=_searchChips.map((chip,i)=>`<span class="inline-flex items-center gap-1 bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs rounded px-2 py-0.5 font-mono">${chip}<button onclick="window._removeChip(${i})" class="ml-0.5 text-blue-400 hover:text-white leading-none">&times;</button></span>`).join(''); renderTable(); (window as any)._refreshKpiCardsForSearch(); }
+                    }} onInput={() => { renderTable(); (window as any)._refreshKpiCardsForSearch(); }} className="flex-1 min-w-[120px] bg-transparent text-sm text-white placeholder-slate-500 focus:outline-none py-0.5" />
                   </div>
                 </div>
                 <span className="h-4 block" id="search-hint"></span>
@@ -4290,5 +4299,6 @@ if (typeof window !== 'undefined') {
     const c=document.getElementById('search-chips');
     if(c) c.innerHTML=_searchChips.map((chip,i)=>`<span class="inline-flex items-center gap-1 bg-blue-600/30 border border-blue-500/40 text-blue-300 text-xs rounded px-2 py-0.5 font-mono">${chip}<button onclick="window._removeChip(${i})" class="ml-0.5 text-blue-400 hover:text-white leading-none">&times;</button></span>`).join('');
     renderTable();
+    (window as any)._refreshKpiCardsForSearch?.();
   };
 }
