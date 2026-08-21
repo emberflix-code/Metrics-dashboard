@@ -4206,6 +4206,20 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
         </footer>
       </div>
 
+      {/* Floating build-version badge — fixed to the viewport (not the
+          scrolling page), so it stays visible in the bottom-right corner no
+          matter how long the dashboard page is. Same NEXT_PUBLIC_BUILD_SHA
+          already shown in the footer above; this is just an always-visible
+          copy for quick "what's actually deployed" checks without scrolling
+          to the bottom. z-30 — below toast notifications (z-50) and every
+          modal (z-[200]/z-[210]), above normal page content. */}
+      <div
+        className="fixed bottom-3 right-3 z-30 font-mono text-[10px] text-slate-500 bg-slate-900/80 border border-slate-800 rounded px-2 py-1 backdrop-blur-sm pointer-events-none select-none"
+        title="Deployed build"
+      >
+        v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}
+      </div>
+
       {/* Creative Detail Modal */}
       <div id="creative-modal" className="hidden fixed inset-0 z-[210]" style={{background:'rgba(0,0,0,.7)',backdropFilter:'blur(4px)'}} onClick={(e)=>{ if(e.target===e.currentTarget) (window as any)._closeCreative?.(); }} onKeyDown={(e)=>{ if(e.key==='Escape') (window as any)._closeCreative?.(); }}>
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-[95vw] max-w-[1100px] max-h-[92vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
