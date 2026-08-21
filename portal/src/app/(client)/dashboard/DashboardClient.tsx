@@ -4324,6 +4324,14 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 document.getElementById('date-picker-modal')?.classList.add('hidden');
                 updateDateLabel();
                 fetchMetaCampaigns().catch(err=>showNotification(err.message,'error'));
+                // Same as the search-bar Apply button: if a Creatives view is
+                // currently open, its per-asset data was fetched for the OLD
+                // date range and needs refreshing too — fetchMetaCampaigns()
+                // alone only refreshes the Campaign/Adset/Ad table.
+                const creativesVisible = !document.getElementById('creatives-view')?.classList.contains('hidden');
+                if (creativesVisible) fetchDcoAssets();
+                const creativesV3Visible = !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
+                if (creativesV3Visible) fetchDcoAssetsV3();
               }} style={{padding:'7px 18px',borderRadius:8,border:'none',background:'#3b82f6',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer'}}>Update</button>
             </div>
           </div>
