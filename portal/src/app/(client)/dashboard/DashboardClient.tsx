@@ -1379,14 +1379,23 @@ function renderDcoAssets() {
   });
 
   wrap.innerHTML = sorted.map((r, i) => {
+    // A non-null r.thumbnail only means Meta RETURNED a URL — it doesn't mean
+    // that URL still resolves. Meta's thumbnail CDN links expire (~4 days) or
+    // are session-gated, so a real fraction of these 404 in the browser. The
+    // server-side `hidden` flag (thumbnail === null) can't see that failure
+    // ahead of time, so it was previously rendering these as normal cards
+    // that just happened to show a blank/placeholder image in place — not
+    // actually hidden despite "hide creatives without previews" being the
+    // intent. window._onDcoThumbError removes the whole card (same visual
+    // outcome as never having a thumbnail) instead of leaving a blank one.
     const thumb = r.thumbnail
-      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.display='none';this.parentElement.classList.add('no-thumb')" class="w-full h-full object-cover" />`
+      ? `<img src="${r.thumbnail}" alt="" loading="lazy" referrerpolicy="no-referrer" onerror="window._onDcoThumbError(this)" class="w-full h-full object-cover" />`
       : '';
     const noThumbClass = r.thumbnail ? '' : ' no-thumb';
     const cpl = r.results > 0 ? `$${r.cpl.toFixed(2)}` : '—';
     const ctr = `${r.ctr.toFixed(2)}%`;
     return `
-      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden cursor-pointer transition-colors fade-up fade-up-${Math.min(i+1,6)}" data-asset-card onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
           ${thumb}
           <div class="absolute top-2 left-2">${_typeBadge(r.type)}</div>
@@ -1404,6 +1413,20 @@ function renderDcoAssets() {
   }).join('');
 
   if (typeof lucide !== 'undefined') lucide.createIcons();
+}
+
+// Hides the whole card (not just the broken <img>) when a thumbnail URL
+// that Meta DID provide turns out to be expired/broken in the browser —
+// matches the "hide creatives without previews" behavior null-thumbnail
+// assets already get server-side, which can't detect this ahead of time.
+// No reveal path for this case (unlike the "Show hidden assets" toggle for
+// true no-thumbnail assets): the server-side hidden flag doesn't know about
+// it, so a re-render would just put the card back, fail the same way, and
+// disappear again — a toggle promising to "show" it would be misleading.
+if (typeof window !== 'undefined') {
+  (window as any)._onDcoThumbError = (img: HTMLImageElement) => {
+    img.closest('[data-asset-card]')?.remove();
+  };
 }
 
 // Browser-side 64-bit difference-hash, same shape as lib/phash.ts's
