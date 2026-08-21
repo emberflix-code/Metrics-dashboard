@@ -15,6 +15,24 @@ function resolveBuildSha() {
   }
 }
 
+// Human-friendly version (e.g. "v1.2.1"), separate from the raw SHA above.
+// Driven by git tags rather than commit count — create the number that
+// means something (`git tag v1.2.1 && git push origin v1.2.1`) and this
+// picks it up on the next deploy automatically, same as the SHA does.
+// `git describe --tags` resolves to the exact tag when HEAD IS a tagged
+// commit, or "<tag>-<N>-g<sha>" when it's N commits ahead of the last tag
+// (e.g. "v1.2.1-3-gae5d005") — both are informative, so neither is stripped
+// down to just the tag. Falls back to the raw SHA if no tag exists yet
+// (this repo has none as of the change that introduced this function) so
+// the display never goes blank waiting for a first tag to be created.
+function resolveVersion() {
+  try {
+    return execSync('git describe --tags --always').toString().trim();
+  } catch {
+    return process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || 'dev';
+  }
+}
+
 // Commit date/time of whatever's actually deployed — Railway doesn't inject
 // a commit-timestamp env var (only the SHA), and the SHA alone doesn't tell
 // you how stale a running instance might be. The repo is fully checked out
@@ -59,6 +77,7 @@ const nextConfig = {
   poweredByHeader: false,
   env: {
     NEXT_PUBLIC_BUILD_SHA: resolveBuildSha(),
+    NEXT_PUBLIC_VERSION: resolveVersion(),
     NEXT_PUBLIC_BUILD_TIME: resolveBuildTime(),
     NEXT_PUBLIC_DEPLOY_LOG: JSON.stringify(resolveDeployLog()),
   },

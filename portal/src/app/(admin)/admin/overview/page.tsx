@@ -584,7 +584,11 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
             <h1 className="text-xl font-bold text-white">
               Agency Overview
               <span className="ml-2 font-mono text-[11px] text-slate-600 font-normal" title="Deployed build">
-                v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}
+                {(() => {
+                  const version = process.env.NEXT_PUBLIC_VERSION;
+                  const sha = process.env.NEXT_PUBLIC_BUILD_SHA || 'dev';
+                  return !version || version === sha ? `v.${sha}` : `${version} (${sha})`;
+                })()}
                 {process.env.NEXT_PUBLIC_BUILD_TIME && (
                   <> · {new Date(process.env.NEXT_PUBLIC_BUILD_TIME).toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' })}</>
                 )}

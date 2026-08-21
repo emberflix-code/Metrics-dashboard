@@ -1185,6 +1185,19 @@ function _ugcLabel(v: string | null | undefined): string {
   return UGC_OPTIONS.find(o => o.value === v)?.label || '';
 }
 
+// Deployed-build indicator shown in the dashboard footer + floating badge.
+// NEXT_PUBLIC_VERSION comes from `git describe --tags --always` (see
+// next.config.mjs) — once a real tag exists it reads like "v1.2.1" or
+// "v1.2.1-3-gae5d005" (3 commits past the last tag); until then it falls
+// back to the same short SHA as NEXT_PUBLIC_BUILD_SHA, so show just one
+// value rather than the same string twice ("abc1234 (abc1234)").
+function _versionLabel(): string {
+  const version = process.env.NEXT_PUBLIC_VERSION;
+  const sha = process.env.NEXT_PUBLIC_BUILD_SHA || 'dev';
+  if (!version || version === sha) return `v.${sha}`;
+  return `${version} (${sha})`;
+}
+
 function _typeBadge(t: CreativeRow['type']) {
   const m = {
     image: { label: 'Image', color: 'bg-blue-500/10 text-blue-300 border-blue-500/20' },
@@ -4202,7 +4215,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
 
         <footer className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-4 text-center text-[11px] text-slate-600 border-t border-slate-800/50">
           Live data from Meta Marketing API. All times in account timezone.
-          <span className="ml-2 font-mono opacity-60" title="Deployed build">v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}</span>
+          <span className="ml-2 font-mono opacity-60" title="Deployed build">{_versionLabel()}</span>
         </footer>
       </div>
 
@@ -4217,7 +4230,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
         className="fixed bottom-3 right-3 z-30 font-mono text-[10px] text-slate-500 bg-slate-900/80 border border-slate-800 rounded px-2 py-1 backdrop-blur-sm pointer-events-none select-none"
         title="Deployed build"
       >
-        v.{process.env.NEXT_PUBLIC_BUILD_SHA || 'dev'}
+        {_versionLabel()}
       </div>
 
       {/* Creative Detail Modal */}
