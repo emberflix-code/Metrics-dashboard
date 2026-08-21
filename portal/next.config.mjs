@@ -16,20 +16,33 @@ function resolveBuildSha() {
 }
 
 // Human-friendly version (e.g. "v1.2.1"), separate from the raw SHA above.
-// Driven by git tags rather than commit count — create the number that
-// means something (`git tag v1.2.1 && git push origin v1.2.1`) and this
-// picks it up on the next deploy automatically, same as the SHA does.
-// `git describe --tags` resolves to the exact tag when HEAD IS a tagged
-// commit, or "<tag>-<N>-g<sha>" when it's N commits ahead of the last tag
-// (e.g. "v1.2.1-3-gae5d005") — both are informative, so neither is stripped
-// down to just the tag. Falls back to the raw SHA if no tag exists yet
-// (this repo has none as of the change that introduced this function) so
-// the display never goes blank waiting for a first tag to be created.
+//
+// IMPORTANT: Railway's build environment has NO .git directory at all (every
+// `execSync('git ...')` call in this file throws "not a git repository" when
+// it runs there — confirmed via `railway logs`, 2026-08-22). RAILWAY_GIT_
+// COMMIT_SHA works because Railway injects it directly as a build-time env
+// var, not by reading .git — there is no equivalent Railway-native var for
+// "the nearest git tag", so `git describe` can NEVER succeed on Railway,
+// tags or no tags. The old comment here claiming "the repo is fully checked
+// out during Railway's build step" was wrong (or stopped being true).
+//
+// Fix: prefer an explicit RAILWAY_VERSION_TAG override (set manually per
+// release — `railway variables --set RAILWAY_VERSION_TAG=v1.2.1
+// --service Metrics-dashboard --environment production` before/with the
+// deploy that should carry it) over ever trying git on Railway. Local dev
+// still uses live `git describe --tags --always` (this repo DOES have a
+// working .git locally), so no separate value needs to be maintained there.
 function resolveVersion() {
+  if (process.env.RAILWAY_VERSION_TAG) return process.env.RAILWAY_VERSION_TAG;
+  if (process.env.RAILWAY_GIT_COMMIT_SHA) {
+    // Running on Railway but no override var set for this release — git
+    // describe would just throw here, so don't bother attempting it.
+    return process.env.RAILWAY_GIT_COMMIT_SHA.slice(0, 7);
+  }
   try {
     return execSync('git describe --tags --always').toString().trim();
   } catch {
-    return process.env.RAILWAY_GIT_COMMIT_SHA?.slice(0, 7) || 'dev';
+    return 'dev';
   }
 }
 
