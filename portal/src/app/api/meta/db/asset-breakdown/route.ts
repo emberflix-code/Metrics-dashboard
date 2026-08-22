@@ -134,12 +134,18 @@ export async function GET(req: NextRequest) {
     );
     const assetByKey = new Map(assetRows.map(a => [a.asset_key, a] as const));
 
-    // Two asset_key rows can be the same visual photo uploaded twice under
-    // different Meta image_hash values (see 014_creative_asset_phash.sql) --
-    // fold those onto one canonical card instead of showing duplicates.
-    // Video assets never get a phash (sync only hashes type='image' rows),
-    // so they never cluster -- bucket routing below stays keyed off the
-    // original asset_key's "video:" prefix regardless of this remap.
+    // Two asset_key rows can be the same visual photo (or the same video,
+    // re-uploaded under a different Meta video_id) uploaded twice --
+    // fold those onto one canonical card instead of showing duplicates (see
+    // 014_creative_asset_phash.sql). Video assets are hashed from their
+    // poster/thumbnail frame, not the video stream itself, so two uploads of
+    // the same video only cluster when Meta auto-selected a similar poster
+    // frame for both -- not a 100% guarantee, but catches the common case.
+    // Bucket routing below stays keyed off the ORIGINAL asset_key's "video:"
+    // prefix (not the canonical key), so a video always lands in the videos
+    // bucket even after being remapped to a different video:-prefixed
+    // canonical key -- images and videos never cluster with each other since
+    // their key prefixes/hash formats never collide.
     const canonicalKeyOf = clusterByPerceptualHash(
       assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash }))
     );

@@ -1557,7 +1557,7 @@ async function syncCreatives(
        AND (
          a.thumbnail_bytes IS NULL
          OR a.thumbnail_bytes_fetched_at < now() - interval '${THUMBNAIL_BYTES_STALE_DAYS} days'
-         OR (a.type = 'image' AND a.phash IS NULL)
+         OR a.phash IS NULL
        )
      ORDER BY COALESCE(s.total_spend, 0) DESC
      LIMIT ${THUMBNAIL_BYTES_BACKFILL_LIMIT}`,
@@ -1572,7 +1572,14 @@ async function syncCreatives(
         if (!res.ok) continue;
         const bytes = Buffer.from(await res.arrayBuffer());
         const contentType = res.headers.get('content-type') || 'image/jpeg';
-        const hash = row.type === 'image' ? await computePhash(bytes) : null;
+        // Compute a phash for videos too, from the downloaded poster/thumbnail
+        // frame — hashes the poster IMAGE, not the video stream itself, so
+        // this only merges two video uploads when Meta auto-selected a
+        // visually similar poster frame for both (common for a re-uploaded
+        // identical file, not guaranteed). Was image-only before; clustering
+        // itself (clusterByPerceptualHash) already treats any row with a
+        // phash the same regardless of type, so no change needed there.
+        const hash = await computePhash(bytes);
         await query(
           `UPDATE meta_creative_assets
            SET thumbnail_bytes = $3, thumbnail_content_type = $4, thumbnail_bytes_fetched_at = now(),
