@@ -639,6 +639,64 @@ async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: s
   return { rows: out, hadGaps };
 }
 
+// Covers ARCHIVED campaigns' breakdown data, which fetchBreakdownChunkWithRowCapFallback
+// structurally cannot reach: confirmed via direct Graph API testing (2026-08-22) that
+// Meta's insights breakdown endpoint silently returns `{data: []}` for an ARCHIVED
+// campaign's ad the moment ANY filtering clause is applied — campaign.id IN, ad.id IN,
+// even combined with an explicit ad.effective_status filter listing every status
+// including ARCHIVED — while the exact same (account, date range) with NO filtering at
+// all returns that ad's real spend/impressions/image_asset data correctly. Root cause
+// is unclear (undocumented Meta behavior), but the fix is straightforward: campaign.id
+// filtering is simply not viable for archived campaigns, so this fetches unfiltered and
+// relies on date-window narrowing (not campaign-ID halving, which doesn't apply here)
+// as its row-cap defense. On AF Regional Omega, 94% of campaigns (7,737/8,198) are
+// ARCHIVED, so this isn't a minor edge case — most historical months' breakdown data
+// was silently unreachable until this existed.
+async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: string, breakdown: 'image_asset' | 'video_asset', since: string, until: string, deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
+  const out: BreakdownRow[] = [];
+  let hadGaps = false;
+  if (deadline !== undefined && Date.now() > deadline) return { rows: out, hadGaps: true };
+  try {
+    const u = new URL(`${GRAPH}/act_${accountId}/insights`);
+    u.searchParams.set('level', 'ad');
+    u.searchParams.set('breakdowns', breakdown);
+    u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,actions');
+    u.searchParams.set('time_range', JSON.stringify({ since, until }));
+    u.searchParams.set('time_increment', '1');
+    u.searchParams.set('limit', '500');
+    u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
+    u.searchParams.set('access_token', token);
+    out.push(...await fetchMetaWithRetry<BreakdownRow>(u));
+  } catch (err) {
+    if (err instanceof RowCapError && daysBetween(since, until) > 0) {
+      // Narrow by date instead of campaign ID (no campaign filter to halve
+      // here) — split the window in half and recurse, same halving shape as
+      // the campaign-batched fallback.
+      const mid = addDays(since, Math.floor(daysBetween(since, until) / 2));
+      const halves: [string, string][] = [[since, mid], [addDays(mid, 1), until]];
+      for (const [halfSince, halfUntil] of halves) {
+        const sub = await fetchArchivedBreakdownChunkUnfiltered(accountId, token, breakdown, halfSince, halfUntil, deadline);
+        out.push(...sub.rows);
+        if (sub.hadGaps) hadGaps = true;
+      }
+    } else {
+      const reason = err instanceof RowCapError ? 'row cap persists at single-day granularity' : (err instanceof Error ? err.message : 'unknown error');
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, error: `skipping unfiltered archived-campaign fetch after failure: ${reason}` }));
+      hadGaps = true;
+    }
+  }
+  // Returns EVERY ad's rows for this window, not just ARCHIVED campaigns' —
+  // there's no cheap way to filter server-side (that's the whole problem
+  // this function works around) or client-side (would need a full ad_id ->
+  // campaign_id lookup for every row). Not a correctness issue: the caller
+  // merges this with the filtered ACTIVE/PAUSED-only fetch and both write
+  // through the same ON CONFLICT DO UPDATE upsert keyed on
+  // (asset_key, ad_id, date) — a row appearing in both sets just gets
+  // written twice with identical values, a harmless idempotent overwrite,
+  // not a double-count.
+  return { rows: out, hadGaps };
+}
+
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
 
@@ -1044,6 +1102,32 @@ async function syncCreatives(
   // progress.
   explicitRange?: { since: string; until: string }
 ): Promise<void> {
+  // Function-wide clock, used to guarantee the DCO breakdown fetch (section
+  // 3 below — the pass that actually populates campaign_name/spend/results,
+  // the whole reason this function is called for a targeted backfill) gets
+  // real time left even when the earlier backfill sub-passes (1, 1a, 1b)
+  // each hit their own independent cap. Those sub-passes' fixed budgets
+  // (45s + up to 60s + up to 180s = up to 285s) were sized assuming they'd
+  // rarely all max out together, but on a huge account (Omega: ~8,200
+  // campaigns) they reliably do — confirmed in prod: a creatives-only sync
+  // completed with zero errors and zero DCO breakdown rows written because
+  // sections 1/1a/1b alone consumed the full CREATIVES_ONLY_BUDGET_MS (10
+  // min) before section 3 got a chance to run even one unit. Each of
+  // sections 1a/1b now clamps its own deadline to whichever is sooner: its
+  // own fixed budget, or "stop early enough to leave at least
+  // BREAKDOWN_MIN_RESERVE_MS for section 3."
+  // Reserve is capped at 40% of the total budget so a caller with a smaller
+  // budgetMs (the combined "Sync now" path shares INSIGHTS_BACKFILL_BUDGET_MS,
+  // 3 min, across entities+insights+creatives) doesn't get its earlier
+  // sub-passes starved to zero every run — those still need SOME chance to
+  // run on that path (e.g. picking up newly-DELETED/ARCHIVED ads). On the
+  // creatives-only path (CREATIVES_ONLY_BUDGET_MS, 10 min — the one that
+  // actually needs this), 4 min is well under 40%, so the fixed floor wins
+  // there and the earlier sub-passes get properly capped.
+  const syncCreativesStart = Date.now();
+  const BREAKDOWN_MIN_RESERVE_MS = Math.min(4 * 60_000, budgetMs * 0.4);
+  const reservedDeadline = () => syncCreativesStart + budgetMs - BREAKDOWN_MIN_RESERVE_MS;
+
   // 1) Ads + their creative metadata — derive asset identity per ad.
   // limit=50 (already 10x smaller than the plain insights calls' limit=500,
   // since object_story_spec is a large nested object per row) still trips
@@ -1091,7 +1175,7 @@ async function syncCreatives(
   );
   const backfillAdIds = oldAdIdRows.map(r => r.ad_id);
   if (backfillAdIds.length > 0) {
-    const backfillDeadline = Date.now() + AD_METADATA_BACKFILL_BUDGET_MS;
+    const backfillDeadline = Math.min(Date.now() + AD_METADATA_BACKFILL_BUDGET_MS, reservedDeadline());
     const AD_LOOKUP_CHUNK = 50;
     for (const chunk of chunkArrayGeneric(backfillAdIds, AD_LOOKUP_CHUNK)) {
       if (Date.now() > backfillDeadline) break;
@@ -1152,7 +1236,7 @@ async function syncCreatives(
   const staleAdIds = staleAdIdRows.map(r => r.ad_id);
   console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:staleThumbnailBackfill', count: staleAdIds.length }));
   if (staleAdIds.length > 0) {
-    const staleDeadline = Date.now() + STALE_THUMBNAIL_BACKFILL_BUDGET_MS;
+    const staleDeadline = Math.min(Date.now() + STALE_THUMBNAIL_BACKFILL_BUDGET_MS, reservedDeadline());
     const AD_LOOKUP_CHUNK = 50;
     for (const chunk of chunkArrayGeneric(staleAdIds, AD_LOOKUP_CHUNK)) {
       if (Date.now() > staleDeadline) break;
@@ -1358,9 +1442,23 @@ async function syncCreatives(
     } catch { /* leave stored thumbnail as-is */ }
   }
 
+  // Time-boxed like every other sub-pass in this function — this loop was
+  // previously the one real gap: no deadline check at all, and its
+  // per-chunk fallback (one sequential /advideos/<id> request per video
+  // whose batched ids= lookup came back without a source, e.g. any
+  // cross-account video — see project_meta_cross_account_videos) can run
+  // long on an account with many videos. Confirmed in prod as the actual
+  // cause of a 14-minute Omega run that still wrote zero DCO breakdown
+  // rows: this section had no logging at all, so it was invisible in
+  // SYNC-DIAG output even though it was where all the time went — the
+  // reservedDeadline() clamps added to sections 1/1a/1b elsewhere in this
+  // function didn't touch this one since it predates all of them.
+  const videoEnrichmentDeadline = reservedDeadline();
   const videoIds = Array.from(new Set(Array.from(assetsByKey.values()).filter(a => a.type === 'video' && a.videoId).map(a => a.videoId as string)));
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:videoEnrichment:start', count: videoIds.length }));
   const VIDEO_CHUNK = 50;
   for (let i = 0; i < videoIds.length; i += VIDEO_CHUNK) {
+    if (Date.now() > videoEnrichmentDeadline) break;
     const chunk = videoIds.slice(i, i + VIDEO_CHUNK);
     try {
       const u = new URL(`${GRAPH}/`);
@@ -1370,6 +1468,7 @@ async function syncCreatives(
       const res = await fetch(u.toString());
       const json = await res.json() as Record<string, { source?: string; picture?: string; error?: { code?: number; error_subcode?: number } }>;
       for (const vid of chunk) {
+        if (Date.now() > videoEnrichmentDeadline) break;
         let entry = json[vid];
         const failedAuth = entry?.error?.code === 100 && entry?.error?.error_subcode === 33;
         if ((!entry?.source || failedAuth) ) {
@@ -1407,6 +1506,7 @@ async function syncCreatives(
       }
     } catch { /* leave stored video source as-is */ }
   }
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:videoEnrichment:done' }));
 
   // 1a) Orphaned-hash backfill — asset_keys with real breakdown/spend
   // history but NO meta_creative_assets row and, critically, no
@@ -1435,17 +1535,29 @@ async function syncCreatives(
   // meta_creative_assets row (thumbnail + type) with no ad-map entry; the
   // asset still renders correctly since the dashboard's card list is
   // driven by meta_asset_breakdown_daily.asset_key, not the ad-map.
-  const orphanedHashLimit = 300;
+  // Time-boxed like every other backfill sub-pass in this function — added
+  // after this pass caused Omega's DCO breakdown fetch (the step that
+  // actually matters most, since it populates campaign_name/spend/results)
+  // to get starved of budget on a creatives-only run: the per-video branch
+  // below has no batching (unlike the image branch's single /adimages
+  // call), so an unbounded video count could burn the ENTIRE
+  // CREATIVES_ONLY_BUDGET_MS (10 min) before the breakdown fetch even
+  // starts, on top of AD_METADATA_BACKFILL_BUDGET_MS (45s) and
+  // STALE_THUMBNAIL_BACKFILL_BUDGET_MS (3min) already running ahead of it.
+  const ORPHANED_HASH_BACKFILL_LIMIT = 150;
+  const ORPHANED_HASH_BACKFILL_BUDGET_MS = 60_000;
   const orphanedRows = await query<{ asset_key: string }>(
     `SELECT DISTINCT bd.asset_key
      FROM meta_asset_breakdown_daily bd
      LEFT JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
      WHERE bd.account_id = $1 AND a.asset_key IS NULL
        AND (bd.asset_key LIKE 'image:%' OR bd.asset_key LIKE 'video:%')
-     LIMIT ${orphanedHashLimit}`,
+     LIMIT ${ORPHANED_HASH_BACKFILL_LIMIT}`,
     [accountId]
   );
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:orphanedHashBackfill', count: orphanedRows.length }));
   if (orphanedRows.length > 0) {
+    const orphanedHashDeadline = Math.min(Date.now() + ORPHANED_HASH_BACKFILL_BUDGET_MS, reservedDeadline());
     const orphanedImageHashes: string[] = [];
     const orphanedVideoIds: string[] = [];
     for (const r of orphanedRows) {
@@ -1482,6 +1594,7 @@ async function syncCreatives(
       // here there's no ad to key off of, so look the video up directly by
       // its own id, same fallback to /advideos for cross-account cases.
       for (const vid of orphanedVideoIds) {
+        if (Date.now() > orphanedHashDeadline) break;
         try {
           const u = `${GRAPH}/${vid}?fields=source,picture&access_token=${token}`;
           const res = await fetch(u);
@@ -1563,8 +1676,9 @@ async function syncCreatives(
      LIMIT ${THUMBNAIL_BYTES_BACKFILL_LIMIT}`,
     [accountId]
   );
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:thumbnailBytesBackfill', count: thumbnailBytesCandidates.length }));
   if (thumbnailBytesCandidates.length > 0) {
-    const thumbnailBytesDeadline = Date.now() + THUMBNAIL_BYTES_BACKFILL_BUDGET_MS;
+    const thumbnailBytesDeadline = Math.min(Date.now() + THUMBNAIL_BYTES_BACKFILL_BUDGET_MS, reservedDeadline());
     for (const row of thumbnailBytesCandidates) {
       if (Date.now() > thumbnailBytesDeadline) break;
       try {
@@ -1601,6 +1715,7 @@ async function syncCreatives(
   const runBreakdownRange = async (range: { since: string; until: string; kind: 'topup' | 'backfill' }, deadline?: number): Promise<{ persisted: string | null; reachedSince: boolean }> => {
     const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
     const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'runBreakdownRange:chunks', chunkCount: chunks.length, kind: range.kind, since: range.since, until: range.until }));
     if (chunks.length === 0) return { persisted: null, reachedSince: false };
 
     // completed[i] flips true once BOTH breakdown types finish for chunk i;
@@ -1634,7 +1749,29 @@ async function syncCreatives(
     // Campaign IDs to batch this range's breakdown requests by (see
     // fetchBreakdownChunkWithRowCapFallback) — resolved once per range,
     // not per chunk/unit, since it's the same account-wide list either way.
-    const rangeCampaignIds = await campaignIdsForAccount(accountId, { since: range.since, until: range.until });
+    //
+    // ARCHIVED campaigns are deliberately excluded here — confirmed via
+    // direct Graph API testing that Meta's breakdown endpoint silently
+    // returns {data: []} the moment ANY filtering clause touches an
+    // ARCHIVED campaign's ad (campaign.id IN, ad.id IN, even combined with
+    // an explicit effective_status filter), while the identical request
+    // with NO filtering returns that ad's real data correctly. Batching
+    // ARCHIVED IDs into campaign.id filters was therefore pure wasted
+    // effort — every such batch always came back empty. This is scoped to
+    // ONLY the breakdown path (not campaignIdsForAccount itself, which
+    // also feeds the plain insights sync — unconfirmed whether that
+    // endpoint has the same bug, so left untouched there). ARCHIVED
+    // campaigns' breakdown data is instead covered by
+    // fetchArchivedBreakdownChunkUnfiltered below.
+    const allRangeCampaignIds = await campaignIdsForAccount(accountId, { since: range.since, until: range.until });
+    const archivedCampaignIdSet = new Set(
+      (await query<{ entity_id: string }>(
+        `SELECT entity_id FROM meta_entities WHERE account_id = $1 AND level = 'campaign' AND effective_status = 'ARCHIVED'`,
+        [accountId]
+      )).map(r => r.entity_id)
+    );
+    const rangeCampaignIds = allRangeCampaignIds.filter(id => !archivedCampaignIdSet.has(id));
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'runBreakdownRange:campaignIds', totalCount: allRangeCampaignIds.length, nonArchivedCount: rangeCampaignIds.length, unitCount: units.length }));
 
     await runPooled(units, SYNC_CONCURRENCY, async ({ breakdown, chunkIdx, chunk }) => {
       // Previously one unbounded request for the whole account's breakdown
@@ -1646,6 +1783,17 @@ async function syncCreatives(
       // until it fits.
       const { rows, hadGaps: chunkHadGaps } = await fetchBreakdownChunkWithRowCapFallback(accountId, token, breakdown, chunk.since, chunk.until, rangeCampaignIds, deadline);
       if (chunkHadGaps) gapped[chunkIdx] = true;
+
+      // Second pass to cover ARCHIVED campaigns (excluded from
+      // rangeCampaignIds above — see the comment there). Only run when this
+      // account actually has archived campaigns, so accounts without any
+      // (the common case) pay zero extra API cost.
+      if (archivedCampaignIdSet.size > 0) {
+        const archivedResult = await fetchArchivedBreakdownChunkUnfiltered(accountId, token, breakdown, chunk.since, chunk.until, deadline);
+        console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'runBreakdownRange:unit:archivedDone', breakdown, chunkIdx, rowCount: archivedResult.rows.length, hadGaps: archivedResult.hadGaps }));
+        rows.push(...archivedResult.rows);
+        if (archivedResult.hadGaps) gapped[chunkIdx] = true;
+      }
 
       interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number; campaignName: string }
       // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
@@ -1719,7 +1867,14 @@ async function syncCreatives(
     // persistUpTo never fires for it — exactly what an admin-targeted
     // range needs (no watermark writes, order doesn't matter for a single
     // explicit range).
-    await runBreakdownRange({ since: explicitRange.since, until: explicitRange.until, kind: 'topup' }, Date.now() + budgetMs);
+    //
+    // Deadline anchored to syncCreativesStart (not Date.now() here) — this
+    // runs after sections 1/1/a/1b/2 already spent part of budgetMs, so
+    // `Date.now() + budgetMs` at THIS point would silently extend the total
+    // past the caller's actual budget by however long those sections took.
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:breakdown:start', since: explicitRange.since, until: explicitRange.until, remainingMs: syncCreativesStart + budgetMs - Date.now() }));
+    await runBreakdownRange({ since: explicitRange.since, until: explicitRange.until, kind: 'topup' }, syncCreativesStart + budgetMs);
+    console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:breakdown:done' }));
     return;
   }
 
@@ -1737,7 +1892,11 @@ async function syncCreatives(
   // (creatives_*), since creatives hit a different Meta endpoint and can
   // finish backfilling at a different pace.
   let guard = BACKFILL_MONTHS + 2;
-  const deadline = Date.now() + budgetMs;
+  // Anchored to syncCreativesStart, not Date.now() — same fix as the
+  // explicitRange branch above; sections 1/1a/1b/2 already ran by this
+  // point and consumed part of budgetMs, so measuring "from now" here would
+  // silently let the total run longer than the caller's actual budget.
+  const deadline = syncCreativesStart + budgetMs;
   while (guard-- > 0) {
     const ranges = buildSyncRanges(floorDate, yesterday, creativesState?.last_success_until ?? null, creativesNewest, creativesEarliest, creativesBackfillComplete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
