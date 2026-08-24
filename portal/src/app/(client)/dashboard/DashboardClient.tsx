@@ -1814,11 +1814,16 @@ function renderCreativesV2() {
         <td class="px-2.5 py-1.5 text-right font-mono text-violet-300">${ccpl}</td>
       </tr>`;
     }).join('');
-    // Creative file/asset name is an internal detail — only shown to admins
-    // (impersonation view), never to the client themselves.
-    const nameLine = _isAdminView
-      ? `<div class="text-xs font-semibold text-slate-200 truncate mb-2" title="${(r.name||r.title||'').replace(/"/g,'&quot;')}">${r.name || r.title || 'Untitled'}</div>`
-      : '';
+    // Card-level name/title label removed — it's sourced from a single
+    // arbitrary ad's headline (meta_creative_assets.title), not something
+    // reliably tied to "this asset's ad copy" when the same image/video is
+    // reused across multiple ads with different copy (only the FIRST ad's
+    // title/body ever gets stored, see deriveAssets in metaSync.ts) —
+    // showing it read as more authoritative than it actually is. Hidden
+    // per product decision rather than fixed, since a real fix needs a
+    // schema change (one row per (asset_key, ad_id) instead of one per
+    // asset_key) to actually show every ad's own copy.
+    const nameLine = '';
     // Theme / UGC tags — manual admin-only classification, no Meta equivalent.
     // Everyone sees the badges (when set); only admins (impersonation view)
     // get the edit dropdowns to set/change/clear them.
@@ -2119,9 +2124,9 @@ function renderCreativesV3() {
         <td class="px-2.5 py-1.5 text-right font-mono text-violet-300">${ccpl}</td>
       </tr>`;
     }).join('');
-    const nameLine = _isAdminView
-      ? `<div class="text-xs font-semibold text-slate-200 truncate mb-2" title="${(r.name||r.title||'').replace(/"/g,'&quot;')}">${r.name || r.title || 'Untitled'}</div>`
-      : '';
+    // Card-level name/title label removed — same rationale as the v2 grid
+    // above (sourced from a single arbitrary ad's headline, not reliable).
+    const nameLine = '';
     const themeUgcLine = _isAdminView
       ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
           <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
@@ -3434,12 +3439,15 @@ if (typeof window !== 'undefined') {
       <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
         <div class="md:col-span-2">
           <div class="relative aspect-square bg-slate-950 rounded-lg overflow-hidden border border-slate-800">${media}</div>
-          ${c.title || c.body ? `
-            <div class="mt-3 space-y-1.5">
-              ${c.title ? `<div class="text-sm font-semibold text-white">${c.title}</div>` : ''}
-              ${c.body ? `<div class="text-xs text-slate-400 whitespace-pre-wrap">${c.body}</div>` : ''}
-            </div>
-          ` : ''}
+          <!-- Headline/body intentionally not rendered here — c.title/c.body
+               are sourced from a single arbitrary ad's copy (only the FIRST
+               ad seen for this asset_key ever gets stored, see deriveAssets
+               in metaSync.ts), not something reliably tied to "this asset's
+               ad copy" when the same image/video is reused across multiple
+               ads with different headlines/body text. Hidden per product
+               decision; a real fix needs a schema change (one row per
+               (asset_key, ad_id) instead of one per asset_key). -->
+
         </div>
         <div class="md:col-span-3 space-y-3">
           <div>
