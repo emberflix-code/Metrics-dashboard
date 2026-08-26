@@ -688,12 +688,14 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
   // Returns EVERY ad's rows for this window, not just ARCHIVED campaigns' —
   // there's no cheap way to filter server-side (that's the whole problem
   // this function works around) or client-side (would need a full ad_id ->
-  // campaign_id lookup for every row). Not a correctness issue: the caller
-  // merges this with the filtered ACTIVE/PAUSED-only fetch and both write
-  // through the same ON CONFLICT DO UPDATE upsert keyed on
-  // (asset_key, ad_id, date) — a row appearing in both sets just gets
-  // written twice with identical values, a harmless idempotent overwrite,
-  // not a double-count.
+  // campaign_id lookup for every row). The caller MUST drop rows for any
+  // ad_id already covered by the filtered ACTIVE/PAUSED-only fetch before
+  // merging (see runBreakdownRange) — the two fetches' rows get summed
+  // in-memory on (asset_key, ad_id, date) collision before the upsert ever
+  // runs, so an uncovered overlap silently doubles spend/impressions/etc for
+  // every non-archived ad, not a harmless idempotent overwrite as this
+  // comment used to (incorrectly) claim. Confirmed on a real account: the
+  // breakdown table's total came out at exactly 2x true campaign spend.
   return { rows: out, hadGaps };
 }
 
@@ -1791,7 +1793,19 @@ async function syncCreatives(
       if (archivedCampaignIdSet.size > 0) {
         const archivedResult = await fetchArchivedBreakdownChunkUnfiltered(accountId, token, breakdown, chunk.since, chunk.until, deadline);
         console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'runBreakdownRange:unit:archivedDone', breakdown, chunkIdx, rowCount: archivedResult.rows.length, hadGaps: archivedResult.hadGaps }));
-        rows.push(...archivedResult.rows);
+        // fetchArchivedBreakdownChunkUnfiltered returns EVERY ad's rows for
+        // this window (no server-side way to filter to just archived
+        // campaigns' ads), so it necessarily re-includes every ad already
+        // covered by the filtered fetch above. Merging both sets additively
+        // (as preparedByKey below does on key collision) would double that
+        // overlap's spend/impressions/etc — confirmed on a real account
+        // (216024513873696, 90% archived) where the breakdown table's total
+        // came out at exactly 2x true campaign-level spend. Drop any
+        // already-covered ad_id here so only genuinely-archived-campaign ads
+        // contribute rows from this unfiltered fetch.
+        const alreadyCoveredAdIds = new Set(rows.map(r => r.ad_id).filter(Boolean));
+        const archivedOnlyRows = archivedResult.rows.filter(r => r.ad_id && !alreadyCoveredAdIds.has(r.ad_id));
+        rows.push(...archivedOnlyRows);
         if (archivedResult.hadGaps) gapped[chunkIdx] = true;
       }
 
