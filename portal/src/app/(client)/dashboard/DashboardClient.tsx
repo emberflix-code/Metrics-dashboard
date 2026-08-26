@@ -3638,8 +3638,14 @@ if (typeof window !== 'undefined') {
       });
       const json = await res.json();
       if (!res.ok || !json.thumbnail) {
-        if (label) label.textContent = 'No sharper version found';
-        setTimeout(() => { if (label) label.textContent = originalLabel; btn.disabled = false; }, 2500);
+        // No sharper source exists (e.g. a Dynamic Catalog ad with no real
+        // photo behind it) — reveal the low-res image we already have
+        // rather than leaving it hidden forever. It's still strictly better
+        // than a permanent blank/blur, and matches what the plain "click to
+        // view" button does when the fallback is off.
+        if (label) label.textContent = 'No sharper version found — showing what we have';
+        wrap?.classList.add('low-res-revealed');
+        setTimeout(() => { if (label) label.textContent = originalLabel; btn.disabled = false; }, 3000);
         return;
       }
       if (img) {
@@ -3648,8 +3654,11 @@ if (typeof window !== 'undefined') {
       }
       wrap?.classList.add('low-res-revealed');
     } catch {
-      if (label) label.textContent = 'Failed — try again';
-      setTimeout(() => { if (label) label.textContent = originalLabel; btn.disabled = false; }, 2500);
+      // Same reasoning as above — a failed request shouldn't leave the
+      // existing (already-downloaded) low-res image hidden.
+      if (label) label.textContent = 'Failed to check — showing what we have';
+      wrap?.classList.add('low-res-revealed');
+      setTimeout(() => { if (label) label.textContent = originalLabel; btn.disabled = false; }, 3000);
     }
   };
 
