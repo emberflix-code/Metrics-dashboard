@@ -1548,11 +1548,25 @@ async function syncCreatives(
   // STALE_THUMBNAIL_BACKFILL_BUDGET_MS (3min) already running ahead of it.
   const ORPHANED_HASH_BACKFILL_LIMIT = 150;
   const ORPHANED_HASH_BACKFILL_BUDGET_MS = 60_000;
+  // Two distinct ways a breakdown-referenced asset_key can still need this
+  // lookup: (a) no meta_creative_assets row at all yet (a.asset_key IS NULL
+  // — the original case this pass covered), or (b) a row DOES exist but was
+  // created from deriveAssets()'s thumb:/creative: CASE-4 fallback for a
+  // DIFFERENT ad using the same visual asset, so it's stuck on a stale
+  // placeholder URL with thumbnail_fetched_at never set — a real DCO ad can
+  // reference several image hashes via asset_feed_spec.images[], but the
+  // thumbOnlyCreativeIds promotion above only ever recovers images[0], so
+  // every OTHER hash the breakdown sync's own image_asset.hash attribution
+  // writes a row for is invisible to the per-run assetsByKey enrichment loop
+  // above forever (deriveAssets() never emits that exact key again).
+  // Confirmed on a real account: /adimages returns a genuine full-resolution
+  // image for one of these "existing but never enriched" rows.
   const orphanedRows = await query<{ asset_key: string }>(
     `SELECT DISTINCT bd.asset_key
      FROM meta_asset_breakdown_daily bd
      LEFT JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
-     WHERE bd.account_id = $1 AND a.asset_key IS NULL
+     WHERE bd.account_id = $1
+       AND (a.asset_key IS NULL OR a.thumbnail_fetched_at IS NULL)
        AND (bd.asset_key LIKE 'image:%' OR bd.asset_key LIKE 'video:%')
      LIMIT ${ORPHANED_HASH_BACKFILL_LIMIT}`,
     [accountId]
@@ -1581,8 +1595,8 @@ async function syncCreatives(
             `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, thumbnail_fetched_at, updated_at)
              VALUES ($1, $2, 'image', $3, now(), now())
              ON CONFLICT (account_id, asset_key) DO UPDATE SET
-               thumbnail = COALESCE(meta_creative_assets.thumbnail, EXCLUDED.thumbnail),
-               thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
+               thumbnail = CASE WHEN meta_creative_assets.thumbnail_fetched_at IS NULL THEN EXCLUDED.thumbnail ELSE meta_creative_assets.thumbnail END,
+               thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail_fetched_at IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
                updated_at = now()`,
             [accountId, `image:${img.hash}`, url]
           );
@@ -1617,8 +1631,8 @@ async function syncCreatives(
               `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, thumbnail_fetched_at, video_id, video_source, video_source_fetched_at, updated_at)
                VALUES ($1, $2, 'video', $3, now(), $4, $5, CASE WHEN $5::text IS NOT NULL THEN now() ELSE NULL END, now())
                ON CONFLICT (account_id, asset_key) DO UPDATE SET
-                 thumbnail = COALESCE(meta_creative_assets.thumbnail, EXCLUDED.thumbnail),
-                 thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
+                 thumbnail = CASE WHEN meta_creative_assets.thumbnail_fetched_at IS NULL THEN EXCLUDED.thumbnail ELSE meta_creative_assets.thumbnail END,
+                 thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail_fetched_at IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
                  video_source = COALESCE(meta_creative_assets.video_source, EXCLUDED.video_source),
                  updated_at = now()`,
               [accountId, `video:${vid}`, picture, vid, source || null]
