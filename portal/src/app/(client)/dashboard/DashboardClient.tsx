@@ -1584,6 +1584,42 @@ function _ensureCreativesV3Phashes(images: AssetBreakdownRow[]) {
   });
 }
 
+// Admin-only (impersonation view) aggregate row for the currently visible
+// creative cards — Spend/Impr/Leads/CPL/CTR summed across exactly what's on
+// screen (post type-toggle, post "Has results only" filter), so it moves
+// with those controls instead of always reflecting the whole account. Real
+// clients never see this — see _isAdminView gating elsewhere in this file
+// for the same admin/client split (theme/UGC edit dropdowns, mismatch
+// banners). Shared by v2 and v3 since both call it with their own filtered
+// `active` array and their own container id.
+function _renderCreativesAdminSummary(containerId: string, rows: AssetBreakdownRow[]) {
+  const wrap = document.getElementById(containerId);
+  if (!wrap) return;
+  if (!_isAdminView) { wrap.classList.add('hidden'); wrap.innerHTML = ''; return; }
+  wrap.classList.remove('hidden');
+
+  const spend = rows.reduce((acc, r) => acc + r.spend, 0);
+  const impressions = rows.reduce((acc, r) => acc + r.impressions, 0);
+  const linkClicks = rows.reduce((acc, r) => acc + r.linkClicks, 0);
+  const leads = rows.reduce((acc, r) => acc + r.results, 0);
+  const cpl = leads > 0 ? spend / leads : 0;
+  const ctr = impressions > 0 ? (linkClicks / impressions) * 100 : 0;
+
+  const fmtMoney = (n: number) => `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const stat = (label: string, value: string) => `
+    <div class="bg-slate-900/60 border border-amber-500/20 rounded-lg p-3">
+      <div class="text-[10px] text-amber-500/70 uppercase tracking-wider">${label}</div>
+      <div class="text-base font-mono font-semibold text-slate-100 mt-0.5">${value}</div>
+    </div>`;
+  wrap.innerHTML = [
+    stat('Spend (shown)', fmtMoney(spend)),
+    stat('Impr. (shown)', impressions.toLocaleString('en-US')),
+    stat('Leads (shown)', `${leads}`),
+    stat('CPL (shown)', leads > 0 ? fmtMoney(cpl) : '—'),
+    stat('CTR (shown)', `${ctr.toFixed(2)}%`),
+  ].join('');
+}
+
 // ── Creatives v2 — video/image split, campaign breakdown built into each card ─
 // Reuses the same _dcoAssets/_staticAssets data the existing Creatives tab
 // already fetches (fetchDcoAssets/fetchStaticAssets) — no separate endpoint.
@@ -1773,6 +1809,8 @@ function renderCreativesV2() {
   if (_creativesV2OnlyWithResults) {
     active = active.filter(r => r.results > 0);
   }
+
+  _renderCreativesAdminSummary('creatives-v2-admin-summary', active);
 
   if (active.length === 0) {
     // Same "toggle is hiding everything, not actually empty" distinction the
@@ -2088,6 +2126,8 @@ function renderCreativesV3() {
   if (_creativesV3OnlyWithResults) {
     active = active.filter(r => r.results > 0);
   }
+
+  _renderCreativesAdminSummary('creatives-v3-admin-summary', active);
 
   if (active.length === 0) {
     if (activeBeforeResultsFilter.length > 0 && _creativesV3OnlyWithResults) {
@@ -4167,6 +4207,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </p>
               <div id="creatives-v2-summary" className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-2"></div>
               <div id="creatives-v2-recon" className="text-[11px] text-slate-500 mb-3"></div>
+              <div id="creatives-v2-admin-summary" className="hidden grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-3"></div>
               <div className="flex items-center gap-1 mb-3 bg-slate-800/60 rounded-lg p-0.5 w-fit">
                 <button id="creatives-v2-tab-video" onClick={() => { _creativesV2Type='video'; renderCreativesV2(); }} className="view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Videos</button>
                 <button id="creatives-v2-tab-image" onClick={() => { _creativesV2Type='image'; renderCreativesV2(); }} className="view-btn active-view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Images</button>
@@ -4212,6 +4253,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </p>
               <div id="creatives-v3-summary" className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-2"></div>
               <div id="creatives-v3-recon" className="text-[11px] text-slate-500 mb-3"></div>
+              <div id="creatives-v3-admin-summary" className="hidden grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mb-3"></div>
               <div className="flex items-center gap-1 mb-3 bg-slate-800/60 rounded-lg p-0.5 w-fit">
                 <button id="creatives-v3-tab-video" onClick={() => { _creativesV3Type='video'; renderCreativesV3(); }} className="view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Videos</button>
                 <button id="creatives-v3-tab-image" onClick={() => { _creativesV3Type='image'; renderCreativesV3(); }} className="view-btn active-view-btn flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold">Images</button>
