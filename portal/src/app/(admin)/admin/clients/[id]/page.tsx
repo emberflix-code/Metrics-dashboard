@@ -8,6 +8,7 @@ import ShowAccountToggle from './ShowAccountToggle';
 import ShowCreativeCampaignBreakdownToggle from './ShowCreativeCampaignBreakdownToggle';
 import ShowCreativesV3Toggle from './ShowCreativesV3Toggle';
 import HideAdsetAdTabsToggle from './HideAdsetAdTabsToggle';
+import EnablePageImageFallbackToggle from './EnablePageImageFallbackToggle';
 import ActiveToggle from './ActiveToggle';
 import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
@@ -53,6 +54,7 @@ interface ClientDetail {
   show_creative_campaign_breakdown: boolean;
   show_creatives_v3: boolean;
   hide_adset_ad_tabs: boolean;
+  enable_page_image_fallback: boolean;
   meta_kpi_sheet_id: string;
   meta_kpi_sheet_tab: string;
   show_meta_kpi_sheet: boolean;
@@ -99,6 +101,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
            c.ltv_value, c.show_ltv, c.active, c.show_creative_campaign_breakdown, c.show_creatives_v3, c.hide_adset_ad_tabs,
+           c.enable_page_image_fallback,
            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
@@ -292,6 +295,9 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             </div>
             <div className="pt-4">
               <HideAdsetAdTabsToggle clientId={client.id} current={client.hide_adset_ad_tabs ?? false} />
+            </div>
+            <div className="pt-4">
+              <EnablePageImageFallbackToggle clientId={client.id} current={client.enable_page_image_fallback ?? false} />
             </div>
           </div>
         </div>

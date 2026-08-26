@@ -292,6 +292,23 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_creatives_v3 BOOLE
 // doesn't get silently reverted on the next deploy.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_adset_ad_tabs BOOLEAN NOT NULL DEFAULT true`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_adset_ad_tabs_defaulted BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
+// Page-content image fallback: a single agency-wide System User token
+// (Page-level "Partial access" — Ads + Insights, grants pages_read_engagement)
+// used ONLY to recover a full-resolution image via an ad's
+// effective_object_story_id -> Page post -> full_picture, for creatives whose
+// ad object exposes nothing but a tiny thumbnail_url. Separate from
+// agency_bm_connections (those are ads_read only, can't read Page post
+// content). Per-client opt-in since it costs one extra Graph API call per
+// low-res asset per sync — see enable_page_image_fallback below.
+pool.query(`
+  CREATE TABLE IF NOT EXISTS agency_page_token (
+    id                SERIAL PRIMARY KEY,
+    token_enc         TEXT,
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  )
+`).then(() => pool.query(`INSERT INTO agency_page_token (id) VALUES (1) ON CONFLICT DO NOTHING`)).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS enable_page_image_fallback BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 pool.query(`UPDATE clients SET hide_adset_ad_tabs = true, hide_adset_ad_tabs_defaulted = true WHERE hide_adset_ad_tabs_defaulted = false`).catch(() => {});
 
 // Meta KPI sheet: per-client Google Sheet (same gviz-CSV mechanism as the

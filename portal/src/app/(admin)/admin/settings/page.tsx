@@ -2,6 +2,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import BmConnectionsManager from './BmConnectionsManager';
+import PageTokenManager from './PageTokenManager';
 
 export default async function SettingsPage() {
   const session = await getServerSession(authOptions);
@@ -20,6 +21,14 @@ export default async function SettingsPage() {
             Each Business Manager has its own access token and ad account list. A client&apos;s dashboard can pull data from accounts across any BM you&apos;ve connected here.
           </p>
           <BmConnectionsManager />
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h1 className="text-lg font-bold text-white mb-1">Page-content image fallback</h1>
+          <p className="text-sm text-slate-400 mb-5">
+            Recovers a sharper creative image for assets Meta only gives a tiny preview for, by reading the original Page post behind the ad. Enable per-client in that client&apos;s settings.
+          </p>
+          <PageTokenManager />
         </div>
       </div>
     </div>

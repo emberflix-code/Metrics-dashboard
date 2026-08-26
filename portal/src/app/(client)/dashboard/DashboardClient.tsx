@@ -58,6 +58,13 @@ interface Props {
   // Adset Sets and Ads are hidden. Independent of showCreativeCampaignBreakdown.
   // Admin-togglable per client — see HideAdsetAdTabsToggle.
   hideAdsetAdTabs?: boolean;
+  // Off by default. When true, Creatives v3's "low-res preview — click to
+  // view" button additionally offers to recover a full-resolution image via
+  // POST /api/meta/db/recover-image (see window._recoverImage) instead of
+  // just unblurring the same tiny bytes. Costs nothing unless a user
+  // actually clicks it. Admin-togglable per client — see
+  // EnablePageImageFallbackToggle.
+  enablePageImageFallback?: boolean;
   // Off by default. When true (and the client has a configured Meta KPI
   // sheet — see MetaKpiSheetConfigForm), the dashboard fetches
   // /api/sheets/meta-kpi and shows Bookings/Joins KPI cards plus a filter
@@ -137,6 +144,7 @@ let _showCreativeCampaignBreakdown = false;
 // DashboardClient() alongside the other prop-derived module vars.
 let _showCreativesV3Tab = false;
 let _hideAdsetAdTabs = true;
+let _enablePageImageFallback = false;
 // True only when an admin is viewing via impersonation — gates internal
 // diagnostic banners real clients shouldn't see (see Props.isAdminView).
 let _isAdminView = false;
@@ -2184,14 +2192,20 @@ function renderCreativesV3() {
             ${r.ugcStatus ? `<span class="text-[10px] font-medium bg-fuchsia-500/15 text-fuchsia-300 px-1.5 py-0.5 rounded">${_ugcLabel(r.ugcStatus)}</span>` : ''}
           </div>`
         : '';
+    const revealBtn = _enablePageImageFallback && r.adIds[0]
+      ? `<button type="button" class="low-res-reveal-btn" title="Try to recover a full-resolution version from the original post" onclick="event.stopPropagation();window._recoverImage('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','${r.adIds[0].replace(/'/g,"\\'")}',this)">
+          <i data-lucide="sparkles" class="w-5 h-5"></i>
+          <span class="low-res-reveal-label">Low-res preview — click to try recovering a sharper version</span>
+        </button>`
+      : `<button type="button" class="low-res-reveal-btn" title="Meta only provided a low-resolution preview for this creative — click to view it anyway" onclick="event.stopPropagation();this.closest('.thumb-wrap').classList.add('low-res-revealed')">
+          <i data-lucide="eye" class="w-5 h-5"></i>
+          <span class="low-res-reveal-label">Low-res preview — click to view</span>
+        </button>`;
     return `
       <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" data-asset-card onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
           ${thumb}
-          <button type="button" class="low-res-reveal-btn" title="Meta only provided a low-resolution preview for this creative — click to view it anyway" onclick="event.stopPropagation();this.closest('.thumb-wrap').classList.add('low-res-revealed')">
-            <i data-lucide="eye" class="w-5 h-5"></i>
-            <span class="low-res-reveal-label">Low-res preview — click to view</span>
-          </button>
+          ${revealBtn}
           <div class="absolute top-2 left-2">${_typeBadge(r.type)}</div>
           ${r.adCount > 1 ? `<div class="absolute top-2 right-2 text-[10px] font-semibold bg-slate-950/80 text-slate-200 px-1.5 py-0.5 rounded">${r.adCount} ad variants</div>` : ''}
         </div>
@@ -3602,6 +3616,43 @@ if (typeof window !== 'undefined') {
     }
   };
 
+  // Fired only when a user clicks "low-res preview — click to view" on a
+  // Creatives v3 card while the Page-content fallback is enabled for this
+  // client — never during a bulk load, so it costs nothing for clients/assets
+  // that never hit this button. Recovers a full-resolution image via the
+  // ad's underlying Page post and, on success, swaps the card's <img> src to
+  // the newly-cached byte route so the sharper version sticks around on
+  // future loads too.
+  (window as any)._recoverImage = async (accountId: string, assetKey: string, adId: string, btn: HTMLButtonElement) => {
+    const wrap = btn.closest('.thumb-wrap');
+    const img = wrap?.querySelector('img') as HTMLImageElement | null;
+    btn.disabled = true;
+    const label = btn.querySelector('.low-res-reveal-label');
+    const originalLabel = label?.textContent || '';
+    if (label) label.textContent = 'Looking for a sharper version…';
+    try {
+      const res = await fetch('/api/meta/db/recover-image', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ account_id: accountId, asset_key: assetKey, ad_id: adId }),
+      });
+      const json = await res.json();
+      if (!res.ok || !json.thumbnail) {
+        if (label) label.textContent = 'No sharper version found';
+        setTimeout(() => { if (label) label.textContent = originalLabel; btn.disabled = false; }, 2500);
+        return;
+      }
+      if (img) {
+        img.src = json.thumbnail + '?r=' + Date.now();
+        img.onload = () => { wrap?.classList.remove('low-res-detected'); img.classList.remove('low-res-thumb'); };
+      }
+      wrap?.classList.add('low-res-revealed');
+    } catch {
+      if (label) label.textContent = 'Failed — try again';
+      setTimeout(() => { if (label) label.textContent = originalLabel; btn.disabled = false; }, 2500);
+    }
+  };
+
   (window as any)._closeCreative = () => {
     const modal = document.getElementById('creative-modal');
     if (!modal) return;
@@ -3655,7 +3706,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, showMetaKpiSheet = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -3673,6 +3724,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   // live mode, rather than show an empty/broken grid (see Props.showCreativesV3).
   _showCreativesV3Tab = showCreativesV3 && accountIds.every(id => dataSourceByAccount[id] === 'cached');
   _hideAdsetAdTabs = hideAdsetAdTabs;
+  _enablePageImageFallback = enablePageImageFallback;
   _showMetaKpiSheet = showMetaKpiSheet;
   _dpCapMaximumToThisYear = /omega/i.test(clientName);
 

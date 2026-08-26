@@ -49,6 +49,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET hide_adset_ad_tabs = $1 WHERE id = $2', [!!body.hide_adset_ad_tabs, params.id]);
   }
 
+  if (body.enable_page_image_fallback !== undefined) {
+    await query('UPDATE clients SET enable_page_image_fallback = $1 WHERE id = $2', [!!body.enable_page_image_fallback, params.id]);
+  }
+
   if (body.active !== undefined) {
     await query('UPDATE clients SET active = $1 WHERE id = $2', [!!body.active, params.id]);
   }
