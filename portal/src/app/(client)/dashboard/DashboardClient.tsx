@@ -26,6 +26,10 @@ interface Props {
   showCpa?: boolean;            // when true (and a CPA sheet is configured), show the CPA KPI card
   showLtv?: boolean;            // when true (and a CPA sheet is configured), show the LTV KPI card
   ltvValue?: number;            // admin-entered $ value per sale; LTV = won leads in range x this
+  // When true (and leadsSource === 'meta'), the Leads KPI card is clickable
+  // and opens a modal listing the individual instant-form submissions behind
+  // the count. Server-side gated too — see /api/meta/lead-names.
+  showMetaLeadNames?: boolean;
   // Resolved server-side, PER ACCOUNT (not one client-wide flag) — a client
   // scoped to multiple ad accounts can have some synced and some not, so
   // each account independently falls back to 'live' if it hasn't completed
@@ -169,6 +173,16 @@ let _cpaWonLeads: { day: string; name: string }[] = [];
 // acquisitions fetch above) x an admin-entered value per sale.
 let _showLtv = false;
 let _ltvValue = 0;
+
+// Meta instant-form lead names — when the admin opts a client in AND Meta is
+// the attribution source, the Leads card becomes clickable and lists the
+// people behind the count. Fetched lazily on first click (not alongside the
+// KPI load) since it costs several Graph calls to walk campaigns -> ads ->
+// forms -> leads, and most viewers never open it. Cached per [since, until]
+// so re-opening the same range doesn't refetch.
+let _showMetaLeadNames = false;
+let _metaLeadNamesCache: { key: string; leads: MetaLeadRow[] } | null = null;
+interface MetaLeadRow { name: string; email: string; phone: string; createdTime: string; campaignName: string }
 
 // Meta KPI sheet — Bookings/Joins KPI cards + the Campaign Type/Offer/
 // Location Name/State/Landing Page filter bar. Unlike the sheet-leads/
@@ -391,6 +405,20 @@ let _dpRecentlyUsed: string[] = [];
 let _dpCapMaximumToThisYear = false;
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+/**
+ * HTML-escapes untrusted text before it goes into an innerHTML template.
+ * Lead names/emails/phones are typed by members of the public into a Meta
+ * instant form, so they are the one place on this dashboard where the data
+ * is genuinely attacker-controlled rather than agency-authored.
+ */
+function esc(s: unknown): string {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 function _dpFmt(d: Date) {
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
 }
@@ -822,6 +850,17 @@ function renderCards(t: any, selCount=0) {
     {label:'CPL',          value:fmtUsd(cpl),       icon:'receipt',              color:'violet',  delta:makeDelta(cpl,compCpl,true)},
     {label:leadsLabel,     value:fmt(t.results),    icon:'target',               color:'amber',   delta:makeDelta(t.results,_comparisonTotals?.results)},
   ];
+  // Leads card opens the instant-form submission list. Only wired up when the
+  // client is opted in AND there is a non-zero count to explain — a clickable
+  // card that opens an empty modal is worse than a plain one.
+  if (_showMetaLeadNames && _platform === 'meta') {
+    const leadsCard = cards.find(c => c.label === leadsLabel);
+    const leadsCount = typeof t.results === 'number' ? t.results : 0;
+    if (leadsCard && leadsCount > 0) {
+      leadsCard.onClick = '_openLeadNamesModal()';
+      leadsCard.delta = `${leadsCard.delta || ''}<span class="block text-slate-500 text-[11px]">click to view</span>`;
+    }
+  }
   if (_showBookings && _ghlBookingsByDay && _platform === 'meta') {
     let bookingsSum = 0;
     try {
@@ -3706,6 +3745,84 @@ if (typeof window !== 'undefined') {
     modal.classList.add('hidden');
     document.body.style.overflow = '';
   };
+
+  // Meta instant-form lead names. Unlike the CPA modal (whose rows arrive with
+  // the KPI fetch), these are fetched on demand for the current range — the
+  // walk from campaigns to forms to leads is several Graph calls, and most
+  // viewers never open this.
+  (window as any)._openLeadNamesModal = async () => {
+    const modal = document.getElementById('lead-names-modal');
+    const body = document.getElementById('lead-names-modal-body');
+    if (!modal || !body) return;
+
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+
+    const { since, until } = getDateRange();
+    const key = `${since}|${until}`;
+    const render = (rows: MetaLeadRow[]) => {
+      if (rows.length === 0) {
+        body.innerHTML = `<p class="text-sm text-slate-400">No leads found in the selected date range.</p>`;
+        return;
+      }
+      body.innerHTML = `
+        <p class="text-xs text-slate-500 mb-3">${rows.length} lead${rows.length === 1 ? '' : 's'} in the selected date range</p>
+        <ul class="divide-y divide-slate-800">
+          ${rows.map(l => `
+            <li class="py-2.5">
+              <div class="flex items-start justify-between gap-3">
+                <span class="text-sm text-white font-medium">${esc(l.name)}</span>
+                <span class="text-xs text-slate-500 font-mono shrink-0">${_dpDisplay(l.createdTime.slice(0, 10))}</span>
+              </div>
+              ${l.email ? `<div class="text-xs text-slate-400 mt-0.5">${esc(l.email)}</div>` : ''}
+              ${l.phone ? `<div class="text-xs text-slate-400 mt-0.5 font-mono">${esc(l.phone)}</div>` : ''}
+            </li>`).join('')}
+        </ul>`;
+    };
+
+    if (_metaLeadNamesCache && _metaLeadNamesCache.key === key) {
+      render(_metaLeadNamesCache.leads);
+      return;
+    }
+
+    body.innerHTML = `<p class="text-sm text-slate-400">Loading leads…</p>`;
+    try {
+      const res = await fetch(`/api/meta/lead-names?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
+      const json = await res.json();
+      if (json.error) {
+        // Configuration/permission states come back 200 with an error code —
+        // show why rather than a bare failure.
+        const friendly: Record<string, string> = {
+          no_page_token: 'Lead names are not available yet — the agency Page token is not configured.',
+          no_ad_token: 'Lead names are not available for this ad account.',
+          no_forms: 'No Meta instant forms ran in this date range.',
+          no_access: 'Lead names are not available — the Page token cannot read this form.',
+          not_enabled: 'Lead names are not enabled for this dashboard.',
+          not_meta_attribution: 'Lead names are only available when leads come from Meta.',
+        };
+        body.innerHTML = `<p class="text-sm text-slate-400">${esc(friendly[json.error] || 'Could not load leads.')}</p>`;
+        return;
+      }
+      const rows: MetaLeadRow[] = json.leads || [];
+      _metaLeadNamesCache = { key, leads: rows };
+      render(rows);
+    } catch {
+      body.innerHTML = `<p class="text-sm text-slate-400">Could not load leads.</p>`;
+    }
+  };
+
+  (window as any)._closeLeadNamesModal = () => {
+    const modal = document.getElementById('lead-names-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('lead-names-modal');
+      if (modal && !modal.classList.contains('hidden')) (window as any)._closeLeadNamesModal();
+    }
+  });
   window.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       const modal = document.getElementById('cpa-modal');
@@ -3715,7 +3832,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -3724,6 +3841,10 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _showBookRate = showBookRate;
   _showCpa = showCpa;
   _showLtv = showLtv;
+  // Meta is the only source with an instant form behind the count; a
+  // sheet/GHL Leads number has nothing to enumerate (the API enforces this
+  // too, so a stale prop can't leak anything).
+  _showMetaLeadNames = showMetaLeadNames && leadsSource === 'meta';
   _ltvValue = ltvValue;
   _dataSourceByAccount = dataSourceByAccount;
   _isAdminView = isAdminView;
@@ -4367,6 +4488,19 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
             <button onClick={()=>(window as any)._closeCpaModal?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
           </div>
           <div id="cpa-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
+        </div>
+      </div>
+
+      {/* Meta instant-form lead names */}
+      <div id="lead-names-modal" className="hidden fixed inset-0 z-[210]" style={{background:'rgba(0,0,0,.7)',backdropFilter:'blur(4px)'}} onClick={(e)=>{ if(e.target===e.currentTarget) (window as any)._closeLeadNamesModal?.(); }} onKeyDown={(e)=>{ if(e.key==='Escape') (window as any)._closeLeadNamesModal?.(); }}>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-[95vw] max-w-[560px] max-h-[80vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <i data-lucide="target" className="w-4 h-4 text-amber-400"></i> Leads
+            </h3>
+            <button onClick={()=>(window as any)._closeLeadNamesModal?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+          </div>
+          <div id="lead-names-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
         </div>
       </div>
 

@@ -309,6 +309,14 @@ pool.query(`
   )
 `).then(() => pool.query(`INSERT INTO agency_page_token (id) VALUES (1) ON CONFLICT DO NOTHING`)).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS enable_page_image_fallback BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
+// Meta instant-form lead names: makes the Leads KPI card clickable, listing
+// the people behind the count. Reuses the same agency_page_token above —
+// lead CONTENT lives on the Page that owns the form, not the ad account, so
+// the ads_read BM tokens can't read it (they get code 100/subcode 33). Off by
+// default: this surfaces client PII, and it only applies when Meta is the
+// attribution source (a sheet/GHL Leads count has no form to enumerate).
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_meta_lead_names BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 pool.query(`UPDATE clients SET hide_adset_ad_tabs = true, hide_adset_ad_tabs_defaulted = true WHERE hide_adset_ad_tabs_defaulted = false`).catch(() => {});
 
 // Meta KPI sheet: per-client Google Sheet (same gviz-CSV mechanism as the

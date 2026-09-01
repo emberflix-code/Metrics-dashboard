@@ -28,6 +28,7 @@ interface ClientRow {
   show_cpa: boolean;
   cpa_sheet_tab: string;
   show_ltv: boolean;
+  show_meta_lead_names: boolean;
   ltv_value: number;
   show_creative_campaign_breakdown: boolean;
   show_creatives_v3: boolean;
@@ -71,7 +72,7 @@ export default async function DashboardPage() {
             c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
             c.leads_source, c.show_bookings, c.show_book_rate,
             (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
-            c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value,
+            c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value, c.show_meta_lead_names,
             c.show_creative_campaign_breakdown, c.show_creatives_v3, c.hide_adset_ad_tabs,
             c.enable_page_image_fallback,
             c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet
@@ -145,6 +146,7 @@ export default async function DashboardPage() {
         showCpa={!!(client?.show_cpa && client?.cpa_sheet_tab)}
         showLtv={!!(client?.show_ltv && client?.cpa_sheet_tab)}
         ltvValue={client?.ltv_value ?? 0}
+        showMetaLeadNames={!!(client?.show_meta_lead_names && resolvedLeadsSource === 'meta')}
         showCreativeCampaignBreakdown={!!client?.show_creative_campaign_breakdown}
         showCreativesV3={!!client?.show_creatives_v3}
         hideAdsetAdTabs={!!client?.hide_adset_ad_tabs}

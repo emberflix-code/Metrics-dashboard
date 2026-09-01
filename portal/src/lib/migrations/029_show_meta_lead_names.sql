@@ -1,0 +1,15 @@
+-- Per-client opt-in: make the Leads KPI card clickable, opening a modal that
+-- lists the actual people behind the number (name / email / phone / date) for
+-- Meta instant-form (lead-gen) campaigns.
+--
+-- Lead CONTENT is not readable with the ads_read tokens in
+-- agency_bm_connections: it lives on the PAGE that owns the instant form and
+-- needs both the leads_retrieval permission AND a token holding a role on that
+-- Page. We reuse the existing agency-wide Page System User token in
+-- agency_page_token (see 028_page_content_token.sql) for exactly that.
+--
+-- Off by default: this surfaces client PII (names, emails, phone numbers), so
+-- it must be a deliberate per-client decision, and it only makes sense when
+-- Meta is the attribution source (leads_source = 'meta') — a sheet/GHL-sourced
+-- Leads count has no Meta instant form behind it to enumerate.
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_meta_lead_names BOOLEAN NOT NULL DEFAULT false;
