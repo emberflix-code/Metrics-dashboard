@@ -4,7 +4,14 @@ buildCommand = "npm run build"
 
 [deploy]
 startCommand = "npm run start"
-healthcheckPath = "/"
+# "/" is a server component that always redirects (307) -- to /login when
+# signed out, /admin or /dashboard otherwise -- so it never returns 2xx.
+# Railway's healthchecker stopped treating that redirect as healthy, which
+# failed every deploy at Network > Healthcheck while the container itself
+# started fine ("Ready in ~190ms" then killed). /login is a static client
+# component that returns a plain 200 and touches neither the session nor the
+# database, so it is a truer "is the server up" probe than the redirect was.
+healthcheckPath = "/login"
 healthcheckTimeout = 60
 restartPolicyType = "on_failure"
 restartPolicyMaxRetries = 3
