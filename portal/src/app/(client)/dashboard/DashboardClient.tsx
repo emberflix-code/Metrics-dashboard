@@ -178,10 +178,17 @@ let _ltvValue = 0;
 // the attribution source, the Leads card becomes clickable and lists the
 // people behind the count. Fetched lazily on first click (not alongside the
 // KPI load) since it costs several Graph calls to walk campaigns -> ads ->
-// forms -> leads, and most viewers never open it. Cached per [since, until]
-// so re-opening the same range doesn't refetch.
+// forms -> leads, and most viewers never open it. Cached per [since, until].
+//
+// The cache is time-boxed: leads arrive continuously, so a range fetched
+// earlier in a long-lived session goes stale within minutes (observed live —
+// a session cached 10 leads and kept showing 10 after two more came in, with
+// only a hard refresh clearing it). Past the TTL we still paint the cached
+// rows immediately and refresh underneath, so re-opening never regresses to
+// a loading spinner over data we already have.
+const META_LEAD_NAMES_TTL_MS = 60_000;
 let _showMetaLeadNames = false;
-let _metaLeadNamesCache: { key: string; leads: MetaLeadRow[] } | null = null;
+let _metaLeadNamesCache: { key: string; leads: MetaLeadRow[]; fetchedAt: number } | null = null;
 interface MetaLeadRow { name: string; email: string; phone: string; createdTime: string; campaignName: string }
 
 // Meta KPI sheet — Bookings/Joins KPI cards + the Campaign Type/Offer/
@@ -3780,12 +3787,16 @@ if (typeof window !== 'undefined') {
         </ul>`;
     };
 
-    if (_metaLeadNamesCache && _metaLeadNamesCache.key === key) {
-      render(_metaLeadNamesCache.leads);
-      return;
+    // Paint what we already have first (instant), then decide whether it is
+    // fresh enough to stop there. A stale hit falls through to the fetch below
+    // and re-renders in place rather than blanking the list.
+    const hit = _metaLeadNamesCache && _metaLeadNamesCache.key === key ? _metaLeadNamesCache : null;
+    if (hit) {
+      render(hit.leads);
+      if (Date.now() - hit.fetchedAt < META_LEAD_NAMES_TTL_MS) return;
+    } else {
+      body.innerHTML = `<p class="text-sm text-slate-400">Loading leads…</p>`;
     }
-
-    body.innerHTML = `<p class="text-sm text-slate-400">Loading leads…</p>`;
     try {
       const res = await fetch(`/api/meta/lead-names?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
       const json = await res.json();
@@ -3800,14 +3811,16 @@ if (typeof window !== 'undefined') {
           not_enabled: 'Lead names are not enabled for this dashboard.',
           not_meta_attribution: 'Lead names are only available when leads come from Meta.',
         };
-        body.innerHTML = `<p class="text-sm text-slate-400">${esc(friendly[json.error] || 'Could not load leads.')}</p>`;
+        // Keep showing the rows we already had rather than replacing real
+        // leads with an error message on a background refresh.
+        if (!hit) body.innerHTML = `<p class="text-sm text-slate-400">${esc(friendly[json.error] || 'Could not load leads.')}</p>`;
         return;
       }
       const rows: MetaLeadRow[] = json.leads || [];
-      _metaLeadNamesCache = { key, leads: rows };
+      _metaLeadNamesCache = { key, leads: rows, fetchedAt: Date.now() };
       render(rows);
     } catch {
-      body.innerHTML = `<p class="text-sm text-slate-400">Could not load leads.</p>`;
+      if (!hit) body.innerHTML = `<p class="text-sm text-slate-400">Could not load leads.</p>`;
     }
   };
 
