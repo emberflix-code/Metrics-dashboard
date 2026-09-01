@@ -24,9 +24,9 @@ export default async function SettingsPage() {
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
-          <h1 className="text-lg font-bold text-white mb-1">Page-content image fallback</h1>
+          <h1 className="text-lg font-bold text-white mb-1">Page token</h1>
           <p className="text-sm text-slate-400 mb-5">
-            Recovers a sharper creative image for assets Meta only gives a tiny preview for, by reading the original Page post behind the ad. Enable per-client in that client&apos;s settings.
+            One agency-wide Page token powering two per-client features: sharper creative images (Page-content image fallback) and instant-form lead names on the Leads KPI card. Enable either in that client&apos;s settings.
           </p>
           <PageTokenManager />
         </div>

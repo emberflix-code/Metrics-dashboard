@@ -50,7 +50,7 @@ export default function PageTokenManager() {
         {updatedAt && <span className="text-slate-500">— last updated {new Date(updatedAt).toLocaleString()}</span>}
       </div>
       <p className="text-xs text-slate-500">
-        A System User token with Page-level &ldquo;Partial access&rdquo; (Ads + Insights toggled on) for each Page whose ads you want this fallback to cover. Used only to recover a full-resolution image for creatives whose ad exposes nothing but a tiny thumbnail — never used for anything else.
+        A System User token assigned to each Page whose ads you want covered. Two features use it, both opt-in per client: <strong className="text-slate-400">Page-content image fallback</strong> (needs Ads + Insights on the Page) recovers a full-resolution image for creatives whose ad exposes only a tiny thumbnail; <strong className="text-slate-400">Show Meta lead names</strong> (additionally needs Leads access, granting <code>leads_retrieval</code>) reads the instant-form submissions behind the Leads KPI card, including contact details. Scopes are fixed when the token is generated — after changing Page assignments in Business Settings, generate a new token and paste it here to replace this one.
       </p>
       <div className="flex gap-2">
         <input
