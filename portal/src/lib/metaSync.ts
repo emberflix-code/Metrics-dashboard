@@ -175,7 +175,16 @@ async function fetchMetaWithRetry<T>(url: URL | string, followPaging = true, dea
       const err = json?.error;
       if (!err) break;
       const title = (err.error_user_title || '').toLowerCase();
-      const rateLimited = err.code === 17;
+      // code 17 = "Ad Account Has Too Many API Calls" / "User request limit
+      // reached"; code 4 = "Application request limit reached" (app-wide
+      // budget, distinct from the per-account 17/80004 limits — confirmed
+      // live 2026-09-01 with is_transient:true in Meta's own response, yet
+      // previously NOT in this transient set at all, so it hard-failed on
+      // the very first attempt with zero backoff); code 80004 (error_subcode
+      // 2446079) = "There have been too many calls to this ad-account" —
+      // same family as 17 in effect, just a different code Meta uses for it
+      // on some endpoints (seen live on /ads during a creatives sync).
+      const rateLimited = err.code === 17 || err.code === 4 || err.code === 80004;
       // A code:1 "reduce the amount of data" response will fail identically
       // no matter how many times the SAME request is retried — it's not
       // rate limiting, the payload is genuinely too large. Don't burn
