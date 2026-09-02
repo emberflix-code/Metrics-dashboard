@@ -88,6 +88,15 @@ function resolveDeployLog(count = 15) {
 const nextConfig = {
   // Disable Next.js's built-in X-Frame-Options: SAMEORIGIN so GHL can iframe this app.
   poweredByHeader: false,
+  // Required for src/instrumentation.ts's register() to actually run on
+  // Next.js 14 (it only became a stable, flag-free feature in Next 15) --
+  // without this, next-server.js's prepareImpl() silently skips loading the
+  // instrumentation hook entirely: no error, no log, register() just never
+  // fires. Confirmed live 2026-09-02: the daily sync scheduler's boot log
+  // never appeared in Railway's deploy logs until this flag was added.
+  experimental: {
+    instrumentationHook: true,
+  },
   env: {
     NEXT_PUBLIC_BUILD_SHA: resolveBuildSha(),
     NEXT_PUBLIC_VERSION: resolveVersion(),
