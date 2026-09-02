@@ -39,9 +39,20 @@ interface ClientRow {
   show_meta_kpi_sheet: boolean;
 }
 
-export default async function DashboardPage() {
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ _al?: string }>;
+}) {
   const session = await getServerSession(authOptions);
   if (!session || session.user.role !== 'client') redirect('/login');
+
+  // Carried forward from /auto-login?token=... (see that page) so the
+  // Refresh button below can clear cookies and re-enter through the same
+  // auto-login flow the client's GHL menu link uses, without them having to
+  // leave GHL and re-click it. Only ever read here, passed to the client
+  // component as a prop — never re-rendered into a visible link/href.
+  const { _al: autoLoginToken } = await searchParams;
 
   const connections = await query<BmConnectionRow>(
     `SELECT token_enc, account_ids FROM agency_bm_connections ORDER BY sort_order ASC, created_at ASC`
@@ -154,6 +165,7 @@ export default async function DashboardPage() {
         showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id && client?.meta_kpi_sheet_tab)}
         dataSourceByAccount={dataSourceByAccount}
         isAdminView={!!impersonatedBy}
+        autoLoginToken={autoLoginToken}
       />
     </>
   );

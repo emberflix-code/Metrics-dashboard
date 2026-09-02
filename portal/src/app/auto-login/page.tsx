@@ -13,7 +13,11 @@ function AutoLoginInner() {
     if (!token) { router.replace('/login'); return; }
     fetch(`/api/auto-login?token=${encodeURIComponent(token)}`)
       .then(r => {
-        if (r.ok) router.replace('/dashboard');
+        // Forward the token as _al so the dashboard's Refresh button can
+        // clear cookies and re-enter through this same flow without the
+        // client needing to re-click their GHL menu link — see the Refresh
+        // button in DashboardClient.tsx for where this gets used.
+        if (r.ok) router.replace(`/dashboard?_al=${encodeURIComponent(token)}`);
         else router.replace('/login');
       })
       .catch(() => router.replace('/login'));

@@ -42,6 +42,12 @@ interface Props {
   // reference implementation details ("Meta's own attribution", source
   // names) real clients shouldn't see on their own dashboard.
   isAdminView?: boolean;
+  // Carried forward from /auto-login?token=... (see page.tsx and
+  // auto-login/page.tsx) so the header's Refresh button can clear the
+  // session cookie and re-enter through the same auto-login flow the
+  // client's GHL menu link uses. Undefined for a client who logged in via
+  // the plain /login form instead — Refresh falls back to /login for them.
+  autoLoginToken?: string;
   // Off by default. When true, a "Creatives v2" tab appears alongside the
   // existing Creatives tab — video/image results split into separate views,
   // each asset showing its full campaign-by-campaign breakdown inline.
@@ -3845,7 +3851,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -3933,6 +3939,30 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     <button onClick={() => { const data=getFiltered().map(calcMetrics); if(!data.length){showNotification('No data','error');return;} downloadFile(JSON.stringify(data,null,2),'meta-ads-'+new Date().toISOString().split('T')[0]+'.json','application/json'); showNotification('Downloaded JSON','success'); document.getElementById('export-menu')?.classList.add('hidden'); }} className="w-full text-left px-4 py-2 text-xs text-slate-300 hover:bg-slate-700 flex items-center gap-2"><i data-lucide="file-code" className="w-3.5 h-3.5"></i> Download JSON</button>
                   </div>
                 </div>
+                {/* Refresh: signs out (clears the httpOnly session cookie via
+                    NextAuth's own signOut — document.cookie can't touch an
+                    httpOnly cookie from client JS, so this can't be hand-rolled)
+                    then re-enters through the same auto-login link the
+                    client's GHL menu already points at, landing back on a
+                    fully signed-in dashboard with everything — Meta, sheet
+                    leads, GHL bookings, KPI sheet cache — fetched fresh.
+                    Falls back to /login for a client who signed in the
+                    normal way instead of via auto-login (autoLoginToken is
+                    only ever set on that path — see page.tsx). */}
+                <button
+                  onClick={() => {
+                    signOut({
+                      redirect: false,
+                    }).then(() => {
+                      window.location.href = autoLoginToken
+                        ? `/auto-login?token=${encodeURIComponent(autoLoginToken)}`
+                        : '/login';
+                    });
+                  }}
+                  className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2"
+                >
+                  <i data-lucide="rotate-cw" className="w-3 h-3"></i><span>Refresh</span>
+                </button>
                 <ChangePasswordButton className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors" />
                 <button onClick={() => signOut({ callbackUrl: '/login' })} className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
                   <i data-lucide="log-out" className="w-3 h-3"></i><span>Sign out</span>
