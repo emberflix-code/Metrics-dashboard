@@ -25,7 +25,7 @@ export async function GET(req: NextRequest) {
       .filter(r => matchesCampaignFilter(r.name || r.campaign_name || '', campaignFilter))
       .map(r => ({ id: r.entity_id, name: r.name, effective_status: r.effective_status }));
 
-    return NextResponse.json({ data, paging: null });
+    return NextResponse.json({ data, paging: null }, { headers: { 'Cache-Control': 'no-store' } });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';
     return NextResponse.json({ error: { message: msg } }, { status: 500 });

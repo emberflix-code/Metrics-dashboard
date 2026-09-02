@@ -2,6 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter, isMultiKeywordFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
 
+// Every response below carries the dashboard's live campaign/spend/leads
+// numbers — a stale cached copy (browser heuristic caching, or an
+// intermediary proxy) silently shows outdated data with zero indication
+// anything is wrong. This route reads cookies via getClientDbScope
+// (already forces Next.js dynamic rendering server-side), but that alone
+// doesn't stop the BROWSER from caching the fetch() response, so every
+// return path sets Cache-Control explicitly rather than relying on that.
+const NO_STORE = { headers: { 'Cache-Control': 'no-store' } };
+
 interface DailyInsightRow {
   entity_id: string;
   date: string;
@@ -47,7 +56,7 @@ export async function GET(req: NextRequest) {
       since = range.since || '';
       until = range.until || '';
     } catch { /* leave empty — query below returns nothing */ }
-    if (!since || !until) return NextResponse.json({ data: [], paging: null });
+    if (!since || !until) return NextResponse.json({ data: [], paging: null }, NO_STORE);
 
     // Optional explicit campaign.id IN [...] constraint (ad-ID discovery call).
     let campaignIdIn: string[] | null = null;
@@ -94,7 +103,7 @@ export async function GET(req: NextRequest) {
         return NextResponse.json({
           data: [{ reach: String(totals.reach), impressions: String(totals.impressions), spend: String(roundedSpend), inline_link_clicks: String(totals.linkClicks), actions: buildActionsArray(String(totals.results)) }],
           paging: null,
-        });
+        }, NO_STORE);
       }
 
       const rows = await query<{ reach: string; impressions: string; spend: string; link_clicks: string; results: string }>(
@@ -109,7 +118,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({
         data: [{ reach: r?.reach ?? '0', impressions: r?.impressions ?? '0', spend: r?.spend ?? '0', inline_link_clicks: r?.link_clicks ?? '0', actions: buildActionsArray(r?.results ?? '0') }],
         paging: null,
-      });
+      }, NO_STORE);
     }
 
     const dbLevel = level === 'ad' ? 'ad' : level === 'adset' ? 'adset' : 'campaign';
@@ -149,7 +158,7 @@ export async function GET(req: NextRequest) {
         date_start: r.date,
         date_stop: r.date,
       }));
-      return NextResponse.json({ data, paging: null });
+      return NextResponse.json({ data, paging: null }, NO_STORE);
     }
 
     // Sum across the range into one row per entity.
@@ -190,7 +199,7 @@ export async function GET(req: NextRequest) {
       actions: buildActionsArray(String(results)),
     }));
 
-    return NextResponse.json({ data, paging: null });
+    return NextResponse.json({ data, paging: null }, NO_STORE);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';
     return NextResponse.json({ error: { message: msg } }, { status: 500 });
