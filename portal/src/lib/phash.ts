@@ -40,12 +40,32 @@ function hammingDistance(a: string, b: string): number {
 // product decision: exact-pixel dedupe only, no loose merges.
 export const PHASH_MATCH_THRESHOLD = 4;
 
+// Omega/GMN "Join40%Off" template incident, 2026-08-31 – 2026-09-02: these 3
+// image assets shipped with a scrambled headline ("40% Your Off Membership"
+// instead of "40% Off Your Membership"), live across 77 club campaigns
+// nationwide before marketing corrected it on 2026-09-02. The corrected
+// version is the exact same photo (same face/scene), so phash clustering
+// already merges each bad/good pair's spend and leads onto one card — but
+// clusterByPerceptualHash's tie-break (lexicographically smallest assetKey)
+// happens to land on the bad hash in all 3 pairs, so the merged card shows
+// the typo'd thumbnail. This map forces the correct member of each
+// already-correct cluster to be the one selected as canonical, without
+// touching the clustering/merge logic itself. Never delete a bad→good
+// mapping once the underlying asset_key rows age out of any date range
+// still viewable on a dashboard.
+const CANONICAL_KEY_OVERRIDES: Record<string, string> = {
+  'image:476bb0aef44d736c5a46d2f34b83c88a': 'image:7b6580e9485f0563d0ef9cc953a22f72',
+  'image:3b8890f23d0a076a3779708dd7b351f7': 'image:5cb047c99980b5784c25033786397494',
+  'image:684b8982ceffaf6a3d5b0d37e7c20921': 'image:d4badc0b8e05aebb2ea0e41876dcc036',
+};
+
 // Clusters assets whose phash values are within PHASH_MATCH_THRESHOLD
 // Hamming distance and returns a map from every input assetKey to its
 // cluster's canonical key. Entries with a null/missing phash (not yet
 // backfilled, or a non-image asset type) map to themselves. Canonical key
 // = lexicographically smallest assetKey in the cluster, for determinism
-// independent of date range, spend, or fetch order.
+// independent of date range, spend, or fetch order — except where
+// CANONICAL_KEY_OVERRIDES above forces a specific member to win instead.
 export function clusterByPerceptualHash(
   assets: { assetKey: string; phash: string | null }[]
 ): Map<string, string> {
@@ -76,7 +96,10 @@ export function clusterByPerceptualHash(
       }
     }
   }
-  for (const a of withHash) canonicalOf.set(a.assetKey, find(a.assetKey));
+  for (const a of withHash) {
+    const auto = find(a.assetKey);
+    canonicalOf.set(a.assetKey, CANONICAL_KEY_OVERRIDES[auto] ?? auto);
+  }
   return canonicalOf;
 }
 
