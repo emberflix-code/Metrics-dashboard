@@ -43,16 +43,12 @@ export const PHASH_MATCH_THRESHOLD = 4;
 // Omega/GMN "Join40%Off" template incident, 2026-08-31 – 2026-09-02: these 3
 // image assets shipped with a scrambled headline ("40% Your Off Membership"
 // instead of "40% Off Your Membership"), live across 77 club campaigns
-// nationwide before marketing corrected it on 2026-09-02. The corrected
-// version is the exact same photo (same face/scene), so phash clustering
-// already merges each bad/good pair's spend and leads onto one card — but
-// clusterByPerceptualHash's tie-break (lexicographically smallest assetKey)
-// happens to land on the bad hash in all 3 pairs, so the merged card shows
-// the typo'd thumbnail. This map forces the correct member of each
-// already-correct cluster to be the one selected as canonical, without
-// touching the clustering/merge logic itself. Never delete a bad→good
-// mapping once the underlying asset_key rows age out of any date range
-// still viewable on a dashboard.
+// nationwide before marketing corrected it on 2026-09-02. Superseded by the
+// tag-aware tie-break below (2026-09-09) for the general case, but kept as a
+// belt-and-suspenders override for this specific incident in case these 3
+// bad assets are ever viewed in a date range where NEITHER member of their
+// pair has been tagged yet (tag-aware tie-break falls through to lexicographic
+// order in that case, same as before, which would show the typo'd thumbnail).
 const CANONICAL_KEY_OVERRIDES: Record<string, string> = {
   'image:476bb0aef44d736c5a46d2f34b83c88a': 'image:7b6580e9485f0563d0ef9cc953a22f72',
   'image:3b8890f23d0a076a3779708dd7b351f7': 'image:5cb047c99980b5784c25033786397494',
@@ -62,15 +58,31 @@ const CANONICAL_KEY_OVERRIDES: Record<string, string> = {
 // Clusters assets whose phash values are within PHASH_MATCH_THRESHOLD
 // Hamming distance and returns a map from every input assetKey to its
 // cluster's canonical key. Entries with a null/missing phash (not yet
-// backfilled, or a non-image asset type) map to themselves. Canonical key
-// = lexicographically smallest assetKey in the cluster, for determinism
-// independent of date range, spend, or fetch order — except where
-// CANONICAL_KEY_OVERRIDES above forces a specific member to win instead.
+// backfilled, or a non-image asset type) map to themselves.
+//
+// Canonical-key tie-break, in priority order:
+//   1. CANONICAL_KEY_OVERRIDES (see above) — specific known-bad assets.
+//   2. Whichever cluster member has an admin-set Theme or UGC tag — an
+//      untagged duplicate must never "steal" canonical status from a
+//      tagged one, since that silently un-tags the merged card the moment
+//      both members fall inside the same viewed date range. Discovered
+//      2026-09-09: the SAME cluster displayed correctly tagged in a
+//      September-only range (untagged sibling had no spend yet, so it
+//      wasn't even in the clustering input) but showed untagged the moment
+//      the range widened to include August, where both members have real
+//      spend and the untagged one happened to sort first lexicographically.
+//      Only relevant to callers that pass `tagged` (the two DB-cached
+//      routes, which have theme/ugc_status on hand); the live route has no
+//      tagging concept at all and every asset is untagged=false there, so
+//      it falls through to rule 3 unchanged.
+//   3. Lexicographically smallest assetKey — deterministic fallback,
+//      independent of date range, spend, or fetch order, same as before
+//      this tag-aware tie-break existed.
 export function clusterByPerceptualHash(
-  assets: { assetKey: string; phash: string | null }[]
+  assets: { assetKey: string; phash: string | null; tagged?: boolean }[]
 ): Map<string, string> {
   const canonicalOf = new Map<string, string>();
-  const withHash = assets.filter((a): a is { assetKey: string; phash: string } => !!a.phash);
+  const withHash = assets.filter((a): a is { assetKey: string; phash: string; tagged?: boolean } => !!a.phash);
   for (const a of assets) if (!a.phash) canonicalOf.set(a.assetKey, a.assetKey);
 
   // Union-find over the small (hundreds-of-rows) per-account asset list —
@@ -96,9 +108,22 @@ export function clusterByPerceptualHash(
       }
     }
   }
+
+  // Group members by their union-find root, then pick each group's
+  // canonical key by the tie-break priority documented above.
+  const membersByRoot = new Map<string, { assetKey: string; tagged?: boolean }[]>();
   for (const a of withHash) {
-    const auto = find(a.assetKey);
-    canonicalOf.set(a.assetKey, CANONICAL_KEY_OVERRIDES[auto] ?? auto);
+    const root = find(a.assetKey);
+    const list = membersByRoot.get(root) || [];
+    list.push(a);
+    membersByRoot.set(root, list);
+  }
+  for (const members of Array.from(membersByRoot.values())) {
+    const lexicographicWinner = members.reduce((min, m) => (m.assetKey < min.assetKey ? m : min)).assetKey;
+    const taggedMember = members.find(m => m.tagged);
+    const winner = CANONICAL_KEY_OVERRIDES[lexicographicWinner]
+      ?? (taggedMember ? taggedMember.assetKey : lexicographicWinner);
+    for (const m of members) canonicalOf.set(m.assetKey, winner);
   }
   return canonicalOf;
 }

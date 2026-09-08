@@ -147,7 +147,7 @@ export async function GET(req: NextRequest) {
     // canonical key -- images and videos never cluster with each other since
     // their key prefixes/hash formats never collide.
     const canonicalKeyOf = clusterByPerceptualHash(
-      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash }))
+      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }))
     );
 
     const adMetaRows = await query<{ entity_id: string; name: string; effective_status: string }>(

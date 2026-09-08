@@ -89,8 +89,8 @@ export async function GET(req: NextRequest) {
     const assetKeys = Array.from(new Set(mapRows.map(r => r.asset_key)));
     if (assetKeys.length === 0) return NextResponse.json({ data: [] });
 
-    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; has_bytes: boolean }>(
-      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash,
+    const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; theme: string | null; ugc_status: string | null; has_bytes: boolean }>(
+      `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash, theme, ugc_status,
               (thumbnail_bytes IS NOT NULL) AS has_bytes
        FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
       [accountId, assetKeys]
@@ -101,7 +101,7 @@ export async function GET(req: NextRequest) {
     // different Meta image_hash values (see 014_creative_asset_phash.sql) --
     // fold those onto one canonical card instead of showing duplicates.
     const canonicalKeyOf = clusterByPerceptualHash(
-      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash }))
+      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }))
     );
 
     const rows = new Map<string, CreativeRow>();
