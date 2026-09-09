@@ -78,7 +78,7 @@ export async function GET(req: NextRequest) {
       [accountId]
     );
     let allowedAdIds = new Set(
-      scopedAdRows.filter(r => matchesCampaignFilter(r.campaign_name || '', campaignFilter)).map(r => r.entity_id)
+      scopedAdRows.filter(r => matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)).map(r => r.entity_id)
     );
     if (!accountWide) {
       const explicit = new Set(explicitAdIds);

@@ -224,9 +224,26 @@ export function isMultiKeywordFilter(campaignFilter: string): boolean {
   return campaignFilter.includes('|');
 }
 
-export function matchesCampaignFilter(name: string, campaignFilter: string): boolean {
+// One-off convention (added for "Anytime Fitness Corporate", which needs 3
+// tightly-filtered shared accounts PLUS one fully-unfiltered account, Omega
+// — campaign_filter has no per-account concept otherwise, it's one string
+// applied identically to every account the client can see). A segment
+// shaped `unfiltered:<accountId>` in the filter means "treat this specific
+// account as if campaign_filter were blank"; every other segment is still
+// used as a normal OR keyword for every other account. Not a general
+// feature — a real per-account filter would need a schema change (a JSONB
+// map instead of one string); this is intentionally the smaller fix.
+const UNFILTERED_ACCOUNT_PREFIX = 'unfiltered:';
+
+export function matchesCampaignFilter(name: string, campaignFilter: string, accountId?: string): boolean {
   if (!campaignFilter) return true;
-  const needles = campaignFilter.split('|').map(s => s.trim()).filter(Boolean);
+  const segments = campaignFilter.split('|').map(s => s.trim()).filter(Boolean);
+  const unfilteredAccountIds = segments
+    .filter(s => s.startsWith(UNFILTERED_ACCOUNT_PREFIX))
+    .map(s => s.slice(UNFILTERED_ACCOUNT_PREFIX.length));
+  if (accountId && unfilteredAccountIds.includes(accountId)) return true;
+
+  const needles = segments.filter(s => !s.startsWith(UNFILTERED_ACCOUNT_PREFIX));
   if (needles.length === 0) return true;
   const haystack = name.toLowerCase();
   return needles.some(n => haystack.includes(n.toLowerCase()));

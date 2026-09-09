@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
     );
 
     const data = rows
-      .filter(r => matchesCampaignFilter(r.name || r.campaign_name || '', campaignFilter))
+      .filter(r => matchesCampaignFilter(r.name || r.campaign_name || '', campaignFilter, accountId))
       .map(r => ({ id: r.entity_id, name: r.name, effective_status: r.effective_status }));
 
     return NextResponse.json({ data, paging: null }, { headers: { 'Cache-Control': 'no-store' } });

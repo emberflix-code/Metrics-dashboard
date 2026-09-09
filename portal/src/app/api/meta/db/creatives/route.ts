@@ -61,7 +61,7 @@ export async function GET(req: NextRequest) {
 
     const metricsByAdId = new Map<string, { spend: number; impressions: number; linkClicks: number; reach: number; results: number; adName: string }>();
     for (const r of insightRows) {
-      if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter)) continue;
+      if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) continue;
       const existing = metricsByAdId.get(r.entity_id);
       const spend = parseFloat(r.spend) || 0;
       const impressions = parseInt(r.impressions, 10) || 0;
