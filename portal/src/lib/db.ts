@@ -439,6 +439,16 @@ pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_pix
 pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_onsite BIGINT NOT NULL DEFAULT 0`).catch(() => {});
 pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_generic BIGINT NOT NULL DEFAULT 0`).catch(() => {});
 
+// A campaign's actual optimization_goal (only exposed on the AdSet node,
+// e.g. LEAD_GENERATION for instant-form ads, OFFSITE_CONVERSIONS for
+// pixel-based ones) is what determines which of results_pixel/_onsite/
+// _generic BM's report is really counting — a fixed pixel-first-then-onsite
+// priority guesses wrong for LEAD_GENERATION campaigns (confirmed: a
+// campaign BM reports as 44 "Leads (form)" resolves to its onsite total,
+// not pixel). Stored on the adset row (only level='adset' rows get a
+// non-null value) so the read path can look it up without a live Meta call.
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS optimization_goal TEXT`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

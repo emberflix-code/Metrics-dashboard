@@ -293,16 +293,54 @@ export function extractResultsByType(actions?: { action_type: string; value: str
 }
 
 /**
- * Consistent range-level counterpart to resolveResultsFromActions: given the
- * 3 action-type totals already SUMMED across a date range (not per-day
- * picks), applies the same pixel > onsite > generic priority once. Use this
- * whenever aggregating results_pixel/_onsite/_generic over more than one
- * day; use resolveResultsFromActions only for a single day's raw actions[].
+ * Range-level counterpart to resolveResultsFromActions: given the 3
+ * action-type totals already SUMMED across a date range (not per-day
+ * picks) for one campaign/ad, picks ONE winner once. Use this whenever
+ * aggregating results_pixel/_onsite/_generic over more than one day; use
+ * resolveResultsFromActions only for a single day's raw actions[].
+ *
+ * A fixed pixel-first priority guesses wrong for LEAD_GENERATION (instant
+ * form) campaigns — confirmed against a real BM report: a campaign BM
+ * counts as 44 "Leads (form)" has pixel=19/onsite=44/generic=63, and BM's
+ * number is the ONSITE total, not pixel. optimization_goal (only exposed on
+ * the Meta AdSet node — see meta_entities.optimization_goal) tells us which
+ * type a campaign actually measures: LEAD_GENERATION campaigns are
+ * instant-form ads (use onsite_conversion.lead_grouped), OFFSITE_CONVERSIONS
+ * campaigns are pixel-based (use offsite_conversion.fb_pixel_lead).
+ * optimizationGoal is optional so callers that haven't joined meta_entities
+ * yet (or an adset with an unmapped/unknown goal) fall back to the old
+ * pixel > onsite > generic priority — an imperfect but non-zero guess.
  */
-export function resolveResultsFromTypeTotals(pixel: number, onsite: number, generic: number): number {
+export function resolveResultsFromTypeTotals(pixel: number, onsite: number, generic: number, optimizationGoal?: string | null): number {
+  if (optimizationGoal === 'LEAD_GENERATION') return onsite || generic || pixel;
+  if (optimizationGoal === 'OFFSITE_CONVERSIONS') return pixel || generic || onsite;
   if (pixel > 0) return pixel;
   if (onsite > 0) return onsite;
   return generic;
+}
+
+/**
+ * Looks up each campaign's optimization_goal for resolveResultsFromTypeTotals,
+ * from the adset rows synced onto meta_entities (see syncEntities in
+ * metaSync.ts). A campaign can have multiple adsets; in practice every
+ * adset under one campaign shares the same goal (they're built together
+ * for one funnel), so this just takes whichever adset's goal is found
+ * first per campaign_id — not a real "pick the dominant one" vote, since
+ * that hasn't been needed in practice.
+ */
+export async function campaignOptimizationGoals(accountId: string, campaignIds: string[]): Promise<Map<string, string | null>> {
+  const result = new Map<string, string | null>();
+  const uniqueIds = Array.from(new Set(campaignIds.filter(Boolean)));
+  if (uniqueIds.length === 0) return result;
+  const rows = await query<{ campaign_id: string; optimization_goal: string | null }>(
+    `SELECT DISTINCT ON (campaign_id) campaign_id, optimization_goal
+     FROM meta_entities
+     WHERE account_id = $1 AND level = 'adset' AND campaign_id = ANY($2) AND optimization_goal IS NOT NULL
+     ORDER BY campaign_id, entity_id`,
+    [accountId, uniqueIds]
+  );
+  for (const r of rows) result.set(r.campaign_id, r.optimization_goal);
+  return result;
 }
 
 /** Strip access_token from paging.next before sending to client. */

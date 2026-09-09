@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientDbScope, matchesCampaignFilter, resolveResultsFromTypeTotals } from '@/lib/meta';
+import { getClientDbScope, matchesCampaignFilter, resolveResultsFromTypeTotals, campaignOptimizationGoals } from '@/lib/meta';
 import { query } from '@/lib/db';
 
 // Every response below carries the dashboard's live campaign/spend/leads
@@ -91,15 +91,16 @@ export async function GET(req: NextRequest) {
         // campaign's nonzero action type can flip day to day; resolving
         // per-day and then summing produces a total matching neither the
         // campaign's true range-level pixel total nor its true onsite total.
-const campaignRows = await query<{ campaign_name: string; reach: string; impressions: string; spend: string; link_clicks: string; results: string; results_pixel: string; results_onsite: string; results_generic: string }>(
-          `SELECT campaign_name, SUM(reach)::text AS reach, SUM(impressions)::text AS impressions,
+        const campaignRows = await query<{ campaign_id: string; campaign_name: string; reach: string; impressions: string; spend: string; link_clicks: string; results: string; results_pixel: string; results_onsite: string; results_generic: string }>(
+          `SELECT campaign_id, campaign_name, SUM(reach)::text AS reach, SUM(impressions)::text AS impressions,
                   SUM(spend)::text AS spend, SUM(link_clicks)::text AS link_clicks, SUM(results)::text AS results,
                   SUM(results_pixel)::text AS results_pixel, SUM(results_onsite)::text AS results_onsite, SUM(results_generic)::text AS results_generic
            FROM meta_daily_insights
            WHERE account_id = $1 AND level = 'campaign' AND date BETWEEN $2 AND $3
-           GROUP BY campaign_name`,
+           GROUP BY campaign_id, campaign_name`,
           [accountId, since, until]
         );
+        const goalByCampaignId = await campaignOptimizationGoals(accountId, campaignRows.map(r => r.campaign_id));
         const totals = { reach: 0, impressions: 0, spend: 0, linkClicks: 0, results: 0 };
         for (const r of campaignRows) {
           if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) continue;
@@ -114,7 +115,9 @@ const campaignRows = await query<{ campaign_name: string; reach: string; impress
           // new columns at their 0 default — fall back to the legacy
           // per-day-summed `results` rather than silently showing 0 leads
           // for a range that hasn't been re-synced yet.
-          totals.results += (pixel || onsite || generic) ? resolveResultsFromTypeTotals(pixel, onsite, generic) : (parseInt(r.results, 10) || 0);
+          totals.results += (pixel || onsite || generic)
+            ? resolveResultsFromTypeTotals(pixel, onsite, generic, goalByCampaignId.get(r.campaign_id))
+            : (parseInt(r.results, 10) || 0);
         }
         // Round once at the end, not per-addition — avoids float drift into
         // artifacts like "0.9999999999999999" across however many campaigns
@@ -199,6 +202,11 @@ const byEntity = new Map<string, { entity: DailyInsightRow; reach: number; impre
       }
     }
 
+    // Campaign-level goal lookup, keyed by campaign_id regardless of
+    // dbLevel — an adset/ad row's own campaign_id joins to the same goal
+    // its parent campaign resolves with.
+    const goalByCampaignId = await campaignOptimizationGoals(accountId, Array.from(byEntity.values()).map(v => v.entity.campaign_id));
+
     // Round spend once at the end (not per-addition) — simpler, and avoids
     // any float drift across however many rows got summed for this entity.
     const data = Array.from(byEntity.values()).map(({ entity: r, reach, impressions, spend, linkClicks, resultsLegacy, resultsPixel, resultsOnsite, resultsGeneric }) => {
@@ -206,7 +214,7 @@ const byEntity = new Map<string, { entity: DailyInsightRow; reach: number; impre
       // columns at their 0 default — fall back to the legacy per-day-summed
       // value rather than silently showing 0 leads for an un-re-synced range.
       const results = (resultsPixel || resultsOnsite || resultsGeneric)
-        ? resolveResultsFromTypeTotals(resultsPixel, resultsOnsite, resultsGeneric)
+        ? resolveResultsFromTypeTotals(resultsPixel, resultsOnsite, resultsGeneric, goalByCampaignId.get(r.campaign_id))
         : resultsLegacy;
       return ({
       [idField]: r.entity_id,

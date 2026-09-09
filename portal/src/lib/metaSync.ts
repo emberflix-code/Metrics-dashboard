@@ -371,7 +371,7 @@ async function finishSync(accountId: string, opts: { success: boolean; error?: s
 }
 
 // ── Step 1: entity refresh (campaigns/adsets/ads) ───────────────────────
-interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string } }
+interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string }; optimization_goal?: string }
 
 // Batch size for unnest()-array upserts. Large enough to collapse thousands
 // of rows into a handful of round-trips, small enough to keep each query's
@@ -391,7 +391,13 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
   const deadline = Date.now() + ENTITIES_BUDGET_MS;
   const levels: { level: 'campaign' | 'adset' | 'ad'; path: string; fields: string }[] = [
     { level: 'campaign', path: 'campaigns', fields: 'id,name,effective_status' },
-    { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name}' },
+    // optimization_goal only exists on the AdSet node (LEAD_GENERATION for
+    // instant-form ads, OFFSITE_CONVERSIONS for pixel-based ones, among
+    // others) — see resolveResultsFromTypeTotals's caller in db/insights,
+    // which uses this to pick the correct action_type per campaign instead
+    // of a fixed pixel/onsite priority. Stored on meta_entities so the read
+    // path doesn't need a live Meta call.
+    { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name},optimization_goal' },
     { level: 'ad', path: 'ads', fields: 'id,name,effective_status,campaign{id,name},adset{id,name}' },
   ];
   // TEMP-DIAG: checkpoint logging to pinpoint an intermittent stall on
@@ -422,21 +428,22 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
       const names = batch.map(r => r.name || '');
       const campaignIds = batch.map(r => lvl.level === 'campaign' ? r.id : (r.campaign?.id || null));
       const campaignNames = batch.map(r => lvl.level === 'campaign' ? (r.name || '') : (r.campaign?.name || null));
-      const adsetIds = batch.map(r => lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null));
+const adsetIds = batch.map(r => lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null));
       const adsetNames = batch.map(r => lvl.level === 'ad' ? (r.adset?.name || null) : (lvl.level === 'adset' ? (r.name || '') : null));
       const statuses = batch.map(r => r.effective_status || 'UNKNOWN');
+      const optimizationGoals = batch.map(r => lvl.level === 'adset' ? (r.optimization_goal || null) : null);
 
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:start', level: lvl.level, batchNum, batchSize: batch.length }));
       await query(
-        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, updated_at)
-         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, now()
-         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
-           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status)
+        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, optimization_goal, updated_at)
+         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, optimization_goal, now()
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
+           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, optimization_goal)
          ON CONFLICT (account_id, level, entity_id) DO UPDATE SET
            name = EXCLUDED.name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
            adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name,
-           effective_status = EXCLUDED.effective_status, updated_at = now()`,
-        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses]
+           effective_status = EXCLUDED.effective_status, optimization_goal = EXCLUDED.optimization_goal, updated_at = now()`,
+        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses, optimizationGoals]
       );
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:done', level: lvl.level, batchNum }));
       upserted += batch.length;
