@@ -1,6 +1,6 @@
 import { query } from './db';
 import { decrypt } from './crypto';
-import { resolveResultsFromActions, extractResultsByType } from './meta';
+import { resolveResultsFromActions } from './meta';
 import { computePhash } from './phash';
 import { fetchMetaKpiSheetRows, type MetaKpiSheetRow } from './metaKpiSheet';
 import { SheetError } from './sheets';
@@ -371,7 +371,7 @@ async function finishSync(accountId: string, opts: { success: boolean; error?: s
 }
 
 // ── Step 1: entity refresh (campaigns/adsets/ads) ───────────────────────
-interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string }; optimization_goal?: string }
+interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string } }
 
 // Batch size for unnest()-array upserts. Large enough to collapse thousands
 // of rows into a handful of round-trips, small enough to keep each query's
@@ -391,13 +391,7 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
   const deadline = Date.now() + ENTITIES_BUDGET_MS;
   const levels: { level: 'campaign' | 'adset' | 'ad'; path: string; fields: string }[] = [
     { level: 'campaign', path: 'campaigns', fields: 'id,name,effective_status' },
-    // optimization_goal only exists on the AdSet node (LEAD_GENERATION for
-    // instant-form ads, OFFSITE_CONVERSIONS for pixel-based ones, among
-    // others) — see resolveResultsFromTypeTotals's caller in db/insights,
-    // which uses this to pick the correct action_type per campaign instead
-    // of a fixed pixel/onsite priority. Stored on meta_entities so the read
-    // path doesn't need a live Meta call.
-    { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name},optimization_goal' },
+    { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name}' },
     { level: 'ad', path: 'ads', fields: 'id,name,effective_status,campaign{id,name},adset{id,name}' },
   ];
   // TEMP-DIAG: checkpoint logging to pinpoint an intermittent stall on
@@ -428,22 +422,21 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
       const names = batch.map(r => r.name || '');
       const campaignIds = batch.map(r => lvl.level === 'campaign' ? r.id : (r.campaign?.id || null));
       const campaignNames = batch.map(r => lvl.level === 'campaign' ? (r.name || '') : (r.campaign?.name || null));
-const adsetIds = batch.map(r => lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null));
+      const adsetIds = batch.map(r => lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null));
       const adsetNames = batch.map(r => lvl.level === 'ad' ? (r.adset?.name || null) : (lvl.level === 'adset' ? (r.name || '') : null));
       const statuses = batch.map(r => r.effective_status || 'UNKNOWN');
-      const optimizationGoals = batch.map(r => lvl.level === 'adset' ? (r.optimization_goal || null) : null);
 
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:start', level: lvl.level, batchNum, batchSize: batch.length }));
       await query(
-        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, optimization_goal, updated_at)
-         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, optimization_goal, now()
-         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[])
-           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, optimization_goal)
+        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, updated_at)
+         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, now()
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
+           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status)
          ON CONFLICT (account_id, level, entity_id) DO UPDATE SET
            name = EXCLUDED.name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
            adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name,
-           effective_status = EXCLUDED.effective_status, optimization_goal = EXCLUDED.optimization_goal, updated_at = now()`,
-        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses, optimizationGoals]
+           effective_status = EXCLUDED.effective_status, updated_at = now()`,
+        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses]
       );
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:done', level: lvl.level, batchNum }));
       upserted += batch.length;
@@ -718,11 +711,10 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
 
-interface Prepared {
+  interface Prepared {
     entityId: string; date: string; campaignId: string; campaignName: string;
     adsetId: string; adsetName: string; adName: string;
     reach: number; impressions: number; spend: number; linkClicks: number; results: number;
-    resultsPixel: number; resultsOnsite: number; resultsGeneric: number;
   }
   // Keyed by `${entityId}|${date}` and summed on collision — the row-cap
   // fallback can halve a campaign batch and re-fetch, and campaign batches
@@ -741,7 +733,6 @@ interface Prepared {
     const spend = parseFloat(r.spend || '0') || 0;
     const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
     const results = resolveResultsFromActions(r.actions);
-    const byType = extractResultsByType(r.actions);
     const existing = preparedByKey.get(key);
     if (existing) {
       existing.reach += reach;
@@ -749,9 +740,6 @@ interface Prepared {
       existing.spend += spend;
       existing.linkClicks += linkClicks;
       existing.results += results;
-      existing.resultsPixel += byType.pixel;
-      existing.resultsOnsite += byType.onsite;
-      existing.resultsGeneric += byType.generic;
     } else {
       preparedByKey.set(key, {
         entityId, date: r.date_start,
@@ -759,7 +747,6 @@ interface Prepared {
         adsetId: r.adset_id || '', adsetName: r.adset_name || '',
         adName: r.ad_name || '',
         reach, impressions, spend, linkClicks, results,
-        resultsPixel: byType.pixel, resultsOnsite: byType.onsite, resultsGeneric: byType.generic,
       });
     }
   }
@@ -770,17 +757,15 @@ interface Prepared {
   // chunks) generate enough Postgres activity to trip Railway's log-rate cap.
   for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
     await query(
-      `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_pixel, results_onsite, results_generic, synced_at)
-       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_pixel, results_onsite, results_generic, now()
-       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[], $15::bigint[], $16::bigint[], $17::bigint[])
-         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_pixel, results_onsite, results_generic)
+      `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, synced_at)
+       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, now()
+       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[])
+         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results)
        ON CONFLICT (account_id, level, entity_id, date) DO UPDATE SET
          campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
          adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name, ad_name = EXCLUDED.ad_name,
          reach = EXCLUDED.reach, impressions = EXCLUDED.impressions, spend = EXCLUDED.spend,
-         link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results,
-         results_pixel = EXCLUDED.results_pixel, results_onsite = EXCLUDED.results_onsite, results_generic = EXCLUDED.results_generic,
-         synced_at = now()`,
+         link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results, synced_at = now()`,
       [
         accountId, level,
         batch.map(p => p.entityId), batch.map(p => p.date),
@@ -788,7 +773,6 @@ interface Prepared {
         batch.map(p => p.adsetId), batch.map(p => p.adsetName), batch.map(p => p.adName),
         batch.map(p => p.reach), batch.map(p => p.impressions),
         batch.map(p => p.spend), batch.map(p => p.linkClicks), batch.map(p => p.results),
-        batch.map(p => p.resultsPixel), batch.map(p => p.resultsOnsite), batch.map(p => p.resultsGeneric),
       ]
     );
   }

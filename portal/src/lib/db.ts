@@ -423,32 +423,6 @@ pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_content_type TEXT`).catch(() => {});
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_bytes_fetched_at TIMESTAMPTZ`).catch(() => {});
 
-// `results` was resolved via resolveResultsFromActions (pixel lead > onsite
-// lead_grouped > generic lead) INDEPENDENTLY PER DAY at sync time, then
-// summed across a range at read time. A campaign whose nonzero action type
-// flips day to day produces a summed total matching neither its monthly
-// pixel total nor its monthly onsite total — confirmed against a real BM
-// report (2026-09-09): a campaign BM shows as 44 "Leads (form)" (== its
-// monthly onsite_conversion.lead_grouped total) summed to 31 in our DB,
-// matching neither its monthly pixel (19) nor onsite (44) total. Storing
-// each action type's count separately per day lets a reader sum EACH type
-// across the full requested range first, then pick one winning type once —
-// consistent per campaign/range, matching how BM resolves it. `results` is
-// kept as the old per-day resolution for any reader not yet updated.
-pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_pixel BIGINT NOT NULL DEFAULT 0`).catch(() => {});
-pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_onsite BIGINT NOT NULL DEFAULT 0`).catch(() => {});
-pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_generic BIGINT NOT NULL DEFAULT 0`).catch(() => {});
-
-// A campaign's actual optimization_goal (only exposed on the AdSet node,
-// e.g. LEAD_GENERATION for instant-form ads, OFFSITE_CONVERSIONS for
-// pixel-based ones) is what determines which of results_pixel/_onsite/
-// _generic BM's report is really counting — a fixed pixel-first-then-onsite
-// priority guesses wrong for LEAD_GENERATION campaigns (confirmed: a
-// campaign BM reports as 44 "Leads (form)" resolves to its onsite total,
-// not pixel). Stored on the adset row (only level='adset' rows get a
-// non-null value) so the read path can look it up without a live Meta call.
-pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS optimization_goal TEXT`).catch(() => {});
-
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

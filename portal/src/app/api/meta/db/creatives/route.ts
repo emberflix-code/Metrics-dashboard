@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getClientDbScope, matchesCampaignFilter, resolveResultsFromTypeTotals, campaignOptimizationGoals } from '@/lib/meta';
+import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
 import { clusterByPerceptualHash } from '@/lib/phash';
 
@@ -51,55 +51,32 @@ export async function GET(req: NextRequest) {
     // Per-ad metrics for the range, restricted to campaigns matching this
     // client's filter (mirrors the live route filtering insights by
     // campaign.name before grouping into assets).
-const insightRows = await query<{ entity_id: string; campaign_id: string; campaign_name: string; ad_name: string; reach: string; impressions: string; spend: string; link_clicks: string; results: string; results_pixel: string; results_onsite: string; results_generic: string }>(
-      `SELECT entity_id, campaign_id, campaign_name, ad_name, reach::text AS reach, impressions::text AS impressions,
-              spend::text AS spend, link_clicks::text AS link_clicks, results::text AS results,
-              results_pixel::text AS results_pixel, results_onsite::text AS results_onsite, results_generic::text AS results_generic
+    const insightRows = await query<{ entity_id: string; campaign_name: string; ad_name: string; reach: string; impressions: string; spend: string; link_clicks: string; results: string }>(
+      `SELECT entity_id, campaign_name, ad_name, reach::text AS reach, impressions::text AS impressions,
+              spend::text AS spend, link_clicks::text AS link_clicks, results::text AS results
        FROM meta_daily_insights
        WHERE account_id = $1 AND level = 'ad' AND date BETWEEN $2 AND $3`,
       [accountId, since, until]
     );
 
-    // resultsPixel/_onsite/_generic summed separately per ad across the
-    // whole range, resolved to one winner ONCE below (not per-day then
-    // summed) — see migration 030. resultsLegacy carried through as a
-    // fallback for ranges not yet re-synced since that migration (new
-    // columns default to 0 until a fresh sync populates them).
-    const rawByAdId = new Map<string, { campaignId: string; spend: number; impressions: number; linkClicks: number; reach: number; resultsLegacy: number; resultsPixel: number; resultsOnsite: number; resultsGeneric: number; adName: string }>();
+    const metricsByAdId = new Map<string, { spend: number; impressions: number; linkClicks: number; reach: number; results: number; adName: string }>();
     for (const r of insightRows) {
       if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) continue;
-      const existing = rawByAdId.get(r.entity_id);
+      const existing = metricsByAdId.get(r.entity_id);
       const spend = parseFloat(r.spend) || 0;
       const impressions = parseInt(r.impressions, 10) || 0;
       const linkClicks = parseInt(r.link_clicks, 10) || 0;
       const reach = parseInt(r.reach, 10) || 0;
-      const resultsLegacy = parseInt(r.results, 10) || 0;
-      const resultsPixel = parseInt(r.results_pixel, 10) || 0;
-      const resultsOnsite = parseInt(r.results_onsite, 10) || 0;
-      const resultsGeneric = parseInt(r.results_generic, 10) || 0;
+      const results = parseInt(r.results, 10) || 0;
       if (!existing) {
-        rawByAdId.set(r.entity_id, { campaignId: r.campaign_id || '', spend, impressions, linkClicks, reach, resultsLegacy, resultsPixel, resultsOnsite, resultsGeneric, adName: r.ad_name || '' });
+        metricsByAdId.set(r.entity_id, { spend, impressions, linkClicks, reach, results, adName: r.ad_name || '' });
       } else {
         existing.spend += spend;
         existing.impressions += impressions;
         existing.linkClicks += linkClicks;
         existing.reach += reach;
-        existing.resultsLegacy += resultsLegacy;
-        existing.resultsPixel += resultsPixel;
-        existing.resultsOnsite += resultsOnsite;
-        existing.resultsGeneric += resultsGeneric;
+        existing.results += results;
       }
-    }
-    const goalByCampaignId = await campaignOptimizationGoals(accountId, Array.from(rawByAdId.values()).map(v => v.campaignId));
-    const metricsByAdId = new Map<string, { spend: number; impressions: number; linkClicks: number; reach: number; results: number; adName: string }>();
-    for (const [adId, raw] of Array.from(rawByAdId)) {
-      const results = (raw.resultsPixel || raw.resultsOnsite || raw.resultsGeneric)
-        ? resolveResultsFromTypeTotals(raw.resultsPixel, raw.resultsOnsite, raw.resultsGeneric, goalByCampaignId.get(raw.campaignId))
-        : raw.resultsLegacy;
-      metricsByAdId.set(adId, {
-        spend: raw.spend, impressions: raw.impressions, linkClicks: raw.linkClicks, reach: raw.reach, adName: raw.adName,
-        results,
-      });
     }
     if (metricsByAdId.size === 0) return NextResponse.json({ data: [] });
 
