@@ -270,6 +270,41 @@ export function resolveResultsFromActions(actions?: { action_type: string; value
   return m['lead'] || 0;
 }
 
+/**
+ * Same 3 action-type counts resolveResultsFromActions reads, but returned
+ * separately instead of collapsed to one winner — lets a caller persist all
+ * 3 per day (see meta_daily_insights.results_pixel/_onsite/_generic) so a
+ * later reader can sum each type across a whole range FIRST, then pick one
+ * winner once. Picking a winner per day (what resolveResultsFromActions
+ * does, still used for the legacy `results` column) breaks the moment a
+ * campaign's nonzero action type flips day to day: the summed total then
+ * matches neither the range's true pixel total nor its true onsite total.
+ * See migration 030 for the incident this was found from.
+ */
+export function extractResultsByType(actions?: { action_type: string; value: string }[]): { pixel: number; onsite: number; generic: number } {
+  if (!actions) return { pixel: 0, onsite: 0, generic: 0 };
+  const m: Record<string, number> = {};
+  for (const a of actions) m[a.action_type] = parseInt(a.value || '0', 10);
+  return {
+    pixel: m['offsite_conversion.fb_pixel_lead'] || 0,
+    onsite: m['onsite_conversion.lead_grouped'] || 0,
+    generic: m['lead'] || 0,
+  };
+}
+
+/**
+ * Consistent range-level counterpart to resolveResultsFromActions: given the
+ * 3 action-type totals already SUMMED across a date range (not per-day
+ * picks), applies the same pixel > onsite > generic priority once. Use this
+ * whenever aggregating results_pixel/_onsite/_generic over more than one
+ * day; use resolveResultsFromActions only for a single day's raw actions[].
+ */
+export function resolveResultsFromTypeTotals(pixel: number, onsite: number, generic: number): number {
+  if (pixel > 0) return pixel;
+  if (onsite > 0) return onsite;
+  return generic;
+}
+
 /** Strip access_token from paging.next before sending to client. */
 export function sanitizePaging(json: Record<string, unknown>): Record<string, unknown> {
   const paging = json?.paging as Record<string, unknown> | undefined;

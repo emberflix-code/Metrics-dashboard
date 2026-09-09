@@ -423,6 +423,22 @@ pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_content_type TEXT`).catch(() => {});
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_bytes_fetched_at TIMESTAMPTZ`).catch(() => {});
 
+// `results` was resolved via resolveResultsFromActions (pixel lead > onsite
+// lead_grouped > generic lead) INDEPENDENTLY PER DAY at sync time, then
+// summed across a range at read time. A campaign whose nonzero action type
+// flips day to day produces a summed total matching neither its monthly
+// pixel total nor its monthly onsite total — confirmed against a real BM
+// report (2026-09-09): a campaign BM shows as 44 "Leads (form)" (== its
+// monthly onsite_conversion.lead_grouped total) summed to 31 in our DB,
+// matching neither its monthly pixel (19) nor onsite (44) total. Storing
+// each action type's count separately per day lets a reader sum EACH type
+// across the full requested range first, then pick one winning type once —
+// consistent per campaign/range, matching how BM resolves it. `results` is
+// kept as the old per-day resolution for any reader not yet updated.
+pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_pixel BIGINT NOT NULL DEFAULT 0`).catch(() => {});
+pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_onsite BIGINT NOT NULL DEFAULT 0`).catch(() => {});
+pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_generic BIGINT NOT NULL DEFAULT 0`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

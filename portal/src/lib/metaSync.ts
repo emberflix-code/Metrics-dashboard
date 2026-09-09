@@ -1,6 +1,6 @@
 import { query } from './db';
 import { decrypt } from './crypto';
-import { resolveResultsFromActions } from './meta';
+import { resolveResultsFromActions, extractResultsByType } from './meta';
 import { computePhash } from './phash';
 import { fetchMetaKpiSheetRows, type MetaKpiSheetRow } from './metaKpiSheet';
 import { SheetError } from './sheets';
@@ -711,10 +711,11 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
 
-  interface Prepared {
+interface Prepared {
     entityId: string; date: string; campaignId: string; campaignName: string;
     adsetId: string; adsetName: string; adName: string;
     reach: number; impressions: number; spend: number; linkClicks: number; results: number;
+    resultsPixel: number; resultsOnsite: number; resultsGeneric: number;
   }
   // Keyed by `${entityId}|${date}` and summed on collision — the row-cap
   // fallback can halve a campaign batch and re-fetch, and campaign batches
@@ -733,6 +734,7 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
     const spend = parseFloat(r.spend || '0') || 0;
     const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
     const results = resolveResultsFromActions(r.actions);
+    const byType = extractResultsByType(r.actions);
     const existing = preparedByKey.get(key);
     if (existing) {
       existing.reach += reach;
@@ -740,6 +742,9 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
       existing.spend += spend;
       existing.linkClicks += linkClicks;
       existing.results += results;
+      existing.resultsPixel += byType.pixel;
+      existing.resultsOnsite += byType.onsite;
+      existing.resultsGeneric += byType.generic;
     } else {
       preparedByKey.set(key, {
         entityId, date: r.date_start,
@@ -747,6 +752,7 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
         adsetId: r.adset_id || '', adsetName: r.adset_name || '',
         adName: r.ad_name || '',
         reach, impressions, spend, linkClicks, results,
+        resultsPixel: byType.pixel, resultsOnsite: byType.onsite, resultsGeneric: byType.generic,
       });
     }
   }
@@ -757,15 +763,17 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
   // chunks) generate enough Postgres activity to trip Railway's log-rate cap.
   for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
     await query(
-      `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, synced_at)
-       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, now()
-       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[])
-         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results)
+      `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_pixel, results_onsite, results_generic, synced_at)
+       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_pixel, results_onsite, results_generic, now()
+       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[], $15::bigint[], $16::bigint[], $17::bigint[])
+         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_pixel, results_onsite, results_generic)
        ON CONFLICT (account_id, level, entity_id, date) DO UPDATE SET
          campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
          adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name, ad_name = EXCLUDED.ad_name,
          reach = EXCLUDED.reach, impressions = EXCLUDED.impressions, spend = EXCLUDED.spend,
-         link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results, synced_at = now()`,
+         link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results,
+         results_pixel = EXCLUDED.results_pixel, results_onsite = EXCLUDED.results_onsite, results_generic = EXCLUDED.results_generic,
+         synced_at = now()`,
       [
         accountId, level,
         batch.map(p => p.entityId), batch.map(p => p.date),
@@ -773,6 +781,7 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
         batch.map(p => p.adsetId), batch.map(p => p.adsetName), batch.map(p => p.adName),
         batch.map(p => p.reach), batch.map(p => p.impressions),
         batch.map(p => p.spend), batch.map(p => p.linkClicks), batch.map(p => p.results),
+        batch.map(p => p.resultsPixel), batch.map(p => p.resultsOnsite), batch.map(p => p.resultsGeneric),
       ]
     );
   }
