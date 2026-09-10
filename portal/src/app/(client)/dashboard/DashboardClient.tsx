@@ -1690,6 +1690,106 @@ function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => 
   return canonicalOf;
 }
 
+// Runs _clusterCreativesV2ByPhash over `rows` and folds every cluster into
+// one card (summed spend/results/etc, identity fields taken from the
+// canonical member — same rules as clusterByPerceptualHash in lib/phash.ts
+// server-side: prefer a tagged member, else lexicographically smallest).
+// Shared by both v2 and v3's image AND video grids — video support added
+// 2026-09-11 after an audit found this pass only ever ran on `images`, so
+// the SAME video re-uploaded per account (video assetKeys are globally
+// unique per upload, unlike images which can coincidentally share a hash)
+// never merged across accounts at all, splitting real spend/leads across
+// duplicate cards indefinitely (confirmed: $5,662 spend / 225 leads across
+// 3 video groups on Anytime Fitness Corporate). Video phashes are computed
+// from the poster/thumbnail frame only, not the video stream — a real but
+// imperfect signal for "same video," corroborated in the audit by matching
+// ad copy on the affected groups.
+function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: boolean): AssetBreakdownRow[] {
+  const phashOf = (assetKey: string) => {
+    const row = rows.find(r => r.assetKey === assetKey);
+    return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
+  };
+  const bottomHashOf = (assetKey: string) => {
+    const row = rows.find(r => r.assetKey === assetKey);
+    return row?.thumbnail ? (_creativesV2BottomHashCache.get(row.thumbnail) ?? null) : null;
+  };
+  const accountIdOfKey = (assetKey: string) => rows.find(r => r.assetKey === assetKey)?.accountId ?? null;
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(rows.map(r => r.assetKey), phashOf, accountIdOfKey, crossAccountEnabled, bottomHashOf);
+  if (!Array.from(canonicalKeyOf.values()).some((v, i) => v !== rows.map(r => r.assetKey)[i])) return rows;
+
+  const merged = new Map<string, AssetBreakdownRow>();
+  for (const row of rows) {
+    const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
+    const existing = merged.get(canonicalKey);
+    if (!existing) {
+      // Seed the merged card's IDENTITY fields (accountId, theme,
+      // ugcStatus, thumbnail, title, name) from the CANONICAL row, not
+      // `row` (whichever member happens to be first in iteration order) —
+      // spreading `row` kept whichever account was visited first, including
+      // its accountId (wrong account -> "Creative asset not found" 404) AND
+      // its theme/ugcStatus (null if THAT member was never tagged, silently
+      // hiding a real tag saved on the canonical row or a different
+      // member). Numeric fields start at 0 here regardless of which row
+      // seeded this bucket — every member's own numbers, canonicalRow's
+      // included, are added exactly once by the accumulation branch below
+      // as the loop reaches them, so seeding from canonicalRow's own
+      // (non-zero) totals would double-count it the moment the loop later
+      // visits it as `row`.
+      const canonicalRow = rows.find(r => r.assetKey === canonicalKey) ?? row;
+      merged.set(canonicalKey, {
+        ...canonicalRow,
+        spend: 0, results: 0, impressions: 0, linkClicks: 0, ctr: 0, cpl: 0,
+        adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false,
+        contributingAccountIds: [canonicalRow.accountId],
+      });
+      // Fall through so this same row's own numbers still get added by
+      // the accumulation branch below, whether or not it was canonicalRow.
+      const seeded = merged.get(canonicalKey)!;
+      seeded.spend += row.spend;
+      seeded.results += row.results;
+      seeded.impressions += row.impressions;
+      seeded.linkClicks += row.linkClicks;
+      seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
+      seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
+      seeded.adCount += row.adCount;
+      seeded.adIds = [...seeded.adIds, ...row.adIds];
+      seeded.ads = [...seeded.ads, ...row.ads];
+      seeded.campaigns = row.campaigns.map(c => ({ ...c }));
+      seeded.campaignsTruncated = row.campaignsTruncated;
+      continue;
+    }
+    if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
+      existing.contributingAccountIds.push(row.accountId);
+    }
+    if (!existing.theme && row.theme) existing.theme = row.theme;
+    if (!existing.ugcStatus && row.ugcStatus) existing.ugcStatus = row.ugcStatus;
+    existing.spend += row.spend;
+    existing.results += row.results;
+    existing.impressions += row.impressions;
+    existing.linkClicks += row.linkClicks;
+    existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
+    existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+    existing.adCount += row.adCount;
+    existing.adIds = [...existing.adIds, ...row.adIds];
+    existing.ads = [...existing.ads, ...row.ads];
+    // Campaign lists merge by name so the same campaign appearing under
+    // both original assets sums instead of listing twice.
+    const campaignByName = new Map(existing.campaigns.map(c => [c.name, { ...c }]));
+    for (const c of row.campaigns) {
+      const cur = campaignByName.get(c.name);
+      if (cur) {
+        cur.adCount += c.adCount; cur.spend += c.spend; cur.results += c.results;
+        cur.impressions += c.impressions; cur.linkClicks += c.linkClicks;
+      } else {
+        campaignByName.set(c.name, { ...c });
+      }
+    }
+    existing.campaigns = Array.from(campaignByName.values()).sort((a, b) => b.spend - a.spend);
+    existing.campaignsTruncated = existing.campaignsTruncated || row.campaignsTruncated;
+  }
+  return Array.from(merged.values());
+}
+
 // Kicks off hashing for any thumbnail not yet in the cache, then re-renders
 // once all of them settle. Safe to call every render — no-ops immediately
 // if nothing new needs hashing, and a second call while one batch is still
@@ -1849,96 +1949,22 @@ function renderCreativesV2() {
     videos = videos.filter(keep);
   }
 
-  // Merge visually-identical image cards that Meta's own image_hash treats
-  // as distinct assets — mainly static (non-DCO) ads, which never get the
-  // server-side phash grouping DCO assets do (see lib/phash.ts). Uses
-  // whatever's already in the client-side hash cache; kicks off hashing for
-  // anything missing and re-renders when that finishes, so the first paint
-  // may briefly show unmerged duplicates that then collapse a moment later.
+  // Merge visually-identical cards that Meta's own image_hash (or, for
+  // videos, the globally-unique per-upload video ID) treats as distinct
+  // assets — mainly static (non-DCO) ads, which never get the server-side
+  // phash grouping DCO assets do (see lib/phash.ts), AND any video
+  // re-uploaded separately per account (videos NEVER get a matching
+  // assetKey across accounts the way images sometimes coincidentally do,
+  // so without this pass a rollup client's videos never merge at all —
+  // found 2026-09-11: $5,662 spend / 225 leads split across duplicate
+  // video cards on Anytime Fitness Corporate). Uses whatever's already in
+  // the client-side hash cache; kicks off hashing for anything missing and
+  // re-renders when that finishes, so the first paint may briefly show
+  // unmerged duplicates that then collapse a moment later.
   _ensureCreativesV2Phashes(images);
-  const phashOf = (assetKey: string) => {
-    const row = images.find(r => r.assetKey === assetKey);
-    return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
-  };
-  const bottomHashOf = (assetKey: string) => {
-    const row = images.find(r => r.assetKey === assetKey);
-    return row?.thumbnail ? (_creativesV2BottomHashCache.get(row.thumbnail) ?? null) : null;
-  };
-  const accountIdOfKey = (assetKey: string) => images.find(r => r.assetKey === assetKey)?.accountId ?? null;
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging, bottomHashOf);
-  if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
-    const merged = new Map<string, AssetBreakdownRow>();
-    for (const row of images) {
-      const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
-      const existing = merged.get(canonicalKey);
-      if (!existing) {
-        // Seed the merged card's IDENTITY fields (accountId, theme,
-        // ugcStatus, thumbnail, title, name) from the CANONICAL row, not
-        // `row` (whichever member happens to be first in iteration order)
-        // — spreading `row` kept whichever account was visited first,
-        // including its accountId (wrong account -> the "Creative asset
-        // not found" 404 this function's rewrite was for) AND its
-        // theme/ugcStatus (null if THAT member was never tagged, silently
-        // hiding a real tag saved on the canonical row or a different
-        // member — reported live 2026-09-11: a tag saved successfully but
-        // the card showed untagged after reload). Numeric fields start at
-        // 0 here regardless of which row seeded this bucket — every
-        // member's own numbers, canonicalRow's included, are added exactly
-        // once by the accumulation branch below as the loop reaches them,
-        // so seeding from canonicalRow's own (non-zero) totals would
-        // double-count it the moment the loop later visits it as `row`.
-        const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
-        merged.set(canonicalKey, {
-          ...canonicalRow,
-          spend: 0, results: 0, impressions: 0, linkClicks: 0, ctr: 0, cpl: 0,
-          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false,
-          contributingAccountIds: [canonicalRow.accountId],
-        });
-        // Fall through so this same row's own numbers still get added by
-        // the accumulation branch below, whether or not it was canonicalRow.
-        const seeded = merged.get(canonicalKey)!;
-        seeded.spend += row.spend;
-        seeded.results += row.results;
-        seeded.impressions += row.impressions;
-        seeded.linkClicks += row.linkClicks;
-        seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
-        seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
-        seeded.adCount += row.adCount;
-        seeded.adIds = [...seeded.adIds, ...row.adIds];
-        seeded.ads = [...seeded.ads, ...row.ads];
-        seeded.campaigns = row.campaigns.map(c => ({ ...c }));
-        seeded.campaignsTruncated = row.campaignsTruncated;
-        continue;
-      }
-      if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
-        existing.contributingAccountIds.push(row.accountId);
-      }
-      existing.spend += row.spend;
-      existing.results += row.results;
-      existing.impressions += row.impressions;
-      existing.linkClicks += row.linkClicks;
-      existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
-      existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
-      existing.adCount += row.adCount;
-      existing.adIds = [...existing.adIds, ...row.adIds];
-      existing.ads = [...existing.ads, ...row.ads];
-      // Campaign lists merge by name so the same campaign appearing under
-      // both original assets sums instead of listing twice.
-      const campaignByName = new Map(existing.campaigns.map(c => [c.name, { ...c }]));
-      for (const c of row.campaigns) {
-        const cur = campaignByName.get(c.name);
-        if (cur) {
-          cur.adCount += c.adCount; cur.spend += c.spend; cur.results += c.results;
-          cur.impressions += c.impressions; cur.linkClicks += c.linkClicks;
-        } else {
-          campaignByName.set(c.name, { ...c });
-        }
-      }
-      existing.campaigns = Array.from(campaignByName.values()).sort((a, b) => b.spend - a.spend);
-      existing.campaignsTruncated = existing.campaignsTruncated || row.campaignsTruncated;
-    }
-    images = Array.from(merged.values());
-  }
+  _ensureCreativesV2Phashes(videos);
+  images = _mergeCreativesByPhash(images, _enableCrossAccountCreativeTagging);
+  videos = _mergeCreativesByPhash(videos, _enableCrossAccountCreativeTagging);
 
   // Summary + reconciliation row — video/image totals vs. the same KPI-card
   // totals the rest of the dashboard shows, so this reads as trustworthy
@@ -2203,87 +2229,9 @@ function renderCreativesV3() {
   }
 
   _ensureCreativesV3Phashes(images);
-  const phashOf = (assetKey: string) => {
-    const row = images.find(r => r.assetKey === assetKey);
-    return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
-  };
-  const bottomHashOf = (assetKey: string) => {
-    const row = images.find(r => r.assetKey === assetKey);
-    return row?.thumbnail ? (_creativesV2BottomHashCache.get(row.thumbnail) ?? null) : null;
-  };
-  const accountIdOfKey = (assetKey: string) => images.find(r => r.assetKey === assetKey)?.accountId ?? null;
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging, bottomHashOf);
-  if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
-    const merged = new Map<string, AssetBreakdownRow>();
-    for (const row of images) {
-      const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
-      const existing = merged.get(canonicalKey);
-      if (!existing) {
-        // Seed the merged card's IDENTITY fields (accountId, theme,
-        // ugcStatus, thumbnail, title, name) from the CANONICAL row, not
-        // `row` (whichever member happens to be first in iteration order)
-        // — spreading `row` kept whichever account was visited first,
-        // including its accountId (wrong account -> the "Creative asset
-        // not found" 404 this function's rewrite was for) AND its
-        // theme/ugcStatus (null if THAT member was never tagged, silently
-        // hiding a real tag saved on the canonical row or a different
-        // member — reported live 2026-09-11: a tag saved successfully but
-        // the card showed untagged after reload). Numeric fields start at
-        // 0 here regardless of which row seeded this bucket — every
-        // member's own numbers, canonicalRow's included, are added exactly
-        // once by the accumulation branch below as the loop reaches them,
-        // so seeding from canonicalRow's own (non-zero) totals would
-        // double-count it the moment the loop later visits it as `row`.
-        const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
-        merged.set(canonicalKey, {
-          ...canonicalRow,
-          spend: 0, results: 0, impressions: 0, linkClicks: 0, ctr: 0, cpl: 0,
-          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false,
-          contributingAccountIds: [canonicalRow.accountId],
-        });
-        // Fall through so this same row's own numbers still get added by
-        // the accumulation branch below, whether or not it was canonicalRow.
-        const seeded = merged.get(canonicalKey)!;
-        seeded.spend += row.spend;
-        seeded.results += row.results;
-        seeded.impressions += row.impressions;
-        seeded.linkClicks += row.linkClicks;
-        seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
-        seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
-        seeded.adCount += row.adCount;
-        seeded.adIds = [...seeded.adIds, ...row.adIds];
-        seeded.ads = [...seeded.ads, ...row.ads];
-        seeded.campaigns = row.campaigns.map(c => ({ ...c }));
-        seeded.campaignsTruncated = row.campaignsTruncated;
-        continue;
-      }
-      if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
-        existing.contributingAccountIds.push(row.accountId);
-      }
-      existing.spend += row.spend;
-      existing.results += row.results;
-      existing.impressions += row.impressions;
-      existing.linkClicks += row.linkClicks;
-      existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
-      existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
-      existing.adCount += row.adCount;
-      existing.adIds = [...existing.adIds, ...row.adIds];
-      existing.ads = [...existing.ads, ...row.ads];
-      const campaignByName = new Map(existing.campaigns.map(c => [c.name, { ...c }]));
-      for (const c of row.campaigns) {
-        const cur = campaignByName.get(c.name);
-        if (cur) {
-          cur.adCount += c.adCount; cur.spend += c.spend; cur.results += c.results;
-          cur.impressions += c.impressions; cur.linkClicks += c.linkClicks;
-        } else {
-          campaignByName.set(c.name, { ...c });
-        }
-      }
-      existing.campaigns = Array.from(campaignByName.values()).sort((a, b) => b.spend - a.spend);
-      existing.campaignsTruncated = existing.campaignsTruncated || row.campaignsTruncated;
-    }
-    images = Array.from(merged.values());
-  }
+  _ensureCreativesV3Phashes(videos);
+  images = _mergeCreativesByPhash(images, _enableCrossAccountCreativeTagging);
+  videos = _mergeCreativesByPhash(videos, _enableCrossAccountCreativeTagging);
 
   const sumOf = (rows: AssetBreakdownRow[], field: 'spend'|'impressions'|'results') =>
     rows.reduce((acc, r) => acc + r[field], 0);
