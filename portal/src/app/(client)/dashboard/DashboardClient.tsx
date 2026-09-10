@@ -2399,8 +2399,8 @@ async function fetchDcoAssets() {
       for (const id of r.dcoAdIds) _dcoAdIdSet.add(id);
     }
 
-    // Merge across accounts. Same asset key may not appear cross-account but we
-    // handle it defensively.
+    // Merge across accounts — see mergeInto's own comment below for why the
+    // map key must include accountId, not just assetKey.
     const imageMap = new Map<string, AssetBreakdownRow>();
     const videoMap = new Map<string, AssetBreakdownRow>();
     let adsTotal = 0, adsWithSpec = 0;
@@ -2410,10 +2410,22 @@ async function fetchDcoAssets() {
       adsTotal += r.adsTotal || 0;
       adsWithSpec += r.adsWithSpec || 0;
       if (r.reason && !allReason) allReason = r.reason;
+      // Keyed by accountId+assetKey, NOT assetKey alone — a rollup client
+      // spans multiple ad accounts, and Meta's asset_key (image_hash for
+      // images) can coincidentally collide across genuinely different
+      // accounts that happen to share a template creative (confirmed: 60+
+      // such collisions across Anytime Fitness Corporate's 4 accounts).
+      // Merging those into one card silently discarded every account after
+      // the first, so a tag-save's accountId no longer matched a real
+      // meta_creative_assets row for that assetKey -> "Creative asset not
+      // found" 404 on the collapsed accounts. Each account's copy is a
+      // genuinely distinct creative until cross-account tag propagation
+      // (a separate, not-yet-built feature) exists.
       const mergeInto = (map: Map<string, AssetBreakdownRow>, rows: AssetBreakdownRow[]) => {
         for (const a of rows) {
-          const existing = map.get(a.assetKey);
-          if (!existing) { map.set(a.assetKey, { ...a }); continue; }
+          const key = `${a.accountId}|${a.assetKey}`;
+          const existing = map.get(key);
+          if (!existing) { map.set(key, { ...a }); continue; }
           existing.spend += a.spend;
           existing.results += a.results;
           existing.impressions += a.impressions;
@@ -2593,10 +2605,22 @@ async function fetchDcoAssetsV3() {
       adsTotal += r.adsTotal || 0;
       adsWithSpec += r.adsWithSpec || 0;
       if (r.reason && !allReason) allReason = r.reason;
+      // Keyed by accountId+assetKey, NOT assetKey alone — a rollup client
+      // spans multiple ad accounts, and Meta's asset_key (image_hash for
+      // images) can coincidentally collide across genuinely different
+      // accounts that happen to share a template creative (confirmed: 60+
+      // such collisions across Anytime Fitness Corporate's 4 accounts).
+      // Merging those into one card silently discarded every account after
+      // the first, so a tag-save's accountId no longer matched a real
+      // meta_creative_assets row for that assetKey -> "Creative asset not
+      // found" 404 on the collapsed accounts. Each account's copy is a
+      // genuinely distinct creative until cross-account tag propagation
+      // (a separate, not-yet-built feature) exists.
       const mergeInto = (map: Map<string, AssetBreakdownRow>, rows: AssetBreakdownRow[]) => {
         for (const a of rows) {
-          const existing = map.get(a.assetKey);
-          if (!existing) { map.set(a.assetKey, { ...a }); continue; }
+          const key = `${a.accountId}|${a.assetKey}`;
+          const existing = map.get(key);
+          if (!existing) { map.set(key, { ...a }); continue; }
           existing.spend += a.spend;
           existing.results += a.results;
           existing.impressions += a.impressions;
