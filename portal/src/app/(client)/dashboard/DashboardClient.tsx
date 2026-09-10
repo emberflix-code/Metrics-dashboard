@@ -1598,7 +1598,22 @@ const _CREATIVES_V2_PHASH_THRESHOLD = 4; // matches PHASH_MATCH_THRESHOLD in lib
 
 // Same union-find clustering approach as clusterByPerceptualHash in
 // lib/phash.ts, operating on the client-computed hash cache instead.
-function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null): Map<string, string> {
+//
+// accountIdOf + crossAccountEnabled: this runs on the ALREADY-MERGED,
+// cross-account `images` list for a rollup client — without an account
+// check, two visually-similar-but-genuinely-different images from two
+// UNRELATED accounts (e.g. two clubs each running their own "40% Off"
+// template) cluster together purely by visual similarity, and the merge
+// below stamps one row's accountId onto the other's assetKey. A tag-save
+// then posts that mismatched pair, which 404s since no DB row has that
+// exact (account_id, asset_key) combination — reported live 2026-09-11 on
+// Anytime Fitness Corporate despite the server-side accountId+assetKey
+// merge fix (mergeInto) already being correct; this client-side re-cluster
+// runs AFTER that fix and was never account-scoped. Default (crossAccountEnabled
+// false): only cluster within the same account, matching mergeInto's
+// default. When the client has opted into cross-account creative tagging,
+// this clustering is allowed across accounts too, same as mergeInto.
+function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean): Map<string, string> {
   const canonicalOf = new Map<string, string>();
   const withHash = assetKeys.filter(k => hashOf(k));
   for (const k of assetKeys) if (!hashOf(k)) canonicalOf.set(k, k);
@@ -1614,6 +1629,7 @@ function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => 
   }
   for (let i = 0; i < withHash.length; i++) {
     for (let j = i + 1; j < withHash.length; j++) {
+      if (!crossAccountEnabled && accountIdOf(withHash[i]) !== accountIdOf(withHash[j])) continue;
       const ha = hashOf(withHash[i]), hb = hashOf(withHash[j]);
       if (ha && hb && _hammingDistance(ha, hb) <= _CREATIVES_V2_PHASH_THRESHOLD) {
         union(withHash[i], withHash[j]);
@@ -1786,16 +1802,30 @@ function renderCreativesV2() {
     const row = images.find(r => r.assetKey === assetKey);
     return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
   };
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf);
+  const accountIdOfKey = (assetKey: string) => images.find(r => r.assetKey === assetKey)?.accountId ?? null;
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging);
   if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
     const merged = new Map<string, AssetBreakdownRow>();
     for (const row of images) {
       const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
       const existing = merged.get(canonicalKey);
       if (!existing) {
+        // The canonical row's OWN accountId, not `row`'s — when clustering
+        // spans accounts (cross-account tagging on), the first row iterated
+        // into this bucket isn't necessarily the canonical one, and
+        // stamping its accountId onto a different account's assetKey is
+        // exactly the "Creative asset not found" bug this comment block
+        // exists to prevent (see _clusterCreativesV2ByPhash's own comment).
         const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
-        merged.set(canonicalKey, { ...row, assetKey: canonicalKey, thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title });
+        merged.set(canonicalKey, {
+          ...row, assetKey: canonicalKey, accountId: canonicalRow.accountId,
+          thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title,
+          contributingAccountIds: [canonicalRow.accountId],
+        });
         continue;
+      }
+      if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
+        existing.contributingAccountIds.push(row.accountId);
       }
       existing.spend += row.spend;
       existing.results += row.results;
@@ -2091,16 +2121,30 @@ function renderCreativesV3() {
     const row = images.find(r => r.assetKey === assetKey);
     return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
   };
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf);
+  const accountIdOfKey = (assetKey: string) => images.find(r => r.assetKey === assetKey)?.accountId ?? null;
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging);
   if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
     const merged = new Map<string, AssetBreakdownRow>();
     for (const row of images) {
       const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
       const existing = merged.get(canonicalKey);
       if (!existing) {
+        // The canonical row's OWN accountId, not `row`'s — when clustering
+        // spans accounts (cross-account tagging on), the first row iterated
+        // into this bucket isn't necessarily the canonical one, and
+        // stamping its accountId onto a different account's assetKey is
+        // exactly the "Creative asset not found" bug this comment block
+        // exists to prevent (see _clusterCreativesV2ByPhash's own comment).
         const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
-        merged.set(canonicalKey, { ...row, assetKey: canonicalKey, thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title });
+        merged.set(canonicalKey, {
+          ...row, assetKey: canonicalKey, accountId: canonicalRow.accountId,
+          thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title,
+          contributingAccountIds: [canonicalRow.accountId],
+        });
         continue;
+      }
+      if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
+        existing.contributingAccountIds.push(row.accountId);
       }
       existing.spend += row.spend;
       existing.results += row.results;
