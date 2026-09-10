@@ -128,6 +128,37 @@ export function clusterByPerceptualHash(
   return canonicalOf;
 }
 
+/**
+ * Resolves theme/ugc_status per canonical cluster INDEPENDENTLY of which
+ * member clusterByPerceptualHash picked as the canonical key for display
+ * (thumbnail/title/body identity). The `tagged` flag that function's
+ * tie-break uses is a single boolean covering EITHER field — a member with
+ * theme set but ugc_status null still counts as "tagged" and can win
+ * canonical status over a sibling that has ugc_status set but no theme,
+ * silently hiding whichever field the losing member actually had. Found
+ * live 2026-09-11: a UGC tag saved successfully and persisted in the DB,
+ * but the merged card kept showing untagged after reload because its
+ * sibling (tagged via theme only) won canonical status and had a null
+ * ugc_status. Scans every member of each cluster for a non-null value per
+ * field, independent of the canonical-identity pick above — so a tag
+ * saved on ANY cluster member is visible on the merged card, not just one
+ * saved on whichever member happened to become canonical.
+ */
+export function resolveClusteredThemeAndUgc(
+  assets: { assetKey: string; theme: string | null; ugcStatus: string | null }[],
+  canonicalKeyOf: Map<string, string>
+): Map<string, { theme: string | null; ugcStatus: string | null }> {
+  const byCanonical = new Map<string, { theme: string | null; ugcStatus: string | null }>();
+  for (const a of assets) {
+    const canonicalKey = canonicalKeyOf.get(a.assetKey) || a.assetKey;
+    const existing = byCanonical.get(canonicalKey) || { theme: null, ugcStatus: null };
+    if (!existing.theme && a.theme) existing.theme = a.theme;
+    if (!existing.ugcStatus && a.ugcStatus) existing.ugcStatus = a.ugcStatus;
+    byCanonical.set(canonicalKey, existing);
+  }
+  return byCanonical;
+}
+
 // Live (non-cached, data_source='live') dashboards fetch straight from
 // Meta's API and never touch meta_creative_assets — so a live client had no
 // path to ever get a phash computed, and image-asset grouping silently

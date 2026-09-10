@@ -3858,10 +3858,6 @@ if (typeof window !== 'undefined') {
       const accountIds = row?.contributingAccountIds && row.contributingAccountIds.length > 1
         ? row.contributingAccountIds
         : [accountId];
-      // TEMP-DIAG: pin down a live "Creative asset not found" report where
-      // the clicked card's accountId/assetKey pairing doesn't exist in the
-      // DB even though each individually does on a DIFFERENT account.
-      console.log('[TAG-DIAG]', { accountId, assetKey, foundRow: !!row, contributingAccountIds: row?.contributingAccountIds, sentAccountIds: accountIds });
       const res = await fetch('/api/admin/creative-tags', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHash } from '@/lib/phash';
+import { clusterByPerceptualHash, resolveClusteredThemeAndUgc } from '@/lib/phash';
 
 interface AssetSummary {
   assetKey: string;
@@ -149,6 +149,17 @@ export async function GET(req: NextRequest) {
     const canonicalKeyOf = clusterByPerceptualHash(
       assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }))
     );
+    // Resolve theme/ugc_status independently of which member won canonical
+    // display identity above — clusterByPerceptualHash's `tagged` tie-break
+    // is a single boolean covering EITHER field, so a member tagged only by
+    // theme can win canonical status over a sibling tagged only by
+    // ugc_status, silently hiding the sibling's real value. See
+    // resolveClusteredThemeAndUgc's own comment for the live incident this
+    // fixes (2026-09-11: a saved UGC tag reverted to blank on reload).
+    const themeUgcByCanonical = resolveClusteredThemeAndUgc(
+      assetRows.map(a => ({ assetKey: a.asset_key, theme: a.theme, ugcStatus: a.ugc_status })),
+      canonicalKeyOf
+    );
 
     const adMetaRows = await query<{ entity_id: string; name: string; effective_status: string }>(
       `SELECT entity_id, name, effective_status FROM meta_entities WHERE account_id = $1 AND level = 'ad' AND entity_id = ANY($2)`,
@@ -220,8 +231,8 @@ export async function GET(req: NextRequest) {
           body: canonicalAsset?.body ?? null,
           title: canonicalAsset?.title ?? null,
           name: canonicalAsset?.title ?? null,
-          theme: canonicalAsset?.theme ?? null,
-          ugcStatus: canonicalAsset?.ugc_status ?? null,
+          theme: themeUgcByCanonical.get(canonicalKey)?.theme ?? null,
+          ugcStatus: themeUgcByCanonical.get(canonicalKey)?.ugcStatus ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0,
           adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,
