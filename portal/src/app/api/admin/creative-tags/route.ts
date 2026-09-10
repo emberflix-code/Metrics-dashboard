@@ -52,7 +52,15 @@ export async function POST(req: NextRequest) {
     'SELECT account_id FROM meta_creative_assets WHERE account_id = ANY($1) AND asset_key = $2',
     [accountIds, assetKey]
   );
-  if (existingAssets.length === 0) return NextResponse.json({ error: 'Creative asset not found' }, { status: 404 });
+  if (existingAssets.length === 0) {
+    // TEMP-DIAG: pin down a live "Creative asset not found" report where
+    // the asset_key visibly exists in meta_creative_assets when checked
+    // directly — logs exactly what the browser actually sent vs what the
+    // DB has, so the mismatch (wrong account scoping? a stale/encoded
+    // assetKey? session issue?) shows up in railway logs on the next repro.
+    console.log('[CREATIVE-TAG-404]', JSON.stringify({ accountId, accountIds, assetKey, rawBody: body }));
+    return NextResponse.json({ error: 'Creative asset not found' }, { status: 404 });
+  }
   const foundAccountIds = existingAssets.map(r => r.account_id);
 
   const hasTheme = Object.prototype.hasOwnProperty.call(body, 'theme');
