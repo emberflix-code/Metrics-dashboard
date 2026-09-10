@@ -32,6 +32,7 @@ interface ClientRow {
   ltv_value: number;
   show_creative_campaign_breakdown: boolean;
   show_creatives_v3: boolean;
+  enable_cross_account_creative_tagging: boolean;
   hide_adset_ad_tabs: boolean;
   enable_page_image_fallback: boolean;
   meta_kpi_sheet_id: string;
@@ -84,8 +85,8 @@ export default async function DashboardPage({
             c.leads_source, c.show_bookings, c.show_book_rate,
             (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
             c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value, c.show_meta_lead_names,
-            c.show_creative_campaign_breakdown, c.show_creatives_v3, c.hide_adset_ad_tabs,
-            c.enable_page_image_fallback,
+            c.show_creative_campaign_breakdown, c.show_creatives_v3, c.enable_cross_account_creative_tagging,
+            c.hide_adset_ad_tabs, c.enable_page_image_fallback,
             c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
@@ -160,6 +161,7 @@ export default async function DashboardPage({
         showMetaLeadNames={!!(client?.show_meta_lead_names && resolvedLeadsSource === 'meta')}
         showCreativeCampaignBreakdown={!!client?.show_creative_campaign_breakdown}
         showCreativesV3={!!client?.show_creatives_v3}
+        enableCrossAccountCreativeTagging={!!client?.enable_cross_account_creative_tagging}
         hideAdsetAdTabs={!!client?.hide_adset_ad_tabs}
         enablePageImageFallback={!!client?.enable_page_image_fallback}
         showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id && client?.meta_kpi_sheet_tab)}

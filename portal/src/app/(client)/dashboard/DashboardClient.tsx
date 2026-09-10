@@ -82,6 +82,17 @@ interface Props {
   // resolved server-side to require both the toggle AND a configured
   // sheet_id/sheet_tab — see dashboard/page.tsx.
   showMetaKpiSheet?: boolean;
+  // Off by default. Only meaningful for a multi-account rollup client. When
+  // true, Creatives v2/v3 merge same-assetKey cards across this client's
+  // accounts into ONE card (summed spend/leads) instead of one card per
+  // account, and tagging that card saves the tag to every account's own
+  // matching row. Admin-togglable per client — see
+  // EnableCrossAccountCreativeTaggingToggle. Off is the correct default: a
+  // rollup spanning genuinely unrelated accounts should NOT silently merge
+  // two different accounts' copies of a coincidentally-shared template
+  // image (see mergeInto's own comment for the incident this default
+  // avoids repeating).
+  enableCrossAccountCreativeTagging?: boolean;
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -153,6 +164,8 @@ let _showCreativeCampaignBreakdown = false;
 // avoids a confusing empty/broken tab for a live-mode client. Set once in
 // DashboardClient() alongside the other prop-derived module vars.
 let _showCreativesV3Tab = false;
+// See Props.enableCrossAccountCreativeTagging.
+let _enableCrossAccountCreativeTagging = false;
 let _hideAdsetAdTabs = true;
 let _enablePageImageFallback = false;
 // True only when an admin is viewing via impersonation — gates internal
@@ -262,6 +275,13 @@ interface AssetBreakdownRow {
   // Needed so the tag-save call knows which account_id row to UPDATE when
   // an admin tags a creative from the merged multi-account Creatives view.
   accountId: string;
+  // Only set when _enableCrossAccountCreativeTagging merged this card from
+  // more than one account sharing the same assetKey (see mergeInto) — every
+  // account_id that contributed to this card, so _saveCreativeTag can write
+  // the tag to all of them instead of just `accountId` (the first one that
+  // happened to arrive). Undefined/single-entry for a normal one-account
+  // card.
+  contributingAccountIds?: string[];
   spend: number; results: number; impressions: number; linkClicks: number;
   ctr: number; cpl: number;
   adCount: number;
@@ -2410,22 +2430,30 @@ async function fetchDcoAssets() {
       adsTotal += r.adsTotal || 0;
       adsWithSpec += r.adsWithSpec || 0;
       if (r.reason && !allReason) allReason = r.reason;
-      // Keyed by accountId+assetKey, NOT assetKey alone — a rollup client
-      // spans multiple ad accounts, and Meta's asset_key (image_hash for
-      // images) can coincidentally collide across genuinely different
-      // accounts that happen to share a template creative (confirmed: 60+
-      // such collisions across Anytime Fitness Corporate's 4 accounts).
-      // Merging those into one card silently discarded every account after
-      // the first, so a tag-save's accountId no longer matched a real
-      // meta_creative_assets row for that assetKey -> "Creative asset not
-      // found" 404 on the collapsed accounts. Each account's copy is a
-      // genuinely distinct creative until cross-account tag propagation
-      // (a separate, not-yet-built feature) exists.
+      // Keyed by accountId+assetKey by default, NOT assetKey alone — a
+      // rollup client spans multiple ad accounts, and Meta's asset_key
+      // (image_hash for images) can coincidentally collide across
+      // genuinely different accounts that happen to share a template
+      // creative (confirmed: 60+ such collisions across Anytime Fitness
+      // Corporate's 4 accounts). Merging those into one card silently
+      // discarded every account after the first, so a tag-save's accountId
+      // no longer matched a real meta_creative_assets row for that
+      // assetKey -> "Creative asset not found" 404 on the collapsed
+      // accounts. Each account's copy is a genuinely distinct creative
+      // UNLESS this client has explicitly opted into treating a shared
+      // template as one global asset (_enableCrossAccountCreativeTagging —
+      // see EnableCrossAccountCreativeTaggingToggle), in which case the key
+      // drops back to assetKey alone so they merge into one summed card,
+      // and _saveCreativeTag propagates the tag to every contributing
+      // account instead of just the card's stamped accountId.
       const mergeInto = (map: Map<string, AssetBreakdownRow>, rows: AssetBreakdownRow[]) => {
         for (const a of rows) {
-          const key = `${a.accountId}|${a.assetKey}`;
+          const key = _enableCrossAccountCreativeTagging ? a.assetKey : `${a.accountId}|${a.assetKey}`;
           const existing = map.get(key);
-          if (!existing) { map.set(key, { ...a }); continue; }
+          if (!existing) { map.set(key, { ...a, contributingAccountIds: [a.accountId] }); continue; }
+          if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(a.accountId)) {
+            existing.contributingAccountIds.push(a.accountId);
+          }
           existing.spend += a.spend;
           existing.results += a.results;
           existing.impressions += a.impressions;
@@ -2605,22 +2633,30 @@ async function fetchDcoAssetsV3() {
       adsTotal += r.adsTotal || 0;
       adsWithSpec += r.adsWithSpec || 0;
       if (r.reason && !allReason) allReason = r.reason;
-      // Keyed by accountId+assetKey, NOT assetKey alone — a rollup client
-      // spans multiple ad accounts, and Meta's asset_key (image_hash for
-      // images) can coincidentally collide across genuinely different
-      // accounts that happen to share a template creative (confirmed: 60+
-      // such collisions across Anytime Fitness Corporate's 4 accounts).
-      // Merging those into one card silently discarded every account after
-      // the first, so a tag-save's accountId no longer matched a real
-      // meta_creative_assets row for that assetKey -> "Creative asset not
-      // found" 404 on the collapsed accounts. Each account's copy is a
-      // genuinely distinct creative until cross-account tag propagation
-      // (a separate, not-yet-built feature) exists.
+      // Keyed by accountId+assetKey by default, NOT assetKey alone — a
+      // rollup client spans multiple ad accounts, and Meta's asset_key
+      // (image_hash for images) can coincidentally collide across
+      // genuinely different accounts that happen to share a template
+      // creative (confirmed: 60+ such collisions across Anytime Fitness
+      // Corporate's 4 accounts). Merging those into one card silently
+      // discarded every account after the first, so a tag-save's accountId
+      // no longer matched a real meta_creative_assets row for that
+      // assetKey -> "Creative asset not found" 404 on the collapsed
+      // accounts. Each account's copy is a genuinely distinct creative
+      // UNLESS this client has explicitly opted into treating a shared
+      // template as one global asset (_enableCrossAccountCreativeTagging —
+      // see EnableCrossAccountCreativeTaggingToggle), in which case the key
+      // drops back to assetKey alone so they merge into one summed card,
+      // and _saveCreativeTag propagates the tag to every contributing
+      // account instead of just the card's stamped accountId.
       const mergeInto = (map: Map<string, AssetBreakdownRow>, rows: AssetBreakdownRow[]) => {
         for (const a of rows) {
-          const key = `${a.accountId}|${a.assetKey}`;
+          const key = _enableCrossAccountCreativeTagging ? a.assetKey : `${a.accountId}|${a.assetKey}`;
           const existing = map.get(key);
-          if (!existing) { map.set(key, { ...a }); continue; }
+          if (!existing) { map.set(key, { ...a, contributingAccountIds: [a.accountId] }); continue; }
+          if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(a.accountId)) {
+            existing.contributingAccountIds.push(a.accountId);
+          }
           existing.spend += a.spend;
           existing.results += a.results;
           existing.impressions += a.impressions;
@@ -3687,10 +3723,19 @@ if (typeof window !== 'undefined') {
   // in-memory row so the badge/dropdown reflects it without a full refetch.
   (window as any)._saveCreativeTag = async (accountId: string, assetKey: string, field: 'theme' | 'ugcStatus', value: string) => {
     try {
+      // When cross-account creative tagging merged this card from more than
+      // one account (see mergeInto/contributingAccountIds), propagate the
+      // tag to every contributing account's own row, not just the one
+      // `accountId` this dropdown's onclick happened to be rendered with.
+      const row = [..._dcoAssets?.images || [], ..._dcoAssets?.videos || [], ..._dcoAssetsV3?.images || [], ..._dcoAssetsV3?.videos || []]
+        .find(r => r.assetKey === assetKey && r.accountId === accountId);
+      const accountIds = row?.contributingAccountIds && row.contributingAccountIds.length > 1
+        ? row.contributingAccountIds
+        : [accountId];
       const res = await fetch('/api/admin/creative-tags', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, assetKey, [field]: value || null }),
+        body: JSON.stringify({ accountId, accountIds, assetKey, [field]: value || null }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -3888,7 +3933,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -3909,6 +3954,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   // the admin toggle is on when any of this client's accounts is still on
   // live mode, rather than show an empty/broken grid (see Props.showCreativesV3).
   _showCreativesV3Tab = showCreativesV3 && accountIds.every(id => dataSourceByAccount[id] === 'cached');
+  _enableCrossAccountCreativeTagging = enableCrossAccountCreativeTagging;
   _hideAdsetAdTabs = hideAdsetAdTabs;
   _enablePageImageFallback = enablePageImageFallback;
   _showMetaKpiSheet = showMetaKpiSheet;

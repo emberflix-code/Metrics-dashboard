@@ -423,6 +423,17 @@ pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_content_type TEXT`).catch(() => {});
 pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_bytes_fetched_at TIMESTAMPTZ`).catch(() => {});
 
+// Opt-in per-client toggle: when on, Creatives v2/v3 merge same-assetKey
+// cards across this rollup client's accounts back into ONE card (summed
+// spend/leads), and an admin tag-save on that card writes the tag to every
+// account's matching row, not just the one the card happened to be stamped
+// with. Defaults off — the accountId+assetKey merge key (see
+// DashboardClient.tsx's mergeInto) is the correct default for a rollup
+// spanning genuinely unrelated accounts; this is only for a client that
+// explicitly wants a shared-template creative treated as one global asset,
+// with a tag applied once propagating everywhere it appears.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS enable_cross_account_creative_tagging BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]
