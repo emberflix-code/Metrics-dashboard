@@ -1810,18 +1810,42 @@ function renderCreativesV2() {
       const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
       const existing = merged.get(canonicalKey);
       if (!existing) {
-        // The canonical row's OWN accountId, not `row`'s — when clustering
-        // spans accounts (cross-account tagging on), the first row iterated
-        // into this bucket isn't necessarily the canonical one, and
-        // stamping its accountId onto a different account's assetKey is
-        // exactly the "Creative asset not found" bug this comment block
-        // exists to prevent (see _clusterCreativesV2ByPhash's own comment).
+        // Seed the merged card's IDENTITY fields (accountId, theme,
+        // ugcStatus, thumbnail, title, name) from the CANONICAL row, not
+        // `row` (whichever member happens to be first in iteration order)
+        // — spreading `row` kept whichever account was visited first,
+        // including its accountId (wrong account -> the "Creative asset
+        // not found" 404 this function's rewrite was for) AND its
+        // theme/ugcStatus (null if THAT member was never tagged, silently
+        // hiding a real tag saved on the canonical row or a different
+        // member — reported live 2026-09-11: a tag saved successfully but
+        // the card showed untagged after reload). Numeric fields start at
+        // 0 here regardless of which row seeded this bucket — every
+        // member's own numbers, canonicalRow's included, are added exactly
+        // once by the accumulation branch below as the loop reaches them,
+        // so seeding from canonicalRow's own (non-zero) totals would
+        // double-count it the moment the loop later visits it as `row`.
         const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
         merged.set(canonicalKey, {
-          ...row, assetKey: canonicalKey, accountId: canonicalRow.accountId,
-          thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title,
+          ...canonicalRow,
+          spend: 0, results: 0, impressions: 0, linkClicks: 0, ctr: 0, cpl: 0,
+          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false,
           contributingAccountIds: [canonicalRow.accountId],
         });
+        // Fall through so this same row's own numbers still get added by
+        // the accumulation branch below, whether or not it was canonicalRow.
+        const seeded = merged.get(canonicalKey)!;
+        seeded.spend += row.spend;
+        seeded.results += row.results;
+        seeded.impressions += row.impressions;
+        seeded.linkClicks += row.linkClicks;
+        seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
+        seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
+        seeded.adCount += row.adCount;
+        seeded.adIds = [...seeded.adIds, ...row.adIds];
+        seeded.ads = [...seeded.ads, ...row.ads];
+        seeded.campaigns = row.campaigns.map(c => ({ ...c }));
+        seeded.campaignsTruncated = row.campaignsTruncated;
         continue;
       }
       if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
@@ -2129,18 +2153,42 @@ function renderCreativesV3() {
       const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;
       const existing = merged.get(canonicalKey);
       if (!existing) {
-        // The canonical row's OWN accountId, not `row`'s — when clustering
-        // spans accounts (cross-account tagging on), the first row iterated
-        // into this bucket isn't necessarily the canonical one, and
-        // stamping its accountId onto a different account's assetKey is
-        // exactly the "Creative asset not found" bug this comment block
-        // exists to prevent (see _clusterCreativesV2ByPhash's own comment).
+        // Seed the merged card's IDENTITY fields (accountId, theme,
+        // ugcStatus, thumbnail, title, name) from the CANONICAL row, not
+        // `row` (whichever member happens to be first in iteration order)
+        // — spreading `row` kept whichever account was visited first,
+        // including its accountId (wrong account -> the "Creative asset
+        // not found" 404 this function's rewrite was for) AND its
+        // theme/ugcStatus (null if THAT member was never tagged, silently
+        // hiding a real tag saved on the canonical row or a different
+        // member — reported live 2026-09-11: a tag saved successfully but
+        // the card showed untagged after reload). Numeric fields start at
+        // 0 here regardless of which row seeded this bucket — every
+        // member's own numbers, canonicalRow's included, are added exactly
+        // once by the accumulation branch below as the loop reaches them,
+        // so seeding from canonicalRow's own (non-zero) totals would
+        // double-count it the moment the loop later visits it as `row`.
         const canonicalRow = images.find(r => r.assetKey === canonicalKey) ?? row;
         merged.set(canonicalKey, {
-          ...row, assetKey: canonicalKey, accountId: canonicalRow.accountId,
-          thumbnail: canonicalRow.thumbnail, name: canonicalRow.name, title: canonicalRow.title,
+          ...canonicalRow,
+          spend: 0, results: 0, impressions: 0, linkClicks: 0, ctr: 0, cpl: 0,
+          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false,
           contributingAccountIds: [canonicalRow.accountId],
         });
+        // Fall through so this same row's own numbers still get added by
+        // the accumulation branch below, whether or not it was canonicalRow.
+        const seeded = merged.get(canonicalKey)!;
+        seeded.spend += row.spend;
+        seeded.results += row.results;
+        seeded.impressions += row.impressions;
+        seeded.linkClicks += row.linkClicks;
+        seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
+        seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
+        seeded.adCount += row.adCount;
+        seeded.adIds = [...seeded.adIds, ...row.adIds];
+        seeded.ads = [...seeded.ads, ...row.ads];
+        seeded.campaigns = row.campaigns.map(c => ({ ...c }));
+        seeded.campaignsTruncated = row.campaignsTruncated;
         continue;
       }
       if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(row.accountId)) {
