@@ -357,6 +357,10 @@ let _staticLoadingV3 = false;
 // threshold behaves consistently. Keyed by thumbnail URL so repeat renders
 // (sort changes, tab switches) don't recompute.
 const _creativesV2PhashCache = new Map<string, string | null>();
+// Bottom-half-only hash, computed alongside the full-frame one — see
+// _computeClientBottomHash for why this exists (catches a different
+// headline/offer banner on an otherwise-identical base photo).
+const _creativesV2BottomHashCache = new Map<string, string | null>();
 let _creativesV2PhashInFlight = false;
 // Static-ads (non-DCO) state. Populated by fetchStaticAssets() once the DCO
 // fetch has run and we know which ad IDs are DCO so we can subtract them.
@@ -1556,33 +1560,62 @@ if (typeof window !== 'undefined') {
 // behave the same. Draws the image into an off-screen canvas — needs
 // crossOrigin to read pixel data back out, which Meta's CDN allows for these
 // public ad-image URLs (same ones already loaded directly as <img> tags).
+// dHash over an arbitrary source rectangle of the loaded image — used both
+// for the full-frame hash (identity) and, separately, a bottom-half-only
+// hash (see _computeClientBottomHash) that catches headline/offer-banner
+// text overlays the full-frame 8x8 hash is too coarse to resolve.
+function _dHashRegion(img: HTMLImageElement, sy: number, sh: number): string | null {
+  try {
+    const SIZE = 8;
+    const canvas = document.createElement('canvas');
+    canvas.width = SIZE + 1;
+    canvas.height = SIZE;
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    if (!ctx) return null;
+    ctx.drawImage(img, 0, sy, img.naturalWidth, sh, 0, 0, SIZE + 1, SIZE);
+    const { data } = ctx.getImageData(0, 0, SIZE + 1, SIZE);
+    let bits = BigInt(0);
+    for (let row = 0; row < SIZE; row++) {
+      for (let col = 0; col < SIZE; col++) {
+        const i = (row * (SIZE + 1) + col) * 4;
+        const gray = (p: number) => 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
+        bits = (bits << BigInt(1)) | (gray(i) < gray(i + 4) ? BigInt(1) : BigInt(0));
+      }
+    }
+    return bits.toString(16).padStart(16, '0');
+  } catch {
+    return null; // canvas read blocked (CORS) or other failure
+  }
+}
+
 function _computeClientPhash(url: string): Promise<string | null> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      try {
-        const SIZE = 8;
-        const canvas = document.createElement('canvas');
-        canvas.width = SIZE + 1;
-        canvas.height = SIZE;
-        const ctx = canvas.getContext('2d', { willReadFrequently: true });
-        if (!ctx) { resolve(null); return; }
-        ctx.drawImage(img, 0, 0, SIZE + 1, SIZE);
-        const { data } = ctx.getImageData(0, 0, SIZE + 1, SIZE);
-        let bits = BigInt(0);
-        for (let row = 0; row < SIZE; row++) {
-          for (let col = 0; col < SIZE; col++) {
-            const i = (row * (SIZE + 1) + col) * 4;
-            const gray = (p: number) => 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
-            bits = (bits << BigInt(1)) | (gray(i) < gray(i + 4) ? BigInt(1) : BigInt(0));
-          }
-        }
-        resolve(bits.toString(16).padStart(16, '0'));
-      } catch {
-        resolve(null); // canvas read blocked (CORS) or other failure — leave ungrouped
-      }
-    };
+    img.onload = () => resolve(_dHashRegion(img, 0, img.naturalHeight));
+    img.onerror = () => resolve(null);
+    img.src = url;
+  });
+}
+
+// Same-account server-side phash never needed this (clusterByPerceptualHash
+// only ever compares assets WITHIN one account, where a lexicographic/
+// tagged tie-break already exists for genuine duplicates) — this is
+// specific to the client-side cross-account re-cluster, where the base 8x8
+// dHash proved too coarse: it reads overall composition/lighting, not fine
+// detail, so the SAME base photo with a DIFFERENT headline/offer banner
+// (e.g. "6-Week Fall Transformation" vs "40% Off Your Membership") still
+// scores within threshold on the full frame — confirmed live 2026-09-11 (3
+// audited false-positive merges, $339 spend wrongly combined). Headline/
+// offer text on these templates sits in the bottom half, so hashing just
+// that region at the same 8x8 resolution is enough to tell two different
+// banners apart while still tolerating the minor JPEG/resize noise that
+// makes an exact-pixel comparison too strict.
+function _computeClientBottomHash(url: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(_dHashRegion(img, Math.floor(img.naturalHeight / 2), Math.ceil(img.naturalHeight / 2)));
     img.onerror = () => resolve(null);
     img.src = url;
   });
@@ -1595,6 +1628,12 @@ function _hammingDistance(a: string, b: string): number {
   return dist;
 }
 const _CREATIVES_V2_PHASH_THRESHOLD = 4; // matches PHASH_MATCH_THRESHOLD in lib/phash.ts
+// Same threshold, applied to the bottom-half-only hash — audited evidence
+// (2026-09-11) showed a clean separation: legitimate merges scored 0-7/256
+// differing bits on a 16x16 bottom-region probe, false positives scored
+// 46-82/256. At this hash's native 8x8/64-bit resolution that maps to the
+// same 0-4 acceptance band as the full-frame hash.
+const _CREATIVES_V2_BOTTOM_HASH_THRESHOLD = 4;
 
 // Same union-find clustering approach as clusterByPerceptualHash in
 // lib/phash.ts, operating on the client-computed hash cache instead.
@@ -1613,7 +1652,7 @@ const _CREATIVES_V2_PHASH_THRESHOLD = 4; // matches PHASH_MATCH_THRESHOLD in lib
 // false): only cluster within the same account, matching mergeInto's
 // default. When the client has opted into cross-account creative tagging,
 // this clustering is allowed across accounts too, same as mergeInto.
-function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean): Map<string, string> {
+function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean, bottomHashOf: (k: string) => string | null): Map<string, string> {
   const canonicalOf = new Map<string, string>();
   const withHash = assetKeys.filter(k => hashOf(k));
   for (const k of assetKeys) if (!hashOf(k)) canonicalOf.set(k, k);
@@ -1631,9 +1670,20 @@ function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => 
     for (let j = i + 1; j < withHash.length; j++) {
       if (!crossAccountEnabled && accountIdOf(withHash[i]) !== accountIdOf(withHash[j])) continue;
       const ha = hashOf(withHash[i]), hb = hashOf(withHash[j]);
-      if (ha && hb && _hammingDistance(ha, hb) <= _CREATIVES_V2_PHASH_THRESHOLD) {
-        union(withHash[i], withHash[j]);
-      }
+      if (!ha || !hb || _hammingDistance(ha, hb) > _CREATIVES_V2_PHASH_THRESHOLD) continue;
+      // Full-frame match alone isn't enough — confirmed live 2026-09-11
+      // that the same base photo with a DIFFERENT headline/offer banner
+      // ("6-Week Fall Transformation" vs "40% Off Your Membership") still
+      // passes the full-frame check, since that hash reads overall
+      // composition, not the text itself. Require the bottom-half hash
+      // (where these templates put their headline) to ALSO agree —
+      // missing on either side (not yet computed, or hashing failed) is
+      // treated as agreement rather than blocking a real merge, matching
+      // how a missing full-frame hash already leaves an asset ungrouped
+      // rather than wrongly excluded.
+      const ba = bottomHashOf(withHash[i]), bb = bottomHashOf(withHash[j]);
+      if (ba && bb && _hammingDistance(ba, bb) > _CREATIVES_V2_BOTTOM_HASH_THRESHOLD) continue;
+      union(withHash[i], withHash[j]);
     }
   }
   for (const k of withHash) canonicalOf.set(k, find(k));
@@ -1655,8 +1705,12 @@ function _ensureCreativesV2Phashes(images: AssetBreakdownRow[]) {
   const BATCH = 60;
   const batch = missing.slice(0, BATCH);
   Promise.all(batch.map(async r => {
-    const hash = await _computeClientPhash(r.thumbnail!);
+    const [hash, bottomHash] = await Promise.all([
+      _computeClientPhash(r.thumbnail!),
+      _computeClientBottomHash(r.thumbnail!),
+    ]);
     _creativesV2PhashCache.set(r.thumbnail!, hash);
+    _creativesV2BottomHashCache.set(r.thumbnail!, bottomHash);
   })).then(() => {
     _creativesV2PhashInFlight = false;
     renderCreativesV2();
@@ -1677,8 +1731,12 @@ function _ensureCreativesV3Phashes(images: AssetBreakdownRow[]) {
   const BATCH = 60;
   const batch = missing.slice(0, BATCH);
   Promise.all(batch.map(async r => {
-    const hash = await _computeClientPhash(r.thumbnail!);
+    const [hash, bottomHash] = await Promise.all([
+      _computeClientPhash(r.thumbnail!),
+      _computeClientBottomHash(r.thumbnail!),
+    ]);
     _creativesV2PhashCache.set(r.thumbnail!, hash);
+    _creativesV2BottomHashCache.set(r.thumbnail!, bottomHash);
   })).then(() => {
     _creativesV3PhashInFlight = false;
     renderCreativesV3();
@@ -1802,8 +1860,12 @@ function renderCreativesV2() {
     const row = images.find(r => r.assetKey === assetKey);
     return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
   };
+  const bottomHashOf = (assetKey: string) => {
+    const row = images.find(r => r.assetKey === assetKey);
+    return row?.thumbnail ? (_creativesV2BottomHashCache.get(row.thumbnail) ?? null) : null;
+  };
   const accountIdOfKey = (assetKey: string) => images.find(r => r.assetKey === assetKey)?.accountId ?? null;
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging);
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging, bottomHashOf);
   if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
     const merged = new Map<string, AssetBreakdownRow>();
     for (const row of images) {
@@ -2145,8 +2207,12 @@ function renderCreativesV3() {
     const row = images.find(r => r.assetKey === assetKey);
     return row?.thumbnail ? (_creativesV2PhashCache.get(row.thumbnail) ?? null) : null;
   };
+  const bottomHashOf = (assetKey: string) => {
+    const row = images.find(r => r.assetKey === assetKey);
+    return row?.thumbnail ? (_creativesV2BottomHashCache.get(row.thumbnail) ?? null) : null;
+  };
   const accountIdOfKey = (assetKey: string) => images.find(r => r.assetKey === assetKey)?.accountId ?? null;
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging);
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(images.map(r => r.assetKey), phashOf, accountIdOfKey, _enableCrossAccountCreativeTagging, bottomHashOf);
   if (Array.from(canonicalKeyOf.values()).some((v, i) => v !== images.map(r => r.assetKey)[i])) {
     const merged = new Map<string, AssetBreakdownRow>();
     for (const row of images) {
@@ -2546,6 +2612,16 @@ async function fetchDcoAssets() {
           if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(a.accountId)) {
             existing.contributingAccountIds.push(a.accountId);
           }
+          // A tagged contributing account must never lose its tag just
+          // because an untagged account happened to arrive first in the
+          // fetch (Promise.all has no guaranteed order) — found live
+          // 2026-09-11: a card showed untagged despite theme/ugc_status
+          // being saved on one of its contributing accounts, because this
+          // merge only accumulated numeric fields and left whichever
+          // account's row was first in `map` (here, `existing`) as the
+          // permanent source of theme/ugcStatus, nulls included.
+          if (!existing.theme && a.theme) existing.theme = a.theme;
+          if (!existing.ugcStatus && a.ugcStatus) existing.ugcStatus = a.ugcStatus;
           existing.spend += a.spend;
           existing.results += a.results;
           existing.impressions += a.impressions;
@@ -2749,6 +2825,16 @@ async function fetchDcoAssetsV3() {
           if (existing.contributingAccountIds && !existing.contributingAccountIds.includes(a.accountId)) {
             existing.contributingAccountIds.push(a.accountId);
           }
+          // A tagged contributing account must never lose its tag just
+          // because an untagged account happened to arrive first in the
+          // fetch (Promise.all has no guaranteed order) — found live
+          // 2026-09-11: a card showed untagged despite theme/ugc_status
+          // being saved on one of its contributing accounts, because this
+          // merge only accumulated numeric fields and left whichever
+          // account's row was first in `map` (here, `existing`) as the
+          // permanent source of theme/ugcStatus, nulls included.
+          if (!existing.theme && a.theme) existing.theme = a.theme;
+          if (!existing.ugcStatus && a.ugcStatus) existing.ugcStatus = a.ugcStatus;
           existing.spend += a.spend;
           existing.results += a.results;
           existing.impressions += a.impressions;
