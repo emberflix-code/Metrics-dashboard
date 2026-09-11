@@ -434,6 +434,16 @@ pool.query(`ALTER TABLE meta_creative_assets ADD COLUMN IF NOT EXISTS thumbnail_
 // with a tag applied once propagating everywhere it appears.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS enable_cross_account_creative_tagging BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// Opt-in per-client toggle: shows a "Theme Breakdown" tab summarizing
+// creative spend/impressions/clicks/CTR/leads/CPL grouped by the admin-set
+// Theme (Strength/Tread/Non-Active/Strength+Tread) and separately by UGC
+// status, across EVERY ad account this client can see — see
+// /api/meta/db/theme-breakdown. Built for Anytime Fitness Corporate
+// specifically (a rollup client whose creatives were bulk-tagged
+// 2026-09-11), off by default for everyone else since it needs real
+// theme/ugc_status tags to be meaningful.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_theme_breakdown BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

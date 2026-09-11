@@ -49,6 +49,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET enable_cross_account_creative_tagging = $1 WHERE id = $2', [!!body.enable_cross_account_creative_tagging, params.id]);
   }
 
+  if (body.show_theme_breakdown !== undefined) {
+    await query('UPDATE clients SET show_theme_breakdown = $1 WHERE id = $2', [!!body.show_theme_breakdown, params.id]);
+  }
+
   if (body.hide_adset_ad_tabs !== undefined) {
     await query('UPDATE clients SET hide_adset_ad_tabs = $1 WHERE id = $2', [!!body.hide_adset_ad_tabs, params.id]);
   }

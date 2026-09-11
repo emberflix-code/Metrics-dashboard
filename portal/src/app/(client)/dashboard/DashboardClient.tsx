@@ -93,6 +93,16 @@ interface Props {
   // image (see mergeInto's own comment for the incident this default
   // avoids repeating).
   enableCrossAccountCreativeTagging?: boolean;
+  // Off by default. When true, shows a "Theme Breakdown" tab: creative
+  // spend/impressions/clicks/CTR/leads/CPL grouped by admin-set Theme
+  // (Strength/Tread/Non-Active/Strength+Tread) and separately by UGC
+  // status, summed across EVERY ad account this client can see (not just
+  // one at a time like the Campaigns tab's account selector). Admin-
+  // togglable per client — see ShowThemeBreakdownToggle. Bookings/Joins
+  // columns always render as "—": Meta's per-creative breakdown has no
+  // concept of either, they only exist as client-level sheet-KPI totals
+  // with no path back to which creative drove one.
+  showThemeBreakdown?: boolean;
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -164,6 +174,8 @@ let _showCreativeCampaignBreakdown = false;
 // avoids a confusing empty/broken tab for a live-mode client. Set once in
 // DashboardClient() alongside the other prop-derived module vars.
 let _showCreativesV3Tab = false;
+// See Props.showThemeBreakdown.
+let _showThemeBreakdown = false;
 // See Props.enableCrossAccountCreativeTagging.
 let _enableCrossAccountCreativeTagging = false;
 let _hideAdsetAdTabs = true;
@@ -346,6 +358,17 @@ let _dcoAssetsV3: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; ad
 let _staticAssetsV3: CreativeRow[] | null = null;
 let _dcoLoadingV3 = false;
 let _staticLoadingV3 = false;
+// Theme Breakdown tab state — its route sums across every account this
+// client can see server-side (see /api/meta/db/theme-breakdown), so unlike
+// v1/v2/v3 there's no per-account fan-out to merge client-side here.
+interface ThemeBreakdownRow {
+  key: string; label: string; spend: number; reach: number | null;
+  impressions: number; linkClicks: number; ctr: number; leads: number;
+  cpl: number | null; bookings: number | null; cpb: number | null;
+  joins: number | null; cpj: number | null;
+}
+let _themeBreakdown: { byTheme: ThemeBreakdownRow[]; byUgc: ThemeBreakdownRow[] } | null = null;
+let _themeBreakdownLoading = false;
 // Client-side visual-duplicate hash cache for Creatives v2 only (v1 keeps
 // its existing server-side phash, which only covers DCO assets — see
 // clusterByPerceptualHash in lib/phash.ts). Static (non-DCO) image cards
@@ -2878,6 +2901,121 @@ async function fetchStaticAssetsV3() {
   }
 }
 
+// Theme Breakdown fetch — hits the DB-backed route directly, which already
+// sums across every ad account this client can see server-side (unlike
+// v1/v2/v3's per-account fan-out above), so there's nothing to merge here.
+async function fetchThemeBreakdown() {
+  _themeBreakdownLoading = true;
+  renderThemeBreakdown();
+  try {
+    const { since, until } = getDateRange();
+    const timeRange = JSON.stringify({ since, until });
+    const res = await fetch(`/api/meta/db/theme-breakdown?time_range=${encodeURIComponent(timeRange)}`);
+    const json = await res.json();
+    if (json.error) {
+      showNotification(json.error.message || 'Theme Breakdown fetch failed', 'error');
+      _themeBreakdown = { byTheme: [], byUgc: [] };
+    } else {
+      _themeBreakdown = json;
+    }
+  } catch (e) {
+    showNotification(e instanceof Error ? e.message : 'Theme Breakdown fetch failed', 'error');
+    _themeBreakdown = { byTheme: [], byUgc: [] };
+  } finally {
+    _themeBreakdownLoading = false;
+    renderThemeBreakdown();
+  }
+}
+
+function _fmtDash(n: number | null, prefix = ''): string {
+  return n === null ? '—' : `${prefix}${n.toLocaleString(undefined, { minimumFractionDigits: prefix === '$' ? 2 : 0, maximumFractionDigits: 2 })}`;
+}
+
+function renderThemeBreakdown() {
+  const wrap = document.getElementById('theme-breakdown-content');
+  if (!wrap) return;
+
+  if (_themeBreakdownLoading || !_themeBreakdown) {
+    wrap.innerHTML = Array.from({ length: 2 }, () => `
+      <div class="mb-6">
+        <div class="skeleton h-8 w-full mb-1"></div>
+        <div class="skeleton h-8 w-full mb-1"></div>
+        <div class="skeleton h-8 w-full mb-1"></div>
+      </div>`).join('');
+    return;
+  }
+
+  const cols: { key: keyof ThemeBreakdownRow; label: string; prefix?: string; suffix?: string }[] = [
+    { key: 'spend', label: 'Spend', prefix: '$' },
+    { key: 'reach', label: 'Reach' },
+    { key: 'impressions', label: 'Impr.' },
+    { key: 'linkClicks', label: 'Link Clicks' },
+    { key: 'ctr', label: 'CTR', suffix: '%' },
+    { key: 'leads', label: 'Leads' },
+    { key: 'cpl', label: 'CPL', prefix: '$' },
+    { key: 'bookings', label: 'Bookings' },
+    { key: 'cpb', label: 'CPB', prefix: '$' },
+    { key: 'joins', label: 'Joins' },
+    { key: 'cpj', label: 'CPJ', prefix: '$' },
+  ];
+
+  const totalSpend = (rows: ThemeBreakdownRow[]) => rows.reduce((s, r) => s + r.spend, 0);
+
+  const renderTable = (title: string, rows: ThemeBreakdownRow[]) => {
+    const grand = totalSpend(rows);
+    const totalRow: ThemeBreakdownRow = {
+      key: 'total', label: 'Total',
+      spend: grand,
+      reach: rows.some(r => r.reach !== null) ? rows.reduce((s, r) => s + (r.reach || 0), 0) : null,
+      impressions: rows.reduce((s, r) => s + r.impressions, 0),
+      linkClicks: rows.reduce((s, r) => s + r.linkClicks, 0),
+      ctr: 0, leads: rows.reduce((s, r) => s + r.leads, 0),
+      cpl: null,
+      bookings: rows.some(r => r.bookings !== null) ? rows.reduce((s, r) => s + (r.bookings || 0), 0) : null,
+      cpb: null,
+      joins: rows.some(r => r.joins !== null) ? rows.reduce((s, r) => s + (r.joins || 0), 0) : null,
+      cpj: null,
+    };
+    totalRow.ctr = totalRow.impressions > 0 ? Math.round((totalRow.linkClicks / totalRow.impressions) * 10000) / 100 : 0;
+    totalRow.cpl = totalRow.leads > 0 ? Math.round((totalRow.spend / totalRow.leads) * 100) / 100 : null;
+
+    const renderRow = (r: ThemeBreakdownRow, isTotal: boolean) => {
+      const pctOfSpend = grand > 0 ? Math.round((r.spend / grand) * 1000) / 10 : 0;
+      return `
+        <tr class="${isTotal ? 'font-bold bg-slate-800/60' : ''} border-b border-slate-800/60">
+          <td class="px-3 py-2 text-sm text-white">${r.label}</td>
+          ${cols.map(c => {
+            const val = r[c.key] as number | null;
+            return `<td class="px-3 py-2 text-sm text-slate-300 text-right whitespace-nowrap">${_fmtDash(val, c.prefix)}${val !== null && c.suffix ? c.suffix : ''}</td>`;
+          }).join('')}
+          <td class="px-3 py-2 text-sm text-slate-300 text-right whitespace-nowrap">${pctOfSpend}%</td>
+        </tr>`;
+    };
+
+    return `
+      <div class="mb-6 rounded-xl overflow-hidden border border-slate-800">
+        <div class="bg-slate-950 px-3 py-2 text-xs font-bold uppercase tracking-wider text-white">${title}</div>
+        <div class="overflow-x-auto scrollbar-thin">
+          <table class="w-full">
+            <thead>
+              <tr class="border-b border-slate-800 bg-slate-900/60">
+                <th class="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">${title === 'Theme' ? 'Theme' : 'Category'}</th>
+                ${cols.map(c => `<th class="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">${c.label}</th>`).join('')}
+                <th class="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">% of Spend</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${rows.map(r => renderRow(r, false)).join('')}
+              ${renderRow(totalRow, true)}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+  };
+
+  wrap.innerHTML = renderTable('Theme', _themeBreakdown.byTheme) + renderTable('UGC vs. Non-UGC', _themeBreakdown.byUgc);
+}
+
 // Kick off a sheet fetch for this Meta client when use_sheet_for_leads is on.
 // Cached in _sheetLeadsByDay (keyed by YYYY-MM-DD) and read by renderCards.
 // Reused across reloads — only the first call hits the network because the
@@ -4059,7 +4197,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -4081,6 +4219,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   // live mode, rather than show an empty/broken grid (see Props.showCreativesV3).
   _showCreativesV3Tab = showCreativesV3 && accountIds.every(id => dataSourceByAccount[id] === 'cached');
   _enableCrossAccountCreativeTagging = enableCrossAccountCreativeTagging;
+  _showThemeBreakdown = showThemeBreakdown;
   _hideAdsetAdTabs = hideAdsetAdTabs;
   _enablePageImageFallback = enablePageImageFallback;
   _showMetaKpiSheet = showMetaKpiSheet;
@@ -4287,6 +4426,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               if (creativesVisible) fetchDcoAssets();
               const creativesV3Visible = !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
               if (creativesV3Visible) fetchDcoAssetsV3();
+              const themeBreakdownVisible = !document.getElementById('theme-breakdown-view')?.classList.contains('hidden');
+              if (themeBreakdownVisible) fetchThemeBreakdown();
             }} className="bg-blue-600 hover:bg-blue-500 text-white text-sm font-semibold px-5 py-2 rounded-lg transition-colors flex items-center gap-2 self-end mb-[20px]">
               <i data-lucide="refresh-cw" className="w-4 h-4"></i> Apply
             </button>
@@ -4342,13 +4483,16 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   // been on Creatives and just wants to come back to this tab.
                   const wasOnCreatives = !document.getElementById('creatives-view')?.classList.contains('hidden')
                     || !document.getElementById('creatives-v2-view')?.classList.contains('hidden')
-                    || !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
+                    || !document.getElementById('creatives-v3-view')?.classList.contains('hidden')
+                    || !document.getElementById('theme-breakdown-view')?.classList.contains('hidden');
                   document.getElementById('creatives-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives')?.classList.remove('active-tab');
                   document.getElementById('creatives-v2-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
                   document.getElementById('creatives-v3-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
+                  document.getElementById('theme-breakdown-view')?.classList.add('hidden');
+                  document.getElementById('tab-theme-breakdown')?.classList.remove('active-tab');
                   const lo=['campaign','adset','ad'];
                   lo.forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.toggle('active-tab',x===l);});
                   // Show whichever main view the user last had open.
@@ -4379,6 +4523,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
                   document.getElementById('creatives-v3-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
+                  document.getElementById('theme-breakdown-view')?.classList.add('hidden');
+                  document.getElementById('tab-theme-breakdown')?.classList.remove('active-tab');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives')?.classList.add('active-tab');
                   fetchDcoAssets();
@@ -4396,6 +4542,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('creatives-v2-view')?.classList.remove('hidden');
                   document.getElementById('creatives-v3-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
+                  document.getElementById('theme-breakdown-view')?.classList.add('hidden');
+                  document.getElementById('tab-theme-breakdown')?.classList.remove('active-tab');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives-v2')?.classList.add('active-tab');
                   // Reuses the same DCO+static fetches as the existing Creatives
@@ -4421,6 +4569,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   document.getElementById('creatives-v2-view')?.classList.add('hidden');
                   document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
                   document.getElementById('creatives-v3-view')?.classList.remove('hidden');
+                  document.getElementById('theme-breakdown-view')?.classList.add('hidden');
+                  document.getElementById('tab-theme-breakdown')?.classList.remove('active-tab');
                   ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
                   document.getElementById('tab-creatives-v3')?.classList.add('active-tab');
                   // Own fetch functions (fetchDcoAssetsV3/fetchStaticAssetsV3) —
@@ -4430,6 +4580,25 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   fetchDcoAssetsV3();
                 }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
                   Creatives v3
+                </button>
+              )}
+              {platform === 'meta' && _showThemeBreakdown && (
+                <button id="tab-theme-breakdown" onClick={() => {
+                  // Hide other views, show theme breakdown.
+                  document.getElementById('table-view')?.classList.add('hidden');
+                  document.getElementById('analytics-view')?.classList.add('hidden');
+                  document.getElementById('creatives-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives')?.classList.remove('active-tab');
+                  document.getElementById('creatives-v2-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
+                  document.getElementById('creatives-v3-view')?.classList.add('hidden');
+                  document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
+                  document.getElementById('theme-breakdown-view')?.classList.remove('hidden');
+                  ['campaign','adset','ad'].forEach(x=>{const t=document.getElementById(`tab-${x}`);if(t)t.classList.remove('active-tab');});
+                  document.getElementById('tab-theme-breakdown')?.classList.add('active-tab');
+                  fetchThemeBreakdown();
+                }} className="level-tab px-4 py-2 text-xs font-semibold rounded-t-lg transition-colors">
+                  Theme Breakdown
                 </button>
               )}
               {platform === 'google' && (
@@ -4452,6 +4621,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
                     document.getElementById('creatives-v3-view')?.classList.add('hidden');
                     document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
+                    document.getElementById('theme-breakdown-view')?.classList.add('hidden');
+                    document.getElementById('tab-theme-breakdown')?.classList.remove('active-tab');
                     document.getElementById(`tab-${_currentLevel}`)?.classList.add('active-tab');
                     document.getElementById('table-view')?.classList.remove('hidden');
                     document.getElementById('analytics-view')?.classList.add('hidden');
@@ -4467,6 +4638,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     document.getElementById('tab-creatives-v2')?.classList.remove('active-tab');
                     document.getElementById('creatives-v3-view')?.classList.add('hidden');
                     document.getElementById('tab-creatives-v3')?.classList.remove('active-tab');
+                    document.getElementById('theme-breakdown-view')?.classList.add('hidden');
+                    document.getElementById('tab-theme-breakdown')?.classList.remove('active-tab');
                     document.getElementById(`tab-${_currentLevel}`)?.classList.add('active-tab');
                     document.getElementById('table-view')?.classList.add('hidden');
                     document.getElementById('analytics-view')?.classList.remove('hidden');
@@ -4706,6 +4879,15 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
               <div id="creatives-v3-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
             </div>
+            <div id="theme-breakdown-view" className="hidden p-5">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2 mb-1">
+                <i data-lucide="pie-chart" className="w-3.5 h-3.5 text-amber-400"></i> Theme Breakdown — creative performance by Theme and by UGC status
+              </h3>
+              <p className="text-[11px] text-slate-500 mt-1 mb-4">
+                Spend/Impressions/Link Clicks/CTR/Leads/CPL are real Meta creative-breakdown totals, summed across every ad account this client can see. Reach and Bookings/CPB/Joins/CPJ show as &mdash; &mdash; Meta has no per-creative Reach in this breakdown, and Bookings/Joins only exist as client-level totals from the separate KPI sheet with no way to attribute either back to one creative.
+              </p>
+              <div id="theme-breakdown-content"></div>
+            </div>
           </div>
         </div>
 
@@ -4841,6 +5023,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 if (creativesVisible) fetchDcoAssets();
                 const creativesV3Visible = !document.getElementById('creatives-v3-view')?.classList.contains('hidden');
                 if (creativesV3Visible) fetchDcoAssetsV3();
+                const themeBreakdownVisible = !document.getElementById('theme-breakdown-view')?.classList.contains('hidden');
+                if (themeBreakdownVisible) fetchThemeBreakdown();
               }} style={{padding:'7px 18px',borderRadius:8,border:'none',background:'#3b82f6',fontSize:13,fontWeight:600,color:'#fff',cursor:'pointer'}}>Update</button>
             </div>
           </div>
