@@ -61,14 +61,17 @@ export async function GET(req: NextRequest) {
       until = range.until || '';
     } catch { /* empty range below returns nothing */ }
     if (!since || !until) {
-      return NextResponse.json({ byTheme: [], byUgc: [] }, NO_STORE);
+      return NextResponse.json({ byTheme: [], byUgc: [], byType: [] }, NO_STORE);
     }
 
     const byTheme = new Map<string, Row>();
     const byUgc = new Map<string, Row>();
+    const byType = new Map<string, Row>();
     for (const key of THEME_ORDER) byTheme.set(key, emptyRow());
     byUgc.set('ugc', emptyRow());
     byUgc.set('non-ugc', emptyRow());
+    byType.set('image', emptyRow());
+    byType.set('video', emptyRow());
 
     for (const accountId of accountIds) {
       // Ads whose campaign matches this client's filter — same scoping
@@ -106,6 +109,16 @@ export async function GET(req: NextRequest) {
         if (ugcKey) {
           addInto(byUgc.get(ugcKey)!, spend, impressions, linkClicks, results);
         }
+        // Unlike Theme/UGC (admin-tag-dependent, so a real gap exists
+        // between them whenever tagging lags — confirmed live 2026-09-15:
+        // Anytime Fitness Corporate had $299,708 tagged Theme but not UGC),
+        // Image/Video is a structural split on asset_key's own prefix, not
+        // an admin tag — every DCO row lands in exactly one of these two
+        // buckets regardless of tag status, so this table's total reconciles
+        // much closer to the tab's own KPI cards (only the DCO-vs-static
+        // gap remains, not an additional tagging gap).
+        const typeKey = r.asset_key.startsWith('video:') ? 'video' : 'image';
+        addInto(byType.get(typeKey)!, spend, impressions, linkClicks, results);
       }
     }
 
@@ -134,8 +147,12 @@ export async function GET(req: NextRequest) {
       toOutput('non-ugc', 'Non-UGC', byUgc.get('non-ugc')!),
       toOutput('ugc', 'UGC', byUgc.get('ugc')!),
     ];
+    const typeOut = [
+      toOutput('image', 'Image', byType.get('image')!),
+      toOutput('video', 'Video', byType.get('video')!),
+    ];
 
-    return NextResponse.json({ byTheme: themeOut, byUgc: ugcOut }, NO_STORE);
+    return NextResponse.json({ byTheme: themeOut, byUgc: ugcOut, byType: typeOut }, NO_STORE);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Internal error';
     return NextResponse.json({ error: { message: msg } }, { status: 500 });

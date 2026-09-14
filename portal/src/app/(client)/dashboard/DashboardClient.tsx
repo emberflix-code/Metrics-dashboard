@@ -373,7 +373,7 @@ interface ThemeBreakdownRow {
   cpl: number | null; bookings: number | null; cpb: number | null;
   joins: number | null; cpj: number | null;
 }
-let _themeBreakdown: { byTheme: ThemeBreakdownRow[]; byUgc: ThemeBreakdownRow[] } | null = null;
+let _themeBreakdown: { byTheme: ThemeBreakdownRow[]; byUgc: ThemeBreakdownRow[]; byType: ThemeBreakdownRow[] } | null = null;
 let _themeBreakdownLoading = false;
 
 // Insights tab — a written analysis of the selected period, generated
@@ -2983,13 +2983,13 @@ async function fetchThemeBreakdown() {
     const json = await res.json();
     if (json.error) {
       showNotification(json.error.message || 'Theme Breakdown fetch failed', 'error');
-      _themeBreakdown = { byTheme: [], byUgc: [] };
+      _themeBreakdown = { byTheme: [], byUgc: [], byType: [] };
     } else {
       _themeBreakdown = json;
     }
   } catch (e) {
     showNotification(e instanceof Error ? e.message : 'Theme Breakdown fetch failed', 'error');
-    _themeBreakdown = { byTheme: [], byUgc: [] };
+    _themeBreakdown = { byTheme: [], byUgc: [], byType: [] };
   } finally {
     _themeBreakdownLoading = false;
     renderThemeBreakdown();
@@ -3068,7 +3068,7 @@ function renderThemeBreakdown() {
           <table class="w-full">
             <thead>
               <tr class="border-b border-slate-800 bg-slate-900/60">
-                <th class="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">${title === 'Theme' ? 'Theme' : 'Category'}</th>
+                <th class="px-3 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-slate-500">${title === 'Theme' ? 'Theme' : title === 'Image vs. Video' ? 'Type' : 'Category'}</th>
                 ${cols.map(c => `<th class="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">${c.label}</th>`).join('')}
                 <th class="px-3 py-2 text-right text-[11px] font-semibold uppercase tracking-wider text-slate-500 whitespace-nowrap">% of Spend</th>
               </tr>
@@ -3082,11 +3082,13 @@ function renderThemeBreakdown() {
       </div>`;
   };
 
-  wrap.innerHTML = renderTable('Theme', _themeBreakdown.byTheme) + renderTable('UGC vs. Non-UGC', _themeBreakdown.byUgc);
+  wrap.innerHTML = renderTable('Theme', _themeBreakdown.byTheme)
+    + renderTable('UGC vs. Non-UGC', _themeBreakdown.byUgc)
+    + renderTable('Image vs. Video', _themeBreakdown.byType);
 }
 
 function exportThemeBreakdownCsv() {
-  if (!_themeBreakdown || (_themeBreakdown.byTheme.length === 0 && _themeBreakdown.byUgc.length === 0)) {
+  if (!_themeBreakdown || (_themeBreakdown.byTheme.length === 0 && _themeBreakdown.byUgc.length === 0 && _themeBreakdown.byType.length === 0)) {
     showNotification('No data to export yet', 'error');
     return;
   }
@@ -3099,6 +3101,7 @@ function exportThemeBreakdownCsv() {
   const allRows = [
     ...toCsvRows('Theme', _themeBreakdown.byTheme),
     ...toCsvRows('UGC vs. Non-UGC', _themeBreakdown.byUgc),
+    ...toCsvRows('Image vs. Video', _themeBreakdown.byType),
   ];
   const csv = [headers, ...allRows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
   downloadFile(csv, 'theme-breakdown-' + new Date().toISOString().split('T')[0] + '.csv', 'text/csv');
@@ -5432,6 +5435,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 <i data-lucide="info" className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
                 <div className="text-amber-200/90 leading-relaxed text-[11px]">
                   <span className="font-semibold">Why these totals won&apos;t match your Account Spend/Leads cards:</span> this table only includes ads that (1) run Dynamic Creative Optimization &mdash; Meta&apos;s per-creative breakdown doesn&apos;t exist for static (non-DCO) ads, same as the Creatives tabs, and (2) have a Theme or UGC tag set by an admin &mdash; an untagged creative&apos;s spend and leads aren&apos;t added to any row here, they simply don&apos;t appear. Spend/leads from static ads and from untagged creatives are still counted in your top-line KPI cards, so this tab will always undercount versus those.
+                  <div className="mt-1">The Theme table and the UGC table can also differ from EACH OTHER &mdash; a creative can have a Theme tag without a UGC tag yet (or vice versa), so its spend counts toward one table but not the other until both tags are set. The Image vs. Video table below doesn&apos;t have this gap: every DCO creative lands in Image or Video regardless of tag status, so it reconciles closer to your KPI cards than either tagged table does.</div>
                   <div className="mt-1 text-slate-500">Use this tab to compare Theme/UGC categories against each other, not as a second total for your whole account.</div>
                 </div>
               </div>
