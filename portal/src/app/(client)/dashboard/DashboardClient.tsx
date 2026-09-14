@@ -990,8 +990,10 @@ function renderCards(t: any, selCount=0) {
         if (day >= since && day <= until) sales += count;
       }
     } catch { /* leave at 0 */ }
+    // "—" rather than "$0.00" when nothing was won in the range, matching
+    // the CPA card's empty state directly above.
     cards.push({
-      label:'LTV', value:fmtUsd(sales * _ltvValue), icon:'trending-up', color:'violet',
+      label:'LTV', value: sales > 0 ? fmtUsd(sales * _ltvValue) : '—', icon:'trending-up', color:'violet',
       delta:`<span class="text-slate-500 text-[11px]">${fmt(sales)} sale${sales===1?'':'s'} &times; ${fmtUsd(_ltvValue)}</span>`,
       notFilterable: true,
     });
