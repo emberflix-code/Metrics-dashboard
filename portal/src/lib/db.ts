@@ -464,6 +464,12 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS enable_cross_account_cr
 // theme/ugc_status tags to be meaningful.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_theme_breakdown BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// Per-client toggle for the "Insights" dashboard tab — a rule-based written
+// analysis of the selected date range built from data the dashboard already
+// loads (see DashboardClient.tsx buildInsights). Off by default so no client
+// sees it until an admin enables it for them.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_insights BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]
