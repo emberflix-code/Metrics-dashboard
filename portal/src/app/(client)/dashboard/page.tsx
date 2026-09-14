@@ -168,7 +168,19 @@ export default async function DashboardPage({
         showInsights={!!client?.show_insights}
         hideAdsetAdTabs={!!client?.hide_adset_ad_tabs}
         enablePageImageFallback={!!client?.enable_page_image_fallback}
-        showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id && client?.meta_kpi_sheet_tab)}
+        // meta_kpi_sheet_tab (singular) used to be required here too, but it's
+        // dead — superseded by the one-tab-per-month client_meta_kpi_sheet_tabs
+        // table (see db.ts's own comment on the column) and never populated for
+        // any client using the newer system. Gating on it made this prop
+        // permanently false for every such client (confirmed live 2026-09-16:
+        // Anytime Fitness Corporate has real per-month tabs configured and
+        // show_meta_kpi_sheet=true, but this condition still evaluated false
+        // because meta_kpi_sheet_tab was '', so the client-side fetch never
+        // even fired — no request, not an error). show_meta_kpi_sheet +
+        // meta_kpi_sheet_id alone is the real "is this configured" signal; an
+        // empty client_meta_kpi_sheet_tabs already degrades gracefully
+        // (falls back to the cache, or shows nothing) rather than erroring.
+        showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id)}
         dataSourceByAccount={dataSourceByAccount}
         isAdminView={!!impersonatedBy}
         autoLoginToken={autoLoginToken}
