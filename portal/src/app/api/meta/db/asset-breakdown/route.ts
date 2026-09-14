@@ -1,7 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
 import { clusterByPerceptualHash, resolveClusteredThemeAndUgc } from '@/lib/phash';
+import { fetchMetaKpiSheetRows } from '@/lib/metaKpiSheet';
 
 interface AssetSummary {
   assetKey: string;
@@ -32,6 +35,15 @@ interface AssetSummary {
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
   hidden: boolean;
+  // Admin-only estimate — see the comment above the attribution block below
+  // for the method (same spend-share split as the Theme Breakdown tab's
+  // /api/meta/db/theme-breakdown). Always computed here; DashboardClient.tsx
+  // is responsible for only ever rendering these while _isAdminView is
+  // true, same gating convention as the theme/ugcStatus edit dropdowns.
+  bookings: number | null;
+  cpb: number | null;
+  joins: number | null;
+  cpj: number | null;
 }
 
 const CAMPAIGNS_CAP = 50;
@@ -119,10 +131,81 @@ export async function GET(req: NextRequest) {
       [accountId, since, until, Array.from(allowedAdIds)]
     );
     const campaignRowsByAssetKey = new Map<string, typeof campaignRows>();
+    // Total spend per campaign name ACROSS EVERY asset_key in this account —
+    // not scoped to one card — used as the denominator for the bookings/
+    // joins spend-share estimate below (see that block's own comment).
+    // Built from the SAME rows as campaignRowsByAssetKey, just summed the
+    // other way, so this always reflects the identical universe of spend.
+    const campaignTotalSpend = new Map<string, number>();
     for (const r of campaignRows) {
       const list = campaignRowsByAssetKey.get(r.asset_key) || [];
       list.push(r);
       campaignRowsByAssetKey.set(r.asset_key, list);
+      if (r.campaign_name) {
+        campaignTotalSpend.set(r.campaign_name, (campaignTotalSpend.get(r.campaign_name) || 0) + (parseFloat(r.spend) || 0));
+      }
+    }
+
+    // Bookings/Joins ESTIMATE — admin-only (rendered conditionally client-
+    // side), same spend-share attribution method as the Theme Breakdown
+    // tab's /api/meta/db/theme-breakdown: the KPI sheet reports bookings/
+    // joins per CAMPAIGN, never per creative, so each campaign's total is
+    // split across the cards that ran in it, proportional to each card's
+    // share of that campaign's spend. See that route's own comment for the
+    // full method and its honest limitations — identical logic here, just
+    // applied per CARD instead of per Theme/UGC/Type bucket.
+    const session = await getServerSession(authOptions);
+    const [kpiClient] = session ? await query<{ id: string; meta_kpi_sheet_id: string | null; show_meta_kpi_sheet: boolean }>(
+      `SELECT c.id, c.meta_kpi_sheet_id, c.show_meta_kpi_sheet
+       FROM clients c JOIN client_users cu ON cu.client_id = c.id
+       WHERE cu.user_id = $1 LIMIT 1`,
+      [session.user.id]
+    ) : [];
+    const bookingsJoinsByCampaign = new Map<string, { bookings: number; joins: number }>();
+    if (kpiClient?.show_meta_kpi_sheet && kpiClient.meta_kpi_sheet_id) {
+      const monthsInRange: string[] = [];
+      {
+        const [sy, sm] = since.split('-').map(Number);
+        const [ey, em] = until.split('-').map(Number);
+        let y = sy, m = sm;
+        while (y < ey || (y === ey && m <= em)) {
+          monthsInRange.push(`${y}-${String(m).padStart(2, '0')}-01`);
+          m++;
+          if (m > 12) { m = 1; y++; }
+        }
+      }
+      const tabRows = await query<{ month: string; tab_name: string }>(
+        `SELECT to_char(month, 'YYYY-MM-DD') AS month, tab_name FROM client_meta_kpi_sheet_tabs WHERE client_id = $1`,
+        [kpiClient.id]
+      );
+      const tabByMonth = new Map(tabRows.map(r => [r.month.slice(0, 7), r.tab_name]));
+
+      for (const month of monthsInRange) {
+        const tabName = tabByMonth.get(month.slice(0, 7));
+        let monthRows: { day: string; campaign: string; bookings: number; joins: number }[] | null = null;
+        if (tabName) {
+          try {
+            const result = await fetchMetaKpiSheetRows(kpiClient.meta_kpi_sheet_id, tabName);
+            monthRows = result.rows;
+          } catch { /* fall through to cache below */ }
+        }
+        if (monthRows === null) {
+          const [y, m] = month.split('-').map(Number);
+          const nextMonth = `${m === 12 ? y + 1 : y}-${String(m === 12 ? 1 : m + 1).padStart(2, '0')}-01`;
+          monthRows = await query<{ day: string; campaign: string; bookings: number; joins: number }>(
+            `SELECT day::text AS day, campaign, bookings, joins FROM meta_kpi_sheet_cache
+             WHERE client_id = $1 AND day >= $2::date AND day < $3::date`,
+            [kpiClient.id, month, nextMonth]
+          );
+        }
+        for (const r of monthRows) {
+          if (r.day < since || r.day > until) continue;
+          const cur = bookingsJoinsByCampaign.get(r.campaign) || { bookings: 0, joins: 0 };
+          cur.bookings += r.bookings || 0;
+          cur.joins += r.joins || 0;
+          bookingsJoinsByCampaign.set(r.campaign, cur);
+        }
+      }
     }
 
     const assetKeys = Array.from(new Set(breakdownRows.map(r => r.asset_key)));
@@ -236,6 +319,7 @@ export async function GET(req: NextRequest) {
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0,
           adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,
+          bookings: null, cpb: null, joins: null, cpj: null,
           _adIdSet: new Set<string>(),
         };
         bucket.set(canonicalKey, row);
@@ -282,6 +366,23 @@ export async function GET(req: NextRequest) {
         allCampaigns.sort((a, b) => b.spend - a.spend);
         const campaignsTruncated = allCampaigns.length > CAMPAIGNS_CAP;
         const campaigns = campaignsTruncated ? allCampaigns.slice(0, CAMPAIGNS_CAP) : allCampaigns;
+
+        // Attribute bookings/joins across ALL of this card's campaigns (not
+        // just the top-50 shown in `campaigns`) — the estimate shouldn't
+        // silently drop share from a card's long tail of smaller campaigns.
+        let bookings: number | null = null;
+        let joins: number | null = null;
+        let hasBookingsData = false;
+        for (const c of allCampaigns) {
+          const totals = bookingsJoinsByCampaign.get(c.name);
+          const totalSpend = campaignTotalSpend.get(c.name);
+          if (!totals || !totalSpend || totalSpend <= 0) continue;
+          const share = c.spend / totalSpend;
+          bookings = (bookings ?? 0) + totals.bookings * share;
+          joins = (joins ?? 0) + totals.joins * share;
+          hasBookingsData = true;
+        }
+
         out.push({
           ...row,
           spend: Math.round(row.spend * 100) / 100,
@@ -292,6 +393,10 @@ export async function GET(req: NextRequest) {
           campaigns,
           campaignsTruncated,
           hidden: row.thumbnail === null,
+          bookings: hasBookingsData ? Math.round(bookings!) : null,
+          cpb: hasBookingsData && bookings! > 0 ? Math.round((row.spend / bookings!) * 100) / 100 : null,
+          joins: hasBookingsData ? Math.round(joins!) : null,
+          cpj: hasBookingsData && joins! > 0 ? Math.round((row.spend / joins!) * 100) / 100 : null,
         });
       }
       out.sort((a, b) => b.spend - a.spend);

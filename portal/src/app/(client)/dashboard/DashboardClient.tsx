@@ -189,6 +189,17 @@ let _enablePageImageFallback = false;
 // True only when an admin is viewing via impersonation — gates internal
 // diagnostic banners real clients shouldn't see (see Props.isAdminView).
 let _isAdminView = false;
+// True only while renderCreativesV3()'s card template is executing — the
+// card markup itself is byte-identical between renderCreativesV2 and
+// renderCreativesV3 (same template literal copy-pasted), so _isAdminView
+// alone can't tell them apart. The admin-only Bookings/Joins/Avg CPB stat
+// row is v3-only per an explicit admin request (2026-09-16), NOT because
+// the underlying data is unavailable on v2 — a v2 row backed by a cached-
+// mode account hits the exact same /api/meta/db/asset-breakdown route and
+// would carry real bookings/joins too, so `r.bookings !== null` alone isn't
+// a reliable v2-vs-v3 signal either. Set true/false at the very top of each
+// render function, read only inside the shared card template.
+let _renderingCreativesV3 = false;
 let _ghlBookingsByDay: Record<string, number> | null = null;
 let _ghlBookingsByCampaignId: Record<string, number> | null = null;
 
@@ -308,6 +319,15 @@ interface AssetBreakdownRow {
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
   hidden: boolean;
+  // Admin-only Bookings/Joins ESTIMATE (spend-share attribution via the KPI
+  // sheet, same method as the Theme Breakdown tab) — only ever rendered on
+  // Creatives v3 cards while _isAdminView is true (see renderCreativesV3).
+  // Present on v2 rows too (same shared type/route response shape) but
+  // deliberately never displayed there — v3-only per the admin's request.
+  bookings: number | null;
+  cpb: number | null;
+  joins: number | null;
+  cpj: number | null;
 }
 // DCO asset breakdown — the only section on the Creatives tab.
 let _dcoAssets: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsTotal: number; adsWithSpec: number; reason?: string } | null = null;
@@ -1394,6 +1414,10 @@ function renderDcoAssets() {
     accountId: s.accountId,
     theme: s.theme,
     ugcStatus: s.ugcStatus,
+    // Static (non-DCO) creatives have no bookings/joins attribution —
+    // /api/meta/db/creatives (the route _staticAssets comes from) doesn't
+    // compute it, unlike /api/meta/db/asset-breakdown for DCO assets.
+    bookings: null, cpb: null, joins: null, cpj: null,
   }));
 
   // Bucket static rows by type so they merge with the DCO image/video arrays.
@@ -1814,6 +1838,12 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
         ...canonicalRow,
         spend: 0, results: 0, impressions: 0, linkClicks: 0, ctr: 0, cpl: 0,
         adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false,
+        // Same reset-to-zero-equivalent rationale as spend/results above —
+        // canonicalRow's own bookings/joins get added exactly once by the
+        // accumulation branch below as the loop reaches it, so seeding from
+        // its real value here would double-count it. null (not 0) since
+        // these can be genuinely absent, not just empty.
+        bookings: null, cpb: null, joins: null, cpj: null,
         contributingAccountIds: [canonicalRow.accountId],
       });
       // Fall through so this same row's own numbers still get added by
@@ -1825,6 +1855,10 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
       seeded.linkClicks += row.linkClicks;
       seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
       seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
+      if (row.bookings !== null) seeded.bookings = (seeded.bookings ?? 0) + row.bookings;
+      if (row.joins !== null) seeded.joins = (seeded.joins ?? 0) + row.joins;
+      seeded.cpb = seeded.bookings && seeded.bookings > 0 ? Math.round((seeded.spend / seeded.bookings) * 100) / 100 : null;
+      seeded.cpj = seeded.joins && seeded.joins > 0 ? Math.round((seeded.spend / seeded.joins) * 100) / 100 : null;
       seeded.adCount += row.adCount;
       seeded.adIds = [...seeded.adIds, ...row.adIds];
       seeded.ads = [...seeded.ads, ...row.ads];
@@ -1843,6 +1877,10 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
     existing.linkClicks += row.linkClicks;
     existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
     existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+    if (row.bookings !== null) existing.bookings = (existing.bookings ?? 0) + row.bookings;
+    if (row.joins !== null) existing.joins = (existing.joins ?? 0) + row.joins;
+    existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
+    existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
     existing.adCount += row.adCount;
     existing.adIds = [...existing.adIds, ...row.adIds];
     existing.ads = [...existing.ads, ...row.ads];
@@ -1960,6 +1998,7 @@ function _renderCreativesAdminSummary(containerId: string, rows: AssetBreakdownR
 // separate sub-tabs, and each card's campaign breakdown is an inline
 // <details> expansion instead of opening the shared creative-detail modal.
 function renderCreativesV2() {
+  _renderingCreativesV3 = false;
   const summaryWrap = document.getElementById('creatives-v2-summary');
   const reconWrap = document.getElementById('creatives-v2-recon');
   const grid = document.getElementById('creatives-v2-grid');
@@ -2009,6 +2048,10 @@ function renderCreativesV2() {
     accountId: s.accountId,
     theme: s.theme,
     ugcStatus: s.ugcStatus,
+    // Static (non-DCO) creatives have no bookings/joins attribution —
+    // /api/meta/db/creatives (the route _staticAssets comes from) doesn't
+    // compute it, unlike /api/meta/db/asset-breakdown for DCO assets.
+    bookings: null, cpb: null, joins: null, cpj: null,
   }));
   const dcoImages = _dcoAssets?.images || [];
   const dcoVideos = _dcoAssets?.videos || [];
@@ -2213,6 +2256,11 @@ function renderCreativesV2() {
             <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
             <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
             <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+            ${_isAdminView && _renderingCreativesV3 ? `
+            <div class="text-slate-500" title="Estimated — split from campaign-level KPI sheet totals by this creative's spend share, not Meta-reported per-creative data">Bookings <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.bookings !== null ? r.bookings.toLocaleString('en-US') : '—'}</div>
+            <div class="text-slate-500" title="Estimated — same spend-share method as Bookings">Avg. CPB <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.cpb !== null ? '$'+r.cpb.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</div>
+            <div class="text-slate-500" title="Estimated — split from campaign-level KPI sheet totals by this creative's spend share, not Meta-reported per-creative data">Joins <span class="text-slate-600">~</span></div><div class="text-right font-mono text-sky-300">${r.joins !== null ? r.joins.toLocaleString('en-US') : '—'}</div>
+            ` : ''}
           </div>
           ${campaignCount > 0 ? `
             <details class="text-[11px]" onclick="event.stopPropagation()">
@@ -2252,6 +2300,7 @@ function renderCreativesV2() {
 // risk of an accidental behavior change leaking in from this tab, and the
 // two are expected to diverge further once v3 fully replaces v2 later.
 function renderCreativesV3() {
+  _renderingCreativesV3 = true;
   const summaryWrap = document.getElementById('creatives-v3-summary');
   const reconWrap = document.getElementById('creatives-v3-recon');
   const grid = document.getElementById('creatives-v3-grid');
@@ -2298,6 +2347,10 @@ function renderCreativesV3() {
     accountId: s.accountId,
     theme: s.theme,
     ugcStatus: s.ugcStatus,
+    // Static (non-DCO) creatives have no bookings/joins attribution —
+    // /api/meta/db/creatives (the route _staticAssets comes from) doesn't
+    // compute it, unlike /api/meta/db/asset-breakdown for DCO assets.
+    bookings: null, cpb: null, joins: null, cpj: null,
   }));
   const dcoImages = _dcoAssetsV3?.images || [];
   const dcoVideos = _dcoAssetsV3?.videos || [];
@@ -2503,6 +2556,11 @@ function renderCreativesV3() {
             <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
             <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
             <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+            ${_isAdminView && _renderingCreativesV3 ? `
+            <div class="text-slate-500" title="Estimated — split from campaign-level KPI sheet totals by this creative's spend share, not Meta-reported per-creative data">Bookings <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.bookings !== null ? r.bookings.toLocaleString('en-US') : '—'}</div>
+            <div class="text-slate-500" title="Estimated — same spend-share method as Bookings">Avg. CPB <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.cpb !== null ? '$'+r.cpb.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</div>
+            <div class="text-slate-500" title="Estimated — split from campaign-level KPI sheet totals by this creative's spend share, not Meta-reported per-creative data">Joins <span class="text-slate-600">~</span></div><div class="text-right font-mono text-sky-300">${r.joins !== null ? r.joins.toLocaleString('en-US') : '—'}</div>
+            ` : ''}
           </div>
           ${campaignCount > 0 ? `
             <details class="text-[11px]" onclick="event.stopPropagation()">
@@ -2672,6 +2730,18 @@ async function fetchDcoAssets() {
           existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
           existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
           if (!existing.thumbnail && a.thumbnail) existing.thumbnail = a.thumbnail;
+          // Each contributing account's bookings/joins are already that
+          // account's own spend-share estimate (computed server-side against
+          // that SAME campaign's real total spend across every account) —
+          // summing them across accounts is valid the same way spend/results
+          // already are. null-safe: a null (no matching sheet campaign) on
+          // either side must not silently turn a real number into 0. Only
+          // ever rendered on Creatives v3 (see renderCreativesV3) but kept
+          // correct here too since v2 shares this same merge function.
+          if (a.bookings !== null) existing.bookings = (existing.bookings ?? 0) + a.bookings;
+          if (a.joins !== null) existing.joins = (existing.joins ?? 0) + a.joins;
+          existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
+          existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
         }
       };
       mergeInto(imageMap, r.images || []);
@@ -2885,6 +2955,18 @@ async function fetchDcoAssetsV3() {
           existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
           existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
           if (!existing.thumbnail && a.thumbnail) existing.thumbnail = a.thumbnail;
+          // Each contributing account's bookings/joins are already that
+          // account's own spend-share estimate (computed server-side against
+          // that SAME campaign's real total spend across every account) —
+          // summing them across accounts is valid the same way spend/results
+          // already are. null-safe: a null (no matching sheet campaign) on
+          // either side must not silently turn a real number into 0. Only
+          // ever rendered on Creatives v3 (see renderCreativesV3) but kept
+          // correct here too since v2 shares this same merge function.
+          if (a.bookings !== null) existing.bookings = (existing.bookings ?? 0) + a.bookings;
+          if (a.joins !== null) existing.joins = (existing.joins ?? 0) + a.joins;
+          existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
+          existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
         }
       };
       mergeInto(imageMap, r.images || []);
