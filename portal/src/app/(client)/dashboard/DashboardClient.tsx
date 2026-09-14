@@ -5460,7 +5460,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 </button>
               </div>
               <p className="text-[11px] text-slate-500 mt-1 mb-3">
-                Spend/Impressions/Link Clicks/CTR/Leads/CPL are real Meta creative-breakdown totals, summed across every ad account this client can see. Reach and Bookings/CPB/Joins/CPJ show as &mdash; &mdash; Meta has no per-creative Reach in this breakdown, and Bookings/Joins only exist as client-level totals from the separate KPI sheet with no way to attribute either back to one creative.
+                Spend/Impressions/Link Clicks/CTR/Leads/CPL are real Meta creative-breakdown totals, summed across every ad account this client can see. Reach shows as &mdash; &mdash; Meta has no per-creative Reach in this breakdown. Bookings/CPB/Joins/CPJ are ESTIMATED: the KPI sheet only reports bookings/joins per campaign, never per creative, so each campaign&apos;s total is split across the creatives that ran in it, proportional to each one&apos;s share of that campaign&apos;s spend &mdash; not Meta-reported per-creative data. Shows &mdash; wherever no sheet data exists for a bucket&apos;s campaigns.
               </p>
               <div className="flex items-start gap-2 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 mb-4">
                 <i data-lucide="info" className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
