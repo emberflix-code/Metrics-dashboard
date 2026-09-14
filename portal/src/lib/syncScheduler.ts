@@ -42,6 +42,20 @@ function etHourToUtc(y: number, mo: number, d: number, hourEt: number): Date {
   return guess;
 }
 
+// Today's calendar date in America/New_York, as YYYY-MM-DD — used as the
+// catch-up key (see startDailySyncScheduler): a run is "today's run"
+// regardless of which UTC instant it actually executes at.
+function todayEtDate(from: Date): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(from);
+  const y = parts.find(p => p.type === 'year')?.value;
+  const mo = parts.find(p => p.type === 'month')?.value;
+  const d = parts.find(p => p.type === 'day')?.value;
+  return `${y}-${mo}-${d}`;
+}
+
 // Next occurrence of SCHEDULED_HOUR_ET:00 in America/New_York, as a UTC Date.
 function nextScheduledRun(from: Date): Date {
   const parts = new Intl.DateTimeFormat('en-US', {
@@ -89,6 +103,11 @@ async function getAllAccountIds(): Promise<string[]> {
 async function runDailySync() {
   const startedAt = new Date().toISOString();
   console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:start', startedAt }));
+  const runEtDate = todayEtDate(new Date());
+  await query(
+    `INSERT INTO sync_scheduler_state (id, last_run_started_at, updated_at) VALUES ('daily', now(), now())
+     ON CONFLICT (id) DO UPDATE SET last_run_started_at = now(), updated_at = now()`
+  ).catch(err => console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:stateWriteError', error: err instanceof Error ? err.message : String(err) })));
 
   let accountIds: string[] = [];
   try {
@@ -114,7 +133,16 @@ async function runDailySync() {
     await new Promise(r => setTimeout(r, PAUSE_BETWEEN_ACCOUNTS_MS));
   }
 
-  console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:complete', startedAt, finishedAt: new Date().toISOString() }));
+  // Recorded by ET CALENDAR DATE, not by whichever run started it — a
+  // catch-up run that fires late in the day (see startDailySyncScheduler)
+  // still marks the same ET day as done, so a normal-time run later that
+  // same day doesn't needlessly fire again.
+  await query(
+    `UPDATE sync_scheduler_state SET last_completed_et_date = $1, updated_at = now() WHERE id = 'daily'`,
+    [runEtDate]
+  ).catch(err => console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:stateWriteError', error: err instanceof Error ? err.message : String(err) })));
+
+  console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:complete', startedAt, finishedAt: new Date().toISOString(), runEtDate }));
 }
 
 // setTimeout's delay param is a 32-bit signed int (~24.8 days max) — a wait
@@ -139,10 +167,50 @@ function scheduleNextRun() {
   }, delay);
 }
 
+// Catches up a day the in-memory setTimeout chain lost to a process
+// restart. That chain is the ONLY thing that used to remember "did today's
+// run happen" — a Railway redeploy (which restarts the process on every
+// push, several times a week here) destroys it, so a deploy landing at or
+// after SCHEDULED_HOUR_ET silently skipped that entire day with nothing to
+// notice or retry. Confirmed live: multiple accounts had a clean day-by-day
+// insights history except for holes lining up exactly with deploys on
+// 2026-08-21/22 and 2026-09-11/12. This runs once on boot, before the
+// normal schedule is armed — if today's ET date hasn't been marked
+// complete AND today's scheduled hour has already passed, run immediately
+// instead of waiting up to 24h for the next scheduled slot.
+async function catchUpMissedRunIfNeeded(): Promise<void> {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(now);
+  const y = Number(parts.find(p => p.type === 'year')?.value);
+  const mo = Number(parts.find(p => p.type === 'month')?.value);
+  const d = Number(parts.find(p => p.type === 'day')?.value);
+  const todaysScheduledRun = etHourToUtc(y, mo, d, SCHEDULED_HOUR_ET);
+  if (now.getTime() < todaysScheduledRun.getTime()) return; // today's slot hasn't arrived yet — nothing to catch up
+
+  const todayEt = todayEtDate(now);
+  let lastCompleted: string | null = null;
+  try {
+    const [state] = await query<{ last_completed_et_date: string | null }>(
+      `SELECT last_completed_et_date FROM sync_scheduler_state WHERE id = 'daily'`
+    );
+    lastCompleted = state?.last_completed_et_date ?? null;
+  } catch (err) {
+    console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'catchup:stateReadError', error: err instanceof Error ? err.message : String(err) }));
+    return; // can't tell if a catch-up is needed — safer to skip than double-run
+  }
+  if (lastCompleted === todayEt) return; // already ran today, nothing to catch up
+
+  console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'catchup:triggered', todayEt, lastCompleted }));
+  await runDailySync().catch(err => console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'catchup:fatal', error: err instanceof Error ? err.message : String(err) })));
+}
+
 export function startDailySyncScheduler() {
   if (started) return; // instrumentation.ts's register() can fire more than once per process in some Next.js dev-mode reload scenarios
   started = true;
 
   console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'scheduler:armed', scheduledHourEt: SCHEDULED_HOUR_ET }));
-  scheduleNextRun();
+  catchUpMissedRunIfNeeded().finally(scheduleNextRun);
 }

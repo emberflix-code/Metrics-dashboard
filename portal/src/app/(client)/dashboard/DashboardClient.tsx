@@ -341,9 +341,9 @@ let _creativesV3Type: 'video' | 'image' = 'image';
 let _creativesV3Sort: 'spend' | 'results' | 'cpl' | 'ctr' = 'cpl';
 let _creativesV3OnlyWithResults = true;
 // Admin-only (see the button's _isAdminView gating below): show only assets
-// with neither a Theme nor a UGC tag set, so an admin can find untagged
-// creatives without hunting through the full grid. Off by default — a real
-// client should never land on a filtered view by accident.
+// missing a Theme tag, a UGC tag, or both, so an admin can find incompletely
+// tagged creatives without hunting through the full grid. Off by default —
+// a real client should never land on a filtered view by accident.
 let _creativesV3OnlyUntagged = false;
 // Mirrors _dcoShowHidden from the original Creatives tab. Unlike v1 (where
 // "hidden" usually means a permanently broken/expired Meta URL) or v2 (which
@@ -2342,14 +2342,19 @@ function renderCreativesV3() {
   }
   const activeBeforeUntaggedFilter = active;
   if (_isAdminView && _creativesV3OnlyUntagged) {
-    active = active.filter(r => !r.theme && !r.ugcStatus);
+    // "Incomplete" = missing Theme OR UGC (not just both) — found live
+    // 2026-09-14: a bulk Theme tagging pass left ~1,800 creatives with a
+    // Theme but no UGC status, which the old "no Theme AND no UGC" filter
+    // completely missed (it only ever matched the much smaller
+    // fully-untagged set), hiding the real gap from admins.
+    active = active.filter(r => !r.theme || !r.ugcStatus);
   }
 
   _renderCreativesAdminSummary('creatives-v3-admin-summary', active);
 
   if (active.length === 0) {
     if (_isAdminView && _creativesV3OnlyUntagged && activeBeforeUntaggedFilter.length > 0) {
-      grid.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">Every ${_creativesV3Type} shown here already has a Theme or UGC tag. Turn off &ldquo;Untagged only&rdquo; above to see all ${activeBeforeUntaggedFilter.length}.</div>`;
+      grid.innerHTML = `<div class="col-span-full text-center py-12 text-slate-500 text-sm">Every ${_creativesV3Type} shown here already has both a Theme and a UGC tag. Turn off &ldquo;Incomplete tags only&rdquo; above to see all ${activeBeforeUntaggedFilter.length}.</div>`;
       return;
     }
     if (activeBeforeResultsFilter.length > 0 && _creativesV3OnlyWithResults) {
@@ -4872,13 +4877,13 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     <button
                       id="creatives-v3-only-untagged-btn"
                       className="sort-btn ml-1"
-                      title="Show only assets with no Theme and no UGC tag set"
+                      title="Show only assets missing a Theme tag, a UGC tag, or both"
                       onClick={(e) => {
                         _creativesV3OnlyUntagged = !_creativesV3OnlyUntagged;
                         (e.currentTarget as HTMLButtonElement).classList.toggle('active-sort-btn', _creativesV3OnlyUntagged);
                         renderCreativesV3();
                       }}
-                    >Untagged only</button>
+                    >Incomplete tags only</button>
                   )}
                   <button
                     id="creatives-v3-show-hidden-btn"

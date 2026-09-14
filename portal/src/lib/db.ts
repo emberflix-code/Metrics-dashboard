@@ -157,6 +157,26 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
     await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS newest_synced TEXT`).catch(() => {});
     await pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS creatives_newest_synced TEXT`).catch(() => {});
 
+    // Single-row table (id always 'daily') tracking the daily sync
+    // scheduler's own progress, DB-backed rather than in-memory — see
+    // src/lib/syncScheduler.ts. The in-memory setTimeout chain that used to
+    // be the only record of "did today's run happen" is destroyed on every
+    // process restart (Railway restarts on every deploy), so a redeploy
+    // landing at/after the scheduled hour silently skipped that entire
+    // day's sync with no trace and no catch-up — confirmed live: multiple
+    // accounts had clean day-by-day insights except for Fri/Sat gaps that
+    // line up exactly with deploys on 2026-08-21/22 and 2026-09-11/12.
+    // last_completed_et_date lets the scheduler catch up on boot instead of
+    // only ever waiting for the next scheduled time.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sync_scheduler_state (
+        id                    TEXT PRIMARY KEY DEFAULT 'daily',
+        last_completed_et_date TEXT,
+        last_run_started_at  TIMESTAMPTZ,
+        updated_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meta_entities (
         account_id       TEXT NOT NULL,
