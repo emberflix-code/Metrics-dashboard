@@ -19,7 +19,55 @@ import { syncAccount } from './metaSync';
 
 const RUN_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 const PAUSE_BETWEEN_ACCOUNTS_MS = 20_000; // same deliberate pacing as the manual backfill queue, to avoid Meta rate limits
+const SCHEDULED_HOUR_ET = 6; // 6:00 AM America/New_York (handles EST/EDT automatically), per 2026-09-12 request
 let started = false;
+
+// Finds the UTC instant for a given wall-clock hour in America/New_York by
+// searching outward from a UTC guess and checking Intl's own rendering of
+// each candidate — sidesteps manually computing the EST/EDT offset (which
+// changes twice a year) since Intl already knows the real rule.
+function etHourToUtc(y: number, mo: number, d: number, hourEt: number): Date {
+  // ET is always UTC-4 or UTC-5, so the true instant lies within a few hours
+  // of this guess; nudge until Intl agrees on the resulting ET wall-clock hour.
+  let guess = new Date(Date.UTC(y, mo - 1, d, hourEt + 5, 0, 0));
+  for (let i = 0; i < 4; i++) {
+    const renderedHour = Number(
+      new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', hour12: false, hour: '2-digit' })
+        .format(guess)
+    );
+    const renderedDay = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', day: '2-digit' }).format(guess);
+    if (renderedHour === hourEt && Number(renderedDay) === d) break;
+    guess = new Date(guess.getTime() + (hourEt - renderedHour) * 60 * 60 * 1000);
+  }
+  return guess;
+}
+
+// Next occurrence of SCHEDULED_HOUR_ET:00 in America/New_York, as a UTC Date.
+function nextScheduledRun(from: Date): Date {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/New_York', hour12: false,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(from);
+  const y = Number(parts.find(p => p.type === 'year')?.value);
+  const mo = Number(parts.find(p => p.type === 'month')?.value);
+  const d = Number(parts.find(p => p.type === 'day')?.value);
+
+  let candidate = etHourToUtc(y, mo, d, SCHEDULED_HOUR_ET);
+  if (candidate.getTime() <= from.getTime()) {
+    const tomorrow = new Date(candidate.getTime() + RUN_INTERVAL_MS);
+    const tParts = new Intl.DateTimeFormat('en-US', {
+      timeZone: 'America/New_York', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit',
+    }).formatToParts(tomorrow);
+    candidate = etHourToUtc(
+      Number(tParts.find(p => p.type === 'year')?.value),
+      Number(tParts.find(p => p.type === 'month')?.value),
+      Number(tParts.find(p => p.type === 'day')?.value),
+      SCHEDULED_HOUR_ET
+    );
+  }
+  return candidate;
+}
 
 async function getAllAccountIds(): Promise<string[]> {
   // IMPORTANT: source this from clients.ad_account_ids, NOT
@@ -69,20 +117,32 @@ async function runDailySync() {
   console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:complete', startedAt, finishedAt: new Date().toISOString() }));
 }
 
+// setTimeout's delay param is a 32-bit signed int (~24.8 days max) — a wait
+// until tomorrow's 6am ET is always well under that, but this guards against
+// any future SCHEDULED_HOUR_ET/interval change that could exceed it, by
+// chaining shorter timeouts instead of overflowing into an immediate fire.
+const MAX_TIMEOUT_MS = 2_147_000_000;
+
+function scheduleNextRun() {
+  const target = nextScheduledRun(new Date());
+  const delay = target.getTime() - Date.now();
+  console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:scheduled', nextRunAt: target.toISOString(), delayMs: delay }));
+
+  if (delay > MAX_TIMEOUT_MS) {
+    setTimeout(scheduleNextRun, MAX_TIMEOUT_MS);
+    return;
+  }
+  setTimeout(() => {
+    runDailySync()
+      .catch(err => console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:fatal', error: err instanceof Error ? err.message : String(err) })))
+      .finally(scheduleNextRun);
+  }, delay);
+}
+
 export function startDailySyncScheduler() {
   if (started) return; // instrumentation.ts's register() can fire more than once per process in some Next.js dev-mode reload scenarios
   started = true;
 
-  console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'scheduler:armed', intervalMs: RUN_INTERVAL_MS }));
-
-  // Fire once shortly after boot (covers the case where the process was
-  // down across a would-be run, e.g. a redeploy), then on a fixed interval.
-  // A short initial delay avoids competing with the rest of the app's own
-  // startup work for DB connections.
-  setTimeout(() => {
-    runDailySync().catch(err => console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:fatal', error: err instanceof Error ? err.message : String(err) })));
-    setInterval(() => {
-      runDailySync().catch(err => console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:fatal', error: err instanceof Error ? err.message : String(err) })));
-    }, RUN_INTERVAL_MS);
-  }, 60_000);
+  console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'scheduler:armed', scheduledHourEt: SCHEDULED_HOUR_ET }));
+  scheduleNextRun();
 }
