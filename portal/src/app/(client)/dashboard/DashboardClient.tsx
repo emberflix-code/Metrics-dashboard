@@ -3016,6 +3016,26 @@ function renderThemeBreakdown() {
   wrap.innerHTML = renderTable('Theme', _themeBreakdown.byTheme) + renderTable('UGC vs. Non-UGC', _themeBreakdown.byUgc);
 }
 
+function exportThemeBreakdownCsv() {
+  if (!_themeBreakdown || (_themeBreakdown.byTheme.length === 0 && _themeBreakdown.byUgc.length === 0)) {
+    showNotification('No data to export yet', 'error');
+    return;
+  }
+  const headers = ['Section', 'Category', 'Spend', 'Reach', 'Impressions', 'Link Clicks', 'CTR', 'Leads', 'CPL', 'Bookings', 'CPB', 'Joins', 'CPJ'];
+  const csvValue = (n: number | null) => n === null ? '' : n;
+  const toCsvRows = (section: string, rows: ThemeBreakdownRow[]) => rows.map(r => [
+    section, r.label, r.spend, csvValue(r.reach), r.impressions, r.linkClicks, r.ctr,
+    r.leads, csvValue(r.cpl), csvValue(r.bookings), csvValue(r.cpb), csvValue(r.joins), csvValue(r.cpj),
+  ]);
+  const allRows = [
+    ...toCsvRows('Theme', _themeBreakdown.byTheme),
+    ...toCsvRows('UGC vs. Non-UGC', _themeBreakdown.byUgc),
+  ];
+  const csv = [headers, ...allRows].map(r => r.map(v => `"${v}"`).join(',')).join('\n');
+  downloadFile(csv, 'theme-breakdown-' + new Date().toISOString().split('T')[0] + '.csv', 'text/csv');
+  showNotification('Downloaded CSV', 'success');
+}
+
 // Kick off a sheet fetch for this Meta client when use_sheet_for_leads is on.
 // Cached in _sheetLeadsByDay (keyed by YYYY-MM-DD) and read by renderCards.
 // Reused across reloads — only the first call hits the network because the
@@ -4880,12 +4900,27 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <div id="creatives-v3-grid" className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3"></div>
             </div>
             <div id="theme-breakdown-view" className="hidden p-5">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2 mb-1">
-                <i data-lucide="pie-chart" className="w-3.5 h-3.5 text-amber-400"></i> Theme Breakdown — creative performance by Theme and by UGC status
-              </h3>
-              <p className="text-[11px] text-slate-500 mt-1 mb-4">
+              <div className="flex items-center justify-between gap-3 mb-1">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+                  <i data-lucide="pie-chart" className="w-3.5 h-3.5 text-amber-400"></i> Theme Breakdown — creative performance by Theme and by UGC status
+                </h3>
+                <button
+                  onClick={() => exportThemeBreakdownCsv()}
+                  className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2 shrink-0"
+                >
+                  <i data-lucide="download" className="w-3 h-3"></i><span>Export CSV</span>
+                </button>
+              </div>
+              <p className="text-[11px] text-slate-500 mt-1 mb-3">
                 Spend/Impressions/Link Clicks/CTR/Leads/CPL are real Meta creative-breakdown totals, summed across every ad account this client can see. Reach and Bookings/CPB/Joins/CPJ show as &mdash; &mdash; Meta has no per-creative Reach in this breakdown, and Bookings/Joins only exist as client-level totals from the separate KPI sheet with no way to attribute either back to one creative.
               </p>
+              <div className="flex items-start gap-2 bg-amber-500/5 border border-amber-500/20 rounded-lg p-3 mb-4">
+                <i data-lucide="info" className="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
+                <div className="text-amber-200/90 leading-relaxed text-[11px]">
+                  <span className="font-semibold">Why these totals won&apos;t match your Account Spend/Leads cards:</span> this table only includes ads that (1) run Dynamic Creative Optimization &mdash; Meta&apos;s per-creative breakdown doesn&apos;t exist for static (non-DCO) ads, same as the Creatives tabs, and (2) have a Theme or UGC tag set by an admin &mdash; an untagged creative&apos;s spend and leads aren&apos;t added to any row here, they simply don&apos;t appear. Spend/leads from static ads and from untagged creatives are still counted in your top-line KPI cards, so this tab will always undercount versus those.
+                  <div className="mt-1 text-slate-500">Use this tab to compare Theme/UGC categories against each other, not as a second total for your whole account.</div>
+                </div>
+              </div>
               <div id="theme-breakdown-content"></div>
             </div>
           </div>
