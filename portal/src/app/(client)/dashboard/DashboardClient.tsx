@@ -4487,8 +4487,17 @@ if (typeof window !== 'undefined') {
       // one account (see mergeInto/contributingAccountIds), propagate the
       // tag to every contributing account's own row, not just the one
       // `accountId` this dropdown's onclick happened to be rendered with.
-      const row = [..._dcoAssets?.images || [], ..._dcoAssets?.videos || [], ..._dcoAssetsV3?.images || [], ..._dcoAssetsV3?.videos || []]
-        .find(r => r.assetKey === assetKey && r.accountId === accountId);
+      // MUST include _staticAssets/_staticAssetsV3 (non-DCO creatives,
+      // where most VIDEO ads actually live — see the merge in
+      // renderCreativesV2/V3 that combines dcoVideos + staticVideos into
+      // one `videos` array) alongside _dcoAssets/_dcoAssetsV3 — omitting
+      // them here meant a static video's card was never found, so
+      // contributingAccountIds silently fell back to just [accountId].
+      const row: { assetKey: string; accountId: string; contributingAccountIds?: string[] } | undefined = [
+        ..._dcoAssets?.images || [], ..._dcoAssets?.videos || [],
+        ..._dcoAssetsV3?.images || [], ..._dcoAssetsV3?.videos || [],
+        ..._staticAssets || [], ..._staticAssetsV3 || [],
+      ].find(r => r.assetKey === assetKey && r.accountId === accountId);
       const accountIds = row?.contributingAccountIds && row.contributingAccountIds.length > 1
         ? row.contributingAccountIds
         : [accountId];
@@ -4501,20 +4510,29 @@ if (typeof window !== 'undefined') {
         const json = await res.json().catch(() => ({}));
         throw new Error(json.error || 'Save failed');
       }
-      const patch = (row: AssetBreakdownRow) => { if (row.assetKey === assetKey) (row as any)[field] = value || null; };
+      // Same reasoning as the row lookup above — a static (non-DCO) video's
+      // theme/ugcStatus lives in _staticAssets/_staticAssetsV3, not
+      // _dcoAssets/_dcoAssetsV3. Found live 2026-09-15: videos specifically
+      // kept reverting to untagged after the DCO-only patch shipped,
+      // because most of this account's videos are static, not DCO — the
+      // save succeeded and even the DCO-array patch ran fine, it just
+      // never touched the array the visible video card actually reads from.
+      const patch = (row: { assetKey: string; theme?: string | null; ugcStatus?: string | null }) => { if (row.assetKey === assetKey) (row as any)[field] = value || null; };
       if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
       if (_dcoAssetsV3) { _dcoAssetsV3.images.forEach(patch); _dcoAssetsV3.videos.forEach(patch); }
+      if (_staticAssets) { _staticAssets.forEach(patch); }
+      if (_staticAssetsV3) { _staticAssetsV3.forEach(patch); }
       // Re-render whichever grid is actually visible — without this, the
-      // patched theme/ugcStatus sits correctly in _dcoAssets/_dcoAssetsV3
-      // but the DOM keeps showing whatever was last rendered (the native
-      // <select>'s own post-click value only LOOKS current) until some
-      // unrelated event happens to trigger a re-render (a phash-hash batch
-      // finishing, a tab switch, a date change). Found live 2026-09-15:
-      // admins saw a just-tagged creative revert to blank because the
-      // client-side merge (_mergeCreativesByPhash) only re-runs inside
-      // render*(), and nothing was calling it right after a successful
-      // save — the tag was safe in memory and in the DB the whole time,
-      // the rendered card just hadn't caught up.
+      // patched theme/ugcStatus sits correctly in memory but the DOM keeps
+      // showing whatever was last rendered (the native <select>'s own
+      // post-click value only LOOKS current) until some unrelated event
+      // happens to trigger a re-render (a phash-hash batch finishing, a
+      // tab switch, a date change). Found live 2026-09-15: admins saw a
+      // just-tagged creative revert to blank because the client-side merge
+      // (_mergeCreativesByPhash) only re-runs inside render*(), and
+      // nothing was calling it right after a successful save — the tag was
+      // safe in memory and in the DB the whole time, the rendered card
+      // just hadn't caught up.
       if (!document.getElementById('creatives-v2-view')?.classList.contains('hidden')) renderCreativesV2();
       if (!document.getElementById('creatives-v3-view')?.classList.contains('hidden')) renderCreativesV3();
       showNotification(`${field === 'theme' ? 'Theme' : 'Type'} saved`, 'success', 2000);
