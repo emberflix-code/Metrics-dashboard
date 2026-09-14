@@ -1698,7 +1698,7 @@ const _CREATIVES_V2_BOTTOM_HASH_THRESHOLD = 4;
 // false): only cluster within the same account, matching mergeInto's
 // default. When the client has opted into cross-account creative tagging,
 // this clustering is allowed across accounts too, same as mergeInto.
-function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean, bottomHashOf: (k: string) => string | null): Map<string, string> {
+function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean, bottomHashOf: (k: string) => string | null, taggedOf: (k: string) => boolean): Map<string, string> {
   const canonicalOf = new Map<string, string>();
   const withHash = assetKeys.filter(k => hashOf(k));
   for (const k of assetKeys) if (!hashOf(k)) canonicalOf.set(k, k);
@@ -1732,7 +1732,29 @@ function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => 
       union(withHash[i], withHash[j]);
     }
   }
-  for (const k of withHash) canonicalOf.set(k, find(k));
+  // Group by union-find root, then pick each group's canonical key the SAME
+  // way the server's clusterByPerceptualHash (lib/phash.ts) does: prefer a
+  // tagged member, else the lexicographically smallest key — this function
+  // used to just take the union-find root directly (always lexicographically
+  // smallest, root choice has no tagged-awareness), contradicting its own
+  // doc comment and silently reverting a saved tag whenever the tagged
+  // asset_key wasn't the smallest string in its cluster. Confirmed live
+  // 2026-09-14: an admin tagged a creative, the save succeeded server-side,
+  // but the merged card reverted to untagged on refresh because this pick
+  // landed on a different, untagged sibling asset_key in the same cluster.
+  const membersByRoot = new Map<string, string[]>();
+  for (const k of withHash) {
+    const root = find(k);
+    const list = membersByRoot.get(root) || [];
+    list.push(k);
+    membersByRoot.set(root, list);
+  }
+  for (const members of Array.from(membersByRoot.values())) {
+    const lexicographicWinner = members.reduce((min, m) => (m < min ? m : min));
+    const taggedMember = members.find(m => taggedOf(m));
+    const winner = taggedMember ?? lexicographicWinner;
+    for (const m of members) canonicalOf.set(m, winner);
+  }
   return canonicalOf;
 }
 
@@ -1760,7 +1782,11 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
     return row?.thumbnail ? (_creativesV2BottomHashCache.get(row.thumbnail) ?? null) : null;
   };
   const accountIdOfKey = (assetKey: string) => rows.find(r => r.assetKey === assetKey)?.accountId ?? null;
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(rows.map(r => r.assetKey), phashOf, accountIdOfKey, crossAccountEnabled, bottomHashOf);
+  const taggedOf = (assetKey: string) => {
+    const row = rows.find(r => r.assetKey === assetKey);
+    return !!(row?.theme || row?.ugcStatus);
+  };
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(rows.map(r => r.assetKey), phashOf, accountIdOfKey, crossAccountEnabled, bottomHashOf, taggedOf);
   if (!Array.from(canonicalKeyOf.values()).some((v, i) => v !== rows.map(r => r.assetKey)[i])) return rows;
 
   const merged = new Map<string, AssetBreakdownRow>();
@@ -2015,11 +2041,12 @@ function renderCreativesV2() {
   // Summary + reconciliation row — video/image totals vs. the same KPI-card
   // totals the rest of the dashboard shows, so this reads as trustworthy
   // rather than a second, disconnected set of numbers.
-  const sumOf = (rows: AssetBreakdownRow[], field: 'spend'|'impressions'|'results') =>
+  const sumOf = (rows: AssetBreakdownRow[], field: 'spend'|'impressions'|'results'|'linkClicks') =>
     rows.reduce((acc, r) => acc + r[field], 0);
   const videoLeads = sumOf(videos, 'results');
   const imageLeads = sumOf(images, 'results');
   const combinedLeads = videoLeads + imageLeads;
+  const combinedLinkClicks = sumOf(videos, 'linkClicks') + sumOf(images, 'linkClicks');
 
   if (summaryWrap) {
     const fmtMoney = (n: number) => `$${n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
@@ -2031,6 +2058,15 @@ function renderCreativesV2() {
     summaryWrap.innerHTML = [
       stat('Account Spend', _kpiSpendTotal !== null ? fmtMoney(_kpiSpendTotal) : '—'),
       stat('Account Impressions', _kpiImpressionsTotal !== null ? _kpiImpressionsTotal.toLocaleString('en-US') : '—'),
+      // Meta's per-creative breakdown has no Reach column anywhere in the
+      // schema (unlike Impressions/Spend/Leads/Link Clicks, which all come
+      // straight from meta_asset_breakdown_daily) — Reach only exists at
+      // the campaign/account level elsewhere in this dashboard. Shown as a
+      // dash rather than silently reusing the account-level number under a
+      // per-creative-looking label, same convention as the Theme Breakdown
+      // tab's Reach column.
+      stat('Reach', '—'),
+      stat('Link Clicks', combinedLinkClicks.toLocaleString('en-US')),
       stat('Video Leads', `${videoLeads}`),
       stat('Image Leads', `${imageLeads}`),
       stat('Account Leads', _kpiResultsTotal !== null ? `${_kpiResultsTotal}` : '—', true),
@@ -2279,11 +2315,12 @@ function renderCreativesV3() {
   images = _mergeCreativesByPhash(images, _enableCrossAccountCreativeTagging);
   videos = _mergeCreativesByPhash(videos, _enableCrossAccountCreativeTagging);
 
-  const sumOf = (rows: AssetBreakdownRow[], field: 'spend'|'impressions'|'results') =>
+  const sumOf = (rows: AssetBreakdownRow[], field: 'spend'|'impressions'|'results'|'linkClicks') =>
     rows.reduce((acc, r) => acc + r[field], 0);
   const videoLeads = sumOf(videos, 'results');
   const imageLeads = sumOf(images, 'results');
   const combinedLeads = videoLeads + imageLeads;
+  const combinedLinkClicks = sumOf(videos, 'linkClicks') + sumOf(images, 'linkClicks');
 
   if (summaryWrap) {
     const fmtMoney = (n: number) => `$${n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
@@ -2295,6 +2332,10 @@ function renderCreativesV3() {
     summaryWrap.innerHTML = [
       stat('Account Spend', _kpiSpendTotal !== null ? fmtMoney(_kpiSpendTotal) : '—'),
       stat('Account Impressions', _kpiImpressionsTotal !== null ? _kpiImpressionsTotal.toLocaleString('en-US') : '—'),
+      // See renderCreativesV2's identical Reach card for why this is always
+      // a dash — no per-creative Reach column exists anywhere in the schema.
+      stat('Reach', '—'),
+      stat('Link Clicks', combinedLinkClicks.toLocaleString('en-US')),
       stat('Video Leads', `${videoLeads}`),
       stat('Image Leads', `${imageLeads}`),
       stat('Account Leads', _kpiResultsTotal !== null ? `${_kpiResultsTotal}` : '—', true),
