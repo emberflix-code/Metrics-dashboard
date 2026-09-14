@@ -4504,6 +4504,19 @@ if (typeof window !== 'undefined') {
       const patch = (row: AssetBreakdownRow) => { if (row.assetKey === assetKey) (row as any)[field] = value || null; };
       if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
       if (_dcoAssetsV3) { _dcoAssetsV3.images.forEach(patch); _dcoAssetsV3.videos.forEach(patch); }
+      // Re-render whichever grid is actually visible — without this, the
+      // patched theme/ugcStatus sits correctly in _dcoAssets/_dcoAssetsV3
+      // but the DOM keeps showing whatever was last rendered (the native
+      // <select>'s own post-click value only LOOKS current) until some
+      // unrelated event happens to trigger a re-render (a phash-hash batch
+      // finishing, a tab switch, a date change). Found live 2026-09-15:
+      // admins saw a just-tagged creative revert to blank because the
+      // client-side merge (_mergeCreativesByPhash) only re-runs inside
+      // render*(), and nothing was calling it right after a successful
+      // save — the tag was safe in memory and in the DB the whole time,
+      // the rendered card just hadn't caught up.
+      if (!document.getElementById('creatives-v2-view')?.classList.contains('hidden')) renderCreativesV2();
+      if (!document.getElementById('creatives-v3-view')?.classList.contains('hidden')) renderCreativesV3();
       showNotification(`${field === 'theme' ? 'Theme' : 'Type'} saved`, 'success', 2000);
     } catch (e) {
       showNotification(e instanceof Error ? e.message : 'Save failed', 'error');

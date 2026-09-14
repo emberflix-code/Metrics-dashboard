@@ -13,16 +13,26 @@ const THEME_LABELS: Record<string, string> = {
 const THEME_ORDER = ['strength', 'tread', 'non-active', 'strength+tread'];
 
 interface Row {
-  spend: number; impressions: number; linkClicks: number; results: number;
+  spend: number; impressions: number; linkClicks: number; results: number; reach: number; hasReach: boolean;
 }
 function emptyRow(): Row {
-  return { spend: 0, impressions: 0, linkClicks: 0, results: 0 };
+  return { spend: 0, impressions: 0, linkClicks: 0, results: 0, reach: 0, hasReach: false };
 }
-function addInto(target: Row, spend: number, impressions: number, linkClicks: number, results: number) {
+function addInto(target: Row, spend: number, impressions: number, linkClicks: number, results: number, reach: number | null) {
   target.spend += spend;
   target.impressions += impressions;
   target.linkClicks += linkClicks;
   target.results += results;
+  // Nullable: reach was only added to meta_asset_breakdown_daily on
+  // 2026-09-15 (see db.ts) — rows synced before then have reach = NULL,
+  // not 0, so hasReach tracks whether ANY contributing row actually
+  // carries a real value. Without this, a theme whose spend is entirely
+  // from not-yet-re-synced rows would show "0" (looks like a real,
+  // confirmed zero-reach theme) instead of "—" (no data captured yet).
+  if (reach !== null) {
+    target.reach += reach;
+    target.hasReach = true;
+  }
 }
 
 // Theme/UGC creative-performance breakdown, across EVERY ad account this
@@ -85,10 +95,11 @@ export async function GET(req: NextRequest) {
       );
       if (allowedAdIds.size === 0) continue;
 
-      const rows = await query<{ asset_key: string; theme: string | null; ugc_status: string | null; spend: string; impressions: string; link_clicks: string; results: string }>(
+      const rows = await query<{ asset_key: string; theme: string | null; ugc_status: string | null; spend: string; impressions: string; link_clicks: string; results: string; reach: string | null; any_reach_synced: boolean }>(
         `SELECT b.asset_key, a.theme, a.ugc_status,
                 SUM(b.spend)::text AS spend, SUM(b.impressions)::text AS impressions,
-                SUM(b.link_clicks)::text AS link_clicks, SUM(b.results)::text AS results
+                SUM(b.link_clicks)::text AS link_clicks, SUM(b.results)::text AS results,
+                SUM(b.reach)::text AS reach, (COUNT(b.reach) > 0) AS any_reach_synced
          FROM meta_asset_breakdown_daily b
          JOIN meta_creative_assets a ON a.account_id = b.account_id AND a.asset_key = b.asset_key
          WHERE b.account_id = $1 AND b.date BETWEEN $2 AND $3 AND b.ad_id = ANY($4)
@@ -101,13 +112,17 @@ export async function GET(req: NextRequest) {
         const impressions = parseInt(r.impressions, 10) || 0;
         const linkClicks = parseInt(r.link_clicks, 10) || 0;
         const results = parseInt(r.results, 10) || 0;
+        // SUM() over an all-NULL group returns SQL NULL, not 0 — COUNT(b.reach)
+        // (which skips NULLs) is what actually tells us whether any
+        // contributing row has been re-synced with reach captured.
+        const reach = r.any_reach_synced ? (parseInt(r.reach || '0', 10) || 0) : null;
 
         if (r.theme && byTheme.has(r.theme)) {
-          addInto(byTheme.get(r.theme)!, spend, impressions, linkClicks, results);
+          addInto(byTheme.get(r.theme)!, spend, impressions, linkClicks, results, reach);
         }
         const ugcKey = r.ugc_status === 'ugc' ? 'ugc' : r.ugc_status === 'non-ugc' ? 'non-ugc' : null;
         if (ugcKey) {
-          addInto(byUgc.get(ugcKey)!, spend, impressions, linkClicks, results);
+          addInto(byUgc.get(ugcKey)!, spend, impressions, linkClicks, results, reach);
         }
         // Unlike Theme/UGC (admin-tag-dependent, so a real gap exists
         // between them whenever tagging lags — confirmed live 2026-09-15:
@@ -118,7 +133,7 @@ export async function GET(req: NextRequest) {
         // much closer to the tab's own KPI cards (only the DCO-vs-static
         // gap remains, not an additional tagging gap).
         const typeKey = r.asset_key.startsWith('video:') ? 'video' : 'image';
-        addInto(byType.get(typeKey)!, spend, impressions, linkClicks, results);
+        addInto(byType.get(typeKey)!, spend, impressions, linkClicks, results, reach);
       }
     }
 
@@ -128,11 +143,15 @@ export async function GET(req: NextRequest) {
       return {
         key, label,
         spend: Math.round(r.spend * 100) / 100,
-        // Not tracked per-creative anywhere (meta_asset_breakdown_daily
-        // has no reach column — Reach only ever exists at the campaign/
-        // account level in this app) — null renders as "—", not a
-        // fabricated 0 that could misread as "this theme has zero reach."
-        reach: null,
+        // Real per-creative reach, captured going forward from 2026-09-15
+        // (see db.ts/metaSync.ts) — null only when NONE of this bucket's
+        // rows have been re-synced since then, so the UI can render an
+        // honest "—" rather than a misleadingly-confident "0". Summed per
+        // day per entity like every other reach figure in this app — a
+        // known imprecision (Meta's reach is a deduplicated unique-user
+        // count, not additive across days), left as-is rather than invent
+        // a second, inconsistent convention just for this table.
+        reach: r.hasReach ? r.reach : null,
         impressions: r.impressions,
         linkClicks: r.linkClicks,
         ctr,

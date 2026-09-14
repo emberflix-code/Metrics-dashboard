@@ -266,6 +266,15 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
     // last-write-wins descriptive column. Existing rows read '' until the sync
     // job re-walks their date range and starts populating it (see metaSync.ts).
     await pool.query(`ALTER TABLE meta_asset_breakdown_daily ADD COLUMN IF NOT EXISTS campaign_name TEXT NOT NULL DEFAULT ''`).catch(() => {});
+    // Confirmed live 2026-09-15 that Meta's insights endpoint DOES return a
+    // real per-asset reach value alongside image_asset/video_asset
+    // breakdowns (Meta's own Breakdowns doc lists reach as one of the
+    // limited fields "Dynamic Creative" breakdowns support) — our sync
+    // simply never requested it before. Nullable (not a 0 default) so a
+    // row synced before this column existed reads as "never captured",
+    // matching the rest of the app's reach:null -> "—" convention, rather
+    // than looking like a real zero-reach creative.
+    await pool.query(`ALTER TABLE meta_asset_breakdown_daily ADD COLUMN IF NOT EXISTS reach BIGINT`).catch(() => {});
   } catch { /* surface via routes if it fails */ }
 })();
 

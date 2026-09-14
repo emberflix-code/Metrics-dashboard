@@ -621,7 +621,14 @@ async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: s
       const u = new URL(`${GRAPH}/act_${accountId}/insights`);
       u.searchParams.set('level', 'ad');
       u.searchParams.set('breakdowns', breakdown);
-      u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,actions');
+      // reach added 2026-09-15: confirmed live that Meta's Dynamic Creative
+      // breakdowns (image_asset/video_asset) DO return a real per-asset
+      // reach value — Meta's own docs list reach as one of the limited
+      // fields these breakdowns support, we simply never requested it
+      // before. Same day-level imprecision as every other reach number in
+      // this app (a deduplicated unique-user count, not additive across
+      // days) — left as-is rather than invent a different convention here.
+      u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,reach,actions');
       u.searchParams.set('time_range', JSON.stringify({ since, until }));
       u.searchParams.set('time_increment', '1');
       u.searchParams.set('limit', '500');
@@ -1095,7 +1102,7 @@ function deriveAssets(adId: string, creative: AdCreativeResp['creative']): Asset
 }
 
 interface BreakdownRow {
-  ad_id?: string; date_start?: string; spend?: string; impressions?: string; inline_link_clicks?: string;
+  ad_id?: string; date_start?: string; spend?: string; impressions?: string; inline_link_clicks?: string; reach?: string;
   campaign_name?: string;
   actions?: { action_type: string; value: string }[];
   image_asset?: { hash?: string }; video_asset?: { video_id?: string };
@@ -1832,7 +1839,7 @@ async function syncCreatives(
         if (archivedResult.hadGaps) gapped[chunkIdx] = true;
       }
 
-      interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number; campaignName: string }
+      interface PreparedBreakdown { assetKey: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number; reach: number; campaignName: string }
       // Keyed by `${assetKey}|${adId}|${date}` and summed on collision — Meta
       // can return the same (asset, ad, day) combination more than once within
       // a single breakdown fetch (e.g. across attribution-window buckets), and
@@ -1850,6 +1857,7 @@ async function syncCreatives(
         const impressions = parseInt(r.impressions || '0', 10) || 0;
         const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
         const results = resolveResultsFromActions(r.actions);
+        const reach = parseInt(r.reach || '0', 10) || 0;
         const campaignName = r.campaign_name || '';
         const existing = preparedByKey.get(key);
         if (existing) {
@@ -1857,11 +1865,18 @@ async function syncCreatives(
           existing.impressions += impressions;
           existing.linkClicks += linkClicks;
           existing.results += results;
+          // Reach is a deduplicated unique-user count — summing it across
+          // duplicate rows for the SAME (asset, ad, day) the way spend/
+          // impressions are summed would double-count reached users. Meta
+          // returns the same reach value on every duplicate row for one
+          // entity+day (they only differ by attribution-window bucket, which
+          // reach doesn't vary by), so max is the correct collapse here, not sum.
+          existing.reach = Math.max(existing.reach, reach);
           // campaignName isn't part of the aggregation key and Meta returns
           // the same name for the same ad+day across attribution buckets —
           // first-seen value is fine, no need to overwrite on collision.
         } else {
-          preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results, campaignName });
+          preparedByKey.set(key, { assetKey, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results, reach, campaignName });
         }
       }
       const prepared = Array.from(preparedByKey.values());
@@ -1871,17 +1886,17 @@ async function syncCreatives(
       // Postgres log flood this batching pass fixes.
       for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
         await query(
-          `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results, campaign_name)
-           SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results, campaign_name
-           FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[], $9::text[])
-             AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results, campaign_name)
+          `INSERT INTO meta_asset_breakdown_daily (account_id, asset_key, ad_id, date, spend, impressions, link_clicks, results, reach, campaign_name)
+           SELECT $1, asset_key, ad_id, date::date, spend, impressions, link_clicks, results, reach, campaign_name
+           FROM unnest($2::text[], $3::text[], $4::text[], $5::numeric[], $6::bigint[], $7::bigint[], $8::bigint[], $9::bigint[], $10::text[])
+             AS t(asset_key, ad_id, date, spend, impressions, link_clicks, results, reach, campaign_name)
            ON CONFLICT (account_id, asset_key, ad_id, date) DO UPDATE SET
              spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results,
-             campaign_name = EXCLUDED.campaign_name`,
+             reach = EXCLUDED.reach, campaign_name = EXCLUDED.campaign_name`,
           [
             accountId,
             batch.map(p => p.assetKey), batch.map(p => p.adId), batch.map(p => p.date),
-            batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results),
+            batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results), batch.map(p => p.reach),
             batch.map(p => p.campaignName),
           ]
         );
