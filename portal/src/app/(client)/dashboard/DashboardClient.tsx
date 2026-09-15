@@ -346,6 +346,19 @@ interface AssetBreakdownRow {
   cpb: number | null;
   joins: number | null;
   cpj: number | null;
+  // Server-side sibling gap: how many OTHER photos the backend already
+  // clustered onto this same card (see resolveClusteredThemeAndUgc in
+  // lib/phash.ts) are themselves missing a theme or ugc tag, and their
+  // combined spend — even though THIS card's own theme/ugcStatus above
+  // shows fully tagged (backfilled from whichever member IS tagged). Where
+  // allMembersFullyTagged catches gaps across the client's cross-account
+  // visual merge, this catches the much more common server-side, within-
+  // account version of the same masking (56 found in one account alone,
+  // 2026-09-16) — shown as a badge so "Incomplete tags only" flagging a
+  // seemingly-complete card isn't confusing. Summed across merged accounts
+  // in mergeInto/_mergeCreativesByPhash same as bookings/joins.
+  untaggedSiblingCount: number;
+  untaggedSiblingSpend: number;
 }
 // DCO asset breakdown — the only section on the Creatives tab.
 let _dcoAssets: { images: AssetBreakdownRow[]; videos: AssetBreakdownRow[]; adsTotal: number; adsWithSpec: number; reason?: string } | null = null;
@@ -1440,6 +1453,10 @@ function renderDcoAssets() {
     // /api/meta/db/creatives has always computed it (CreativeRow.reach is
     // non-nullable), this is just threading the existing value through.
     reach: s.reach,
+    // Static creatives aren't run through the server-side phash clustering
+    // /api/meta/db/asset-breakdown does, so there's no cluster to have a
+    // sibling gap in.
+    untaggedSiblingCount: 0, untaggedSiblingSpend: 0,
   }));
 
   // Bucket static rows by type so they merge with the DCO image/video arrays.
@@ -1866,6 +1883,10 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
         // its real value here would double-count it. null (not 0) since
         // these can be genuinely absent, not just empty.
         bookings: null, cpb: null, joins: null, cpj: null, reach: null,
+        // Same reset-to-zero rationale — each member's own server-computed
+        // sibling gap (see untaggedSiblingCount's doc comment) is added
+        // exactly once by the accumulation branches below.
+        untaggedSiblingCount: 0, untaggedSiblingSpend: 0,
         contributingAccountIds: [canonicalRow.accountId],
         // Starts from canonicalRow's OWN tag status, not true — the fold-in
         // loop below AND-combines every other member as it's added, so this
@@ -1888,6 +1909,8 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
       if (row.joins !== null) seeded.joins = (seeded.joins ?? 0) + row.joins;
       seeded.cpb = seeded.bookings && seeded.bookings > 0 ? Math.round((seeded.spend / seeded.bookings) * 100) / 100 : null;
       seeded.cpj = seeded.joins && seeded.joins > 0 ? Math.round((seeded.spend / seeded.joins) * 100) / 100 : null;
+      seeded.untaggedSiblingCount += row.untaggedSiblingCount;
+      seeded.untaggedSiblingSpend = Math.round((seeded.untaggedSiblingSpend + row.untaggedSiblingSpend) * 100) / 100;
       seeded.adCount += row.adCount;
       seeded.adIds = [...seeded.adIds, ...row.adIds];
       seeded.ads = [...seeded.ads, ...row.ads];
@@ -1912,6 +1935,8 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
     if (row.joins !== null) existing.joins = (existing.joins ?? 0) + row.joins;
     existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
     existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
+    existing.untaggedSiblingCount += row.untaggedSiblingCount;
+    existing.untaggedSiblingSpend = Math.round((existing.untaggedSiblingSpend + row.untaggedSiblingSpend) * 100) / 100;
     existing.adCount += row.adCount;
     existing.adIds = [...existing.adIds, ...row.adIds];
     existing.ads = [...existing.ads, ...row.ads];
@@ -2087,6 +2112,10 @@ function renderCreativesV2() {
     // /api/meta/db/creatives has always computed it (CreativeRow.reach is
     // non-nullable), this is just threading the existing value through.
     reach: s.reach,
+    // Static creatives aren't run through the server-side phash clustering
+    // /api/meta/db/asset-breakdown does, so there's no cluster to have a
+    // sibling gap in.
+    untaggedSiblingCount: 0, untaggedSiblingSpend: 0,
   }));
   const dcoImages = _dcoAssets?.images || [];
   const dcoVideos = _dcoAssets?.videos || [];
@@ -2271,6 +2300,18 @@ function renderCreativesV2() {
             ${r.ugcStatus ? `<span class="text-[10px] font-medium bg-fuchsia-500/15 text-fuchsia-300 px-1.5 py-0.5 rounded">${_ugcLabel(r.ugcStatus)}</span>` : ''}
           </div>`
         : '';
+    // Sibling-gap warning: this card's theme/ugcStatus above can display
+    // fully tagged while the server (or client cross-account merge) has
+    // folded in OTHER visually-similar photos that are themselves still
+    // untagged — see untaggedSiblingCount's doc comment for why that
+    // happens. Admin-only (same audience as the tag dropdowns/filter) and
+    // v3-only (thumbnails needed to make sense of "which photo is this").
+    const siblingGapLine = (_isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
+      ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below are still untagged and won't count toward Theme/UGC totals until tagged themselves">
+          <i data-lucide="alert-triangle" class="w-3 h-3 shrink-0"></i>
+          <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})})</span>
+        </div>`
+      : '';
     return `
       <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
@@ -2285,6 +2326,7 @@ function renderCreativesV2() {
         <div class="p-3">
           ${nameLine}
           ${themeUgcLine}
+          ${siblingGapLine}
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mb-2">
             <div class="text-slate-500">Spend</div><div class="text-right font-mono text-emerald-300">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
             <div class="text-slate-500">Impressions</div><div class="text-right font-mono text-slate-300">${r.impressions.toLocaleString('en-US')}</div>
@@ -2393,6 +2435,10 @@ function renderCreativesV3() {
     // /api/meta/db/creatives has always computed it (CreativeRow.reach is
     // non-nullable), this is just threading the existing value through.
     reach: s.reach,
+    // Static creatives aren't run through the server-side phash clustering
+    // /api/meta/db/asset-breakdown does, so there's no cluster to have a
+    // sibling gap in.
+    untaggedSiblingCount: 0, untaggedSiblingSpend: 0,
   }));
   const dcoImages = _dcoAssetsV3?.images || [];
   const dcoVideos = _dcoAssetsV3?.videos || [];
@@ -2593,6 +2639,15 @@ function renderCreativesV3() {
             ${r.ugcStatus ? `<span class="text-[10px] font-medium bg-fuchsia-500/15 text-fuchsia-300 px-1.5 py-0.5 rounded">${_ugcLabel(r.ugcStatus)}</span>` : ''}
           </div>`
         : '';
+    // See the matching comment in the v2 grid above — this card's Theme/
+    // Type badges can display fully tagged while a visually-similar sibling
+    // photo folded into the same cluster is still untagged underneath it.
+    const siblingGapLine = (_isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
+      ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below are still untagged and won't count toward Theme/UGC totals until tagged themselves">
+          <i data-lucide="alert-triangle" class="w-3 h-3 shrink-0"></i>
+          <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})})</span>
+        </div>`
+      : '';
     const revealBtn = _enablePageImageFallback && r.adIds[0]
       ? `<button type="button" class="low-res-reveal-btn" title="Try to recover a full-resolution version from the original post" onclick="event.stopPropagation();window._recoverImage('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','${r.adIds[0].replace(/'/g,"\\'")}',this)">
           <i data-lucide="sparkles" class="w-5 h-5"></i>
@@ -2613,6 +2668,7 @@ function renderCreativesV3() {
         <div class="p-3">
           ${nameLine}
           ${themeUgcLine}
+          ${siblingGapLine}
           <div class="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] mb-2">
             <div class="text-slate-500">Spend</div><div class="text-right font-mono text-emerald-300">$${r.spend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</div>
             <div class="text-slate-500">Impressions</div><div class="text-right font-mono text-slate-300">${r.impressions.toLocaleString('en-US')}</div>
@@ -2813,6 +2869,8 @@ async function fetchDcoAssets() {
           if (a.joins !== null) existing.joins = (existing.joins ?? 0) + a.joins;
           existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
           existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
+          existing.untaggedSiblingCount += a.untaggedSiblingCount;
+          existing.untaggedSiblingSpend = Math.round((existing.untaggedSiblingSpend + a.untaggedSiblingSpend) * 100) / 100;
         }
       };
       mergeInto(imageMap, r.images || []);
@@ -3043,6 +3101,8 @@ async function fetchDcoAssetsV3() {
           if (a.joins !== null) existing.joins = (existing.joins ?? 0) + a.joins;
           existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
           existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
+          existing.untaggedSiblingCount += a.untaggedSiblingCount;
+          existing.untaggedSiblingSpend = Math.round((existing.untaggedSiblingSpend + a.untaggedSiblingSpend) * 100) / 100;
         }
       };
       mergeInto(imageMap, r.images || []);

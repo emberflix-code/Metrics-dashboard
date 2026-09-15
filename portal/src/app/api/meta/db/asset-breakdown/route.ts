@@ -51,6 +51,14 @@ interface AssetSummary {
   cpb: number | null;
   joins: number | null;
   cpj: number | null;
+  // How many OTHER photos are visually clustered onto this same card
+  // server-side (see resolveClusteredThemeAndUgc) but don't have their own
+  // theme+ugcStatus — and their combined spend. The card's own theme/
+  // ugcStatus above is backfilled from ANY tagged cluster member, so a card
+  // can display fully tagged while still carrying real untagged spend
+  // underneath it. Admin-only, same gating convention as bookings/cpb.
+  untaggedSiblingCount: number;
+  untaggedSiblingSpend: number;
 }
 
 const CAMPAIGNS_CAP = 50;
@@ -252,6 +260,27 @@ export async function GET(req: NextRequest) {
       canonicalKeyOf
     );
 
+    // Per-canonical-card untagged-sibling spend/count — see
+    // untaggedSiblingCount's comment on AssetSummary above. Built from raw
+    // per-asset_key spend (summed across breakdownRows below) grouped by
+    // canonical key, counting only members that are themselves missing
+    // theme or ugc_status, regardless of what the merged card displays.
+    const rawSpendByAssetKey = new Map<string, number>();
+    for (const r of breakdownRows) {
+      rawSpendByAssetKey.set(r.asset_key, (rawSpendByAssetKey.get(r.asset_key) || 0) + (parseFloat(r.spend) || 0));
+    }
+    const untaggedSiblingsByCanonical = new Map<string, { count: number; spend: number }>();
+    for (const a of assetRows) {
+      const isTagged = !!(a.theme && a.ugc_status);
+      if (isTagged) continue;
+      const canonicalKey = canonicalKeyOf.get(a.asset_key) || a.asset_key;
+      if (canonicalKey === a.asset_key) continue; // not part of a multi-member cluster
+      const cur = untaggedSiblingsByCanonical.get(canonicalKey) || { count: 0, spend: 0 };
+      cur.count += 1;
+      cur.spend += rawSpendByAssetKey.get(a.asset_key) || 0;
+      untaggedSiblingsByCanonical.set(canonicalKey, cur);
+    }
+
     const adMetaRows = await query<{ entity_id: string; name: string; effective_status: string }>(
       `SELECT entity_id, name, effective_status FROM meta_entities WHERE account_id = $1 AND level = 'ad' AND entity_id = ANY($2)`,
       [accountId, Array.from(new Set(breakdownRows.map(r => r.ad_id)))]
@@ -328,6 +357,8 @@ export async function GET(req: NextRequest) {
           ctr: 0, cpl: 0, reach: null,
           adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,
           bookings: null, cpb: null, joins: null, cpj: null,
+          untaggedSiblingCount: untaggedSiblingsByCanonical.get(canonicalKey)?.count ?? 0,
+          untaggedSiblingSpend: untaggedSiblingsByCanonical.get(canonicalKey)?.spend ?? 0,
           _adIdSet: new Set<string>(),
           _hasReach: false,
         };
@@ -410,6 +441,7 @@ export async function GET(req: NextRequest) {
           cpb: hasBookingsData && bookings! > 0 ? Math.round((row.spend / bookings!) * 100) / 100 : null,
           joins: hasBookingsData ? Math.round(joins!) : null,
           cpj: hasBookingsData && joins! > 0 ? Math.round((row.spend / joins!) * 100) / 100 : null,
+          untaggedSiblingSpend: Math.round(row.untaggedSiblingSpend * 100) / 100,
         });
       }
       out.sort((a, b) => b.spend - a.spend);
