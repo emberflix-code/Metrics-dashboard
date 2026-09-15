@@ -27,6 +27,13 @@ interface AssetSummary {
   linkClicks: number;
   ctr: number;
   cpl: number;
+  // Real per-creative reach — only exists for rows synced since 2026-09-15
+  // (see db.ts/metaSync.ts); null means none of this card's contributing
+  // rows have been re-synced yet, not a real zero. Summed per day per
+  // entity like every other reach figure in this app — a known imprecision
+  // (Meta's reach is a deduplicated unique-user count, not additive across
+  // days), same convention as the Theme Breakdown tab.
+  reach: number | null;
   adCount: number;
   adIds: string[];
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
@@ -101,9 +108,10 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ images: [], videos: [], reason: 'no_asset_feed_spec', adsWithSpec: 0, adsTotal: 0, dcoAdIds: [] });
     }
 
-    const breakdownRows = await query<{ asset_key: string; ad_id: string; spend: string; impressions: string; link_clicks: string; results: string }>(
+    const breakdownRows = await query<{ asset_key: string; ad_id: string; spend: string; impressions: string; link_clicks: string; results: string; reach: string | null; any_reach_synced: boolean }>(
       `SELECT asset_key, ad_id, SUM(spend)::text AS spend, SUM(impressions)::text AS impressions,
-              SUM(link_clicks)::text AS link_clicks, SUM(results)::text AS results
+              SUM(link_clicks)::text AS link_clicks, SUM(results)::text AS results,
+              SUM(reach)::text AS reach, (COUNT(reach) > 0) AS any_reach_synced
        FROM meta_asset_breakdown_daily
        WHERE account_id = $1 AND date BETWEEN $2 AND $3 AND ad_id = ANY($4)
        GROUP BY asset_key, ad_id`,
@@ -250,8 +258,8 @@ export async function GET(req: NextRequest) {
     );
     const adMetaById = new Map(adMetaRows.map(a => [a.entity_id, a] as const));
 
-    const images = new Map<string, AssetSummary & { _adIdSet: Set<string> }>();
-    const videos = new Map<string, AssetSummary & { _adIdSet: Set<string> }>();
+    const images = new Map<string, AssetSummary & { _adIdSet: Set<string>; _hasReach: boolean }>();
+    const videos = new Map<string, AssetSummary & { _adIdSet: Set<string>; _hasReach: boolean }>();
 
     // Per-canonical-asset campaign totals, built alongside the main loop so
     // phash-merged asset_keys (multiple original hashes -> one canonical
@@ -317,10 +325,11 @@ export async function GET(req: NextRequest) {
           theme: themeUgcByCanonical.get(canonicalKey)?.theme ?? null,
           ugcStatus: themeUgcByCanonical.get(canonicalKey)?.ugcStatus ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
-          ctr: 0, cpl: 0,
+          ctr: 0, cpl: 0, reach: null,
           adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,
           bookings: null, cpb: null, joins: null, cpj: null,
           _adIdSet: new Set<string>(),
+          _hasReach: false,
         };
         bucket.set(canonicalKey, row);
       }
@@ -332,6 +341,10 @@ export async function GET(req: NextRequest) {
       row.impressions += impressions;
       row.linkClicks += linkClicks;
       row.results += results;
+      if (r.any_reach_synced) {
+        row.reach = (row.reach ?? 0) + (parseInt(r.reach || '0', 10) || 0);
+        row._hasReach = true;
+      }
       row._adIdSet.add(r.ad_id);
       const meta = adMetaById.get(r.ad_id);
       row.ads.push({
@@ -345,7 +358,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const finalize = (bucket: Map<string, AssetSummary & { _adIdSet: Set<string> }>): AssetSummary[] => {
+    const finalize = (bucket: Map<string, AssetSummary & { _adIdSet: Set<string>; _hasReach: boolean }>): AssetSummary[] => {
       const out: AssetSummary[] = [];
       for (const row of Array.from(bucket.values())) {
         const ctr = row.impressions > 0 ? (row.linkClicks / row.impressions) * 100 : 0;

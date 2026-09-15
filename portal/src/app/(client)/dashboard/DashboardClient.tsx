@@ -313,6 +313,11 @@ interface AssetBreakdownRow {
   contributingAccountIds?: string[];
   spend: number; results: number; impressions: number; linkClicks: number;
   ctr: number; cpl: number;
+  // Real per-creative reach — only populated for rows synced since
+  // 2026-09-15; null means no contributing row has been re-synced yet, not
+  // a genuine zero. Only ever rendered on Creatives v3 cards, admin or not
+  // (unlike bookings/joins, this is real Meta data, not an estimate).
+  reach: number | null;
   adCount: number;
   adIds: string[];
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
@@ -1418,6 +1423,10 @@ function renderDcoAssets() {
     // /api/meta/db/creatives (the route _staticAssets comes from) doesn't
     // compute it, unlike /api/meta/db/asset-breakdown for DCO assets.
     bookings: null, cpb: null, joins: null, cpj: null,
+    // Unlike bookings/joins, static assets DO already have real reach —
+    // /api/meta/db/creatives has always computed it (CreativeRow.reach is
+    // non-nullable), this is just threading the existing value through.
+    reach: s.reach,
   }));
 
   // Bucket static rows by type so they merge with the DCO image/video arrays.
@@ -1843,7 +1852,7 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
         // accumulation branch below as the loop reaches it, so seeding from
         // its real value here would double-count it. null (not 0) since
         // these can be genuinely absent, not just empty.
-        bookings: null, cpb: null, joins: null, cpj: null,
+        bookings: null, cpb: null, joins: null, cpj: null, reach: null,
         contributingAccountIds: [canonicalRow.accountId],
       });
       // Fall through so this same row's own numbers still get added by
@@ -1855,6 +1864,7 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
       seeded.linkClicks += row.linkClicks;
       seeded.ctr = seeded.impressions > 0 ? Math.round((seeded.linkClicks / seeded.impressions) * 10000) / 100 : 0;
       seeded.cpl = seeded.results > 0 ? Math.round((seeded.spend / seeded.results) * 100) / 100 : 0;
+      if (row.reach !== null) seeded.reach = (seeded.reach ?? 0) + row.reach;
       if (row.bookings !== null) seeded.bookings = (seeded.bookings ?? 0) + row.bookings;
       if (row.joins !== null) seeded.joins = (seeded.joins ?? 0) + row.joins;
       seeded.cpb = seeded.bookings && seeded.bookings > 0 ? Math.round((seeded.spend / seeded.bookings) * 100) / 100 : null;
@@ -1877,6 +1887,7 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
     existing.linkClicks += row.linkClicks;
     existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
     existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
+    if (row.reach !== null) existing.reach = (existing.reach ?? 0) + row.reach;
     if (row.bookings !== null) existing.bookings = (existing.bookings ?? 0) + row.bookings;
     if (row.joins !== null) existing.joins = (existing.joins ?? 0) + row.joins;
     existing.cpb = existing.bookings && existing.bookings > 0 ? Math.round((existing.spend / existing.bookings) * 100) / 100 : null;
@@ -2052,6 +2063,10 @@ function renderCreativesV2() {
     // /api/meta/db/creatives (the route _staticAssets comes from) doesn't
     // compute it, unlike /api/meta/db/asset-breakdown for DCO assets.
     bookings: null, cpb: null, joins: null, cpj: null,
+    // Unlike bookings/joins, static assets DO already have real reach —
+    // /api/meta/db/creatives has always computed it (CreativeRow.reach is
+    // non-nullable), this is just threading the existing value through.
+    reach: s.reach,
   }));
   const dcoImages = _dcoAssets?.images || [];
   const dcoVideos = _dcoAssets?.videos || [];
@@ -2256,6 +2271,9 @@ function renderCreativesV2() {
             <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
             <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
             <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+            ${_renderingCreativesV3 ? `
+            <div class="text-slate-500" title="Real Meta reach for this creative — only captured for rows synced since 2026-09-15, older data shows — until re-synced">Reach</div><div class="text-right font-mono text-cyan-300">${r.reach !== null ? r.reach.toLocaleString('en-US') : '—'}</div>
+            ` : ''}
             ${_isAdminView && _renderingCreativesV3 ? `
             <div class="text-slate-500" title="Estimated — split from campaign-level KPI sheet totals by this creative's spend share, not Meta-reported per-creative data">Bookings <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.bookings !== null ? r.bookings.toLocaleString('en-US') : '—'}</div>
             <div class="text-slate-500" title="Estimated — same spend-share method as Bookings">Avg. CPB <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.cpb !== null ? '$'+r.cpb.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</div>
@@ -2351,6 +2369,10 @@ function renderCreativesV3() {
     // /api/meta/db/creatives (the route _staticAssets comes from) doesn't
     // compute it, unlike /api/meta/db/asset-breakdown for DCO assets.
     bookings: null, cpb: null, joins: null, cpj: null,
+    // Unlike bookings/joins, static assets DO already have real reach —
+    // /api/meta/db/creatives has always computed it (CreativeRow.reach is
+    // non-nullable), this is just threading the existing value through.
+    reach: s.reach,
   }));
   const dcoImages = _dcoAssetsV3?.images || [];
   const dcoVideos = _dcoAssetsV3?.videos || [];
@@ -2556,6 +2578,9 @@ function renderCreativesV3() {
             <div class="text-slate-500">Leads</div><div class="text-right font-mono text-amber-300">${r.results}</div>
             <div class="text-slate-500">CPL</div><div class="text-right font-mono text-violet-300">${cpl}</div>
             <div class="text-slate-500">CTR</div><div class="text-right font-mono text-rose-300">${ctr}</div>
+            ${_renderingCreativesV3 ? `
+            <div class="text-slate-500" title="Real Meta reach for this creative — only captured for rows synced since 2026-09-15, older data shows — until re-synced">Reach</div><div class="text-right font-mono text-cyan-300">${r.reach !== null ? r.reach.toLocaleString('en-US') : '—'}</div>
+            ` : ''}
             ${_isAdminView && _renderingCreativesV3 ? `
             <div class="text-slate-500" title="Estimated — split from campaign-level KPI sheet totals by this creative's spend share, not Meta-reported per-creative data">Bookings <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.bookings !== null ? r.bookings.toLocaleString('en-US') : '—'}</div>
             <div class="text-slate-500" title="Estimated — same spend-share method as Bookings">Avg. CPB <span class="text-slate-600">~</span></div><div class="text-right font-mono text-teal-300">${r.cpb !== null ? '$'+r.cpb.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</div>
@@ -2730,6 +2755,11 @@ async function fetchDcoAssets() {
           existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
           existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
           if (!existing.thumbnail && a.thumbnail) existing.thumbnail = a.thumbnail;
+          // Real reach, summed across contributing accounts the same way
+          // spend/impressions already are — null-safe since a not-yet-
+          // re-synced contributing account must not turn a real reach total
+          // into a fabricated 0.
+          if (a.reach !== null) existing.reach = (existing.reach ?? 0) + a.reach;
           // Each contributing account's bookings/joins are already that
           // account's own spend-share estimate (computed server-side against
           // that SAME campaign's real total spend across every account) —
@@ -2955,6 +2985,11 @@ async function fetchDcoAssetsV3() {
           existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
           existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
           if (!existing.thumbnail && a.thumbnail) existing.thumbnail = a.thumbnail;
+          // Real reach, summed across contributing accounts the same way
+          // spend/impressions already are — null-safe since a not-yet-
+          // re-synced contributing account must not turn a real reach total
+          // into a fabricated 0.
+          if (a.reach !== null) existing.reach = (existing.reach ?? 0) + a.reach;
           // Each contributing account's bookings/joins are already that
           // account's own spend-share estimate (computed server-side against
           // that SAME campaign's real total spend across every account) —
