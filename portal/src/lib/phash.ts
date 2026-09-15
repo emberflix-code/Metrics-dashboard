@@ -36,9 +36,61 @@ function hammingDistance(a: string, b: string): number {
 
 // Same visual photo uploaded twice reliably lands within a handful of
 // flipped bits after re-encoding; unrelated creatives essentially never
-// fall this close. Kept tight (not the looser ~10-bit "similar" band) per
-// product decision: exact-pixel dedupe only, no loose merges.
+// fall this close, so a pair in this band always merges — no further
+// confirmation needed (audited 2026-09-16 across every AF Corporate
+// account: zero false-positive merges found at this distance).
 export const PHASH_MATCH_THRESHOLD = 4;
+
+// Wider candidate band for the same underlying photo re-uploaded at a
+// different resolution (Meta serves some ad variants a full-res thumbnail
+// and others a heavily downscaled one — dHash is gradient-based, so that
+// resolution gap alone can flip enough bits to land a genuine duplicate out
+// past PHASH_MATCH_THRESHOLD). Audited 2026-09-16: 228 real duplicate pairs
+// found sitting at distance 5-10 across AF Corporate's 4 accounts, several
+// with thousands of dollars of spend split across the "duplicate" cards
+// that should have been one. A pair in (PHASH_MATCH_THRESHOLD,
+// PHASH_CANDIDATE_THRESHOLD] is only merged if the caller's confirmMatch
+// callback (a real pixel-difference check, not just hash distance) agrees —
+// unconfirmed candidates never merge. Widening PHASH_MATCH_THRESHOLD itself
+// instead of adding this second band was considered and rejected: even at
+// distance 5, over a third of candidate pairs in the same audit were
+// genuinely different photos that happen to share this account's template
+// (same headline font/position, same accent-color footer band), so a
+// single wider hash-only threshold trades the current false negatives for
+// worse false positives.
+export const PHASH_CANDIDATE_THRESHOLD = 10;
+
+// Independent pixel-level cross-check for candidate pairs in the widened
+// band above — mean absolute difference on a 32x32 grayscale downsample. A
+// different algorithm family from dHash's gradient comparison on purpose:
+// two images sharing an on-brand template (same headline font/position,
+// same accent color) can still collide on gradient structure alone, but a
+// coarse whole-image pixel diff isn't fooled by that the same way. Returns
+// null (never confirms a match) if either image fails to decode.
+export async function computePixelMAD(bufA: Buffer, bufB: Buffer): Promise<number | null> {
+  try {
+    const [a, b] = await Promise.all([
+      sharp(bufA).resize(32, 32, { fit: 'fill' }).grayscale().raw().toBuffer(),
+      sharp(bufB).resize(32, 32, { fit: 'fill' }).grayscale().raw().toBuffer(),
+    ]);
+    if (a.length !== b.length || a.length === 0) return null;
+    let sum = 0;
+    for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+    return sum / a.length; // 0-255 scale
+  } catch {
+    return null;
+  }
+}
+
+// Cutoff for computePixelMAD's 0-255 scale below which two images are
+// treated as the same underlying photo. Chosen from the 2026-09-16 audit:
+// genuine duplicates (same photo, different offer text/resolution) mostly
+// landed under 3; unrelated photos sharing this account's template mostly
+// landed well above 8, with only a thin, genuinely ambiguous band between —
+// 8 sits in that gap, favoring "don't merge" for the truly borderline cases
+// since a missed merge (two cards instead of one) is far less costly than a
+// wrong merge (two different customers' photos combined under one tag).
+export const PIXEL_MAD_MATCH_THRESHOLD = 8;
 
 // Omega/GMN "Join40%Off" template incident, 2026-08-31 – 2026-09-02: these 3
 // image assets shipped with a scrambled headline ("40% Your Off Membership"
@@ -60,6 +112,14 @@ const CANONICAL_KEY_OVERRIDES: Record<string, string> = {
 // cluster's canonical key. Entries with a null/missing phash (not yet
 // backfilled, or a non-image asset type) map to themselves.
 //
+// Pairs additionally within PHASH_CANDIDATE_THRESHOLD (but past
+// PHASH_MATCH_THRESHOLD) also merge, but ONLY when `confirmMatch` is
+// supplied and resolves true for that pair — see PHASH_CANDIDATE_THRESHOLD's
+// own comment for why hash distance alone isn't trusted out that far.
+// Callers that can't supply real pixel bytes (or don't want the extra
+// async work) simply omit confirmMatch and get the exact same
+// PHASH_MATCH_THRESHOLD-only behavior as before this widened band existed.
+//
 // Canonical-key tie-break, in priority order:
 //   1. CANONICAL_KEY_OVERRIDES (see above) — specific known-bad assets.
 //   2. Whichever cluster member has an admin-set Theme or UGC tag — an
@@ -78,9 +138,10 @@ const CANONICAL_KEY_OVERRIDES: Record<string, string> = {
 //   3. Lexicographically smallest assetKey — deterministic fallback,
 //      independent of date range, spend, or fetch order, same as before
 //      this tag-aware tie-break existed.
-export function clusterByPerceptualHash(
-  assets: { assetKey: string; phash: string | null; tagged?: boolean }[]
-): Map<string, string> {
+export async function clusterByPerceptualHash(
+  assets: { assetKey: string; phash: string | null; tagged?: boolean }[],
+  confirmMatch?: (a: string, b: string) => Promise<boolean>
+): Promise<Map<string, string>> {
   const canonicalOf = new Map<string, string>();
   const withHash = assets.filter((a): a is { assetKey: string; phash: string; tagged?: boolean } => !!a.phash);
   for (const a of assets) if (!a.phash) canonicalOf.set(a.assetKey, a.assetKey);
@@ -101,11 +162,26 @@ export function clusterByPerceptualHash(
     if (ra !== rb) parent.set(ra > rb ? ra : rb, ra > rb ? rb : ra); // keep lexicographically smaller root
   }
 
+  // Certain merges (dist <= PHASH_MATCH_THRESHOLD) run first and
+  // synchronously, exactly as before. Candidate merges (dist in
+  // (PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD]) are collected and
+  // only unioned after confirmMatch resolves — running them serially would
+  // needlessly slow down large accounts with many candidate pairs.
+  const candidatePairs: [string, string][] = [];
   for (let i = 0; i < withHash.length; i++) {
     for (let j = i + 1; j < withHash.length; j++) {
-      if (hammingDistance(withHash[i].phash, withHash[j].phash) <= PHASH_MATCH_THRESHOLD) {
+      const dist = hammingDistance(withHash[i].phash, withHash[j].phash);
+      if (dist <= PHASH_MATCH_THRESHOLD) {
         union(withHash[i].assetKey, withHash[j].assetKey);
+      } else if (confirmMatch && dist <= PHASH_CANDIDATE_THRESHOLD) {
+        candidatePairs.push([withHash[i].assetKey, withHash[j].assetKey]);
       }
+    }
+  }
+  if (confirmMatch && candidatePairs.length > 0) {
+    const confirmations = await Promise.all(candidatePairs.map(([a, b]) => confirmMatch(a, b)));
+    for (let i = 0; i < candidatePairs.length; i++) {
+      if (confirmations[i]) union(candidatePairs[i][0], candidatePairs[i][1]);
     }
   }
 

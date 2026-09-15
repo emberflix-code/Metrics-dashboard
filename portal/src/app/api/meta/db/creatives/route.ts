@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHash } from '@/lib/phash';
+import { clusterByPerceptualHash, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
 
 interface CreativeRow {
   assetKey: string;
@@ -100,8 +100,23 @@ export async function GET(req: NextRequest) {
     // Two asset_key rows can be the same visual photo uploaded twice under
     // different Meta image_hash values (see 014_creative_asset_phash.sql) --
     // fold those onto one canonical card instead of showing duplicates.
-    const canonicalKeyOf = clusterByPerceptualHash(
-      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }))
+    // Same widened-candidate-band + pixel confirmation as
+    // /api/meta/db/asset-breakdown — see PHASH_CANDIDATE_THRESHOLD's comment
+    // in lib/phash.ts.
+    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+      const rows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
+        `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+        [accountId, [a, b]]
+      );
+      const bytesOf = new Map(rows.map(r => [r.asset_key, r.thumbnail_bytes]));
+      const bufA = bytesOf.get(a), bufB = bytesOf.get(b);
+      if (!bufA || !bufB) return false;
+      const mad = await computePixelMAD(bufA, bufB);
+      return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+    };
+    const canonicalKeyOf = await clusterByPerceptualHash(
+      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) })),
+      confirmByPixelDiff
     );
 
     const rows = new Map<string, CreativeRow>();

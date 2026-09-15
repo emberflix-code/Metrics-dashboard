@@ -2307,9 +2307,9 @@ function renderCreativesV2() {
     // happens. Admin-only (same audience as the tag dropdowns/filter) and
     // v3-only (thumbnails needed to make sense of "which photo is this").
     const siblingGapLine = (_isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
-      ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below are still untagged and won't count toward Theme/UGC totals until tagged themselves">
+      ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below still have their own untagged spend. Setting a Theme or Type on this card now applies it to every member of the cluster at once, so re-saving either dropdown clears this.">
           <i data-lucide="alert-triangle" class="w-3 h-3 shrink-0"></i>
-          <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})})</span>
+          <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}) — re-save Theme/Type to fix</span>
         </div>`
       : '';
     return `
@@ -2643,9 +2643,9 @@ function renderCreativesV3() {
     // Type badges can display fully tagged while a visually-similar sibling
     // photo folded into the same cluster is still untagged underneath it.
     const siblingGapLine = (_isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
-      ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below are still untagged and won't count toward Theme/UGC totals until tagged themselves">
+      ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below still have their own untagged spend. Setting a Theme or Type on this card now applies it to every member of the cluster at once, so re-saving either dropdown clears this.">
           <i data-lucide="alert-triangle" class="w-3 h-3 shrink-0"></i>
-          <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})})</span>
+          <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}) — re-save Theme/Type to fix</span>
         </div>`
       : '';
     const revealBtn = _enablePageImageFallback && r.adIds[0]

@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
+import { clusterByPerceptualHash, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
 
 // Admin-only manual creative tagging (Theme, UGC status) — the dropdowns
 // that call this only ever render while an admin is impersonating a client
@@ -63,23 +64,69 @@ export async function POST(req: NextRequest) {
   }
   const foundAccountIds = existingAssets.map(r => r.account_id);
 
+  // Also apply this tag to every OTHER asset_key that the display-side
+  // phash clustering (see /api/meta/db/asset-breakdown and
+  // resolveClusteredThemeAndUgc in lib/phash.ts) already folds onto this
+  // same visible card — same visual photo re-uploaded under a different
+  // Meta asset_key. Without this, tagging the merged card only ever wrote
+  // to whichever ONE asset_key the click happened to carry, leaving real
+  // spend on its untagged siblings invisible until each was tagged
+  // separately (see untaggedSiblingCount/DashboardClient.tsx's sibling-gap
+  // badge — this closes the gap that badge surfaces, instead of just
+  // reporting it). Scoped per account: each foundAccountIds entry gets its
+  // own cluster expanded independently, since phash/theme/ugc_status are
+  // all per-(account_id, asset_key) rows.
+  const clusterAssetKeysByAccount = new Map<string, string[]>();
+  for (const accId of foundAccountIds) {
+    const accountAssets = await query<{ asset_key: string; phash: string | null; theme: string | null; ugc_status: string | null; thumbnail_bytes: Buffer | null }>(
+      'SELECT asset_key, phash, theme, ugc_status, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1',
+      [accId]
+    );
+    const bytesByKey = new Map(accountAssets.map(a => [a.asset_key, a.thumbnail_bytes] as const));
+    // Same widened-candidate-band + pixel confirmation as
+    // /api/meta/db/asset-breakdown's clustering — see PHASH_CANDIDATE_THRESHOLD's
+    // comment in lib/phash.ts. Applying a tag must fold in the exact same
+    // cluster that Creatives v3 displays as one card, or a tag saved here
+    // could miss a sibling the badge/card already shows as merged.
+    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+      const bufA = bytesByKey.get(a), bufB = bytesByKey.get(b);
+      if (!bufA || !bufB) return false;
+      const mad = await computePixelMAD(bufA, bufB);
+      return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+    };
+    const canonicalKeyOf = await clusterByPerceptualHash(
+      accountAssets.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) })),
+      confirmByPixelDiff
+    );
+    const canonicalKey = canonicalKeyOf.get(assetKey) || assetKey;
+    const clusterKeys = accountAssets
+      .filter(a => (canonicalKeyOf.get(a.asset_key) || a.asset_key) === canonicalKey)
+      .map(a => a.asset_key);
+    clusterAssetKeysByAccount.set(accId, clusterKeys.length > 0 ? clusterKeys : [assetKey]);
+  }
+
   const hasTheme = Object.prototype.hasOwnProperty.call(body, 'theme');
   const hasUgcStatus = Object.prototype.hasOwnProperty.call(body, 'ugcStatus');
 
-  if (hasTheme) {
-    const theme = body.theme === null ? null : String(body.theme).trim();
-    if (theme !== null && !VALID_THEMES.has(theme)) {
-      return NextResponse.json({ error: `theme must be one of: ${Array.from(VALID_THEMES).join(', ')}, or null to clear` }, { status: 400 });
-    }
-    await query('UPDATE meta_creative_assets SET theme = $1, updated_at = now() WHERE account_id = ANY($2) AND asset_key = $3', [theme, foundAccountIds, assetKey]);
+  // Validate before writing anything — a bad value must not leave some
+  // accounts' clusters updated and others not.
+  const theme = hasTheme ? (body.theme === null ? null : String(body.theme).trim()) : undefined;
+  if (theme !== undefined && theme !== null && !VALID_THEMES.has(theme)) {
+    return NextResponse.json({ error: `theme must be one of: ${Array.from(VALID_THEMES).join(', ')}, or null to clear` }, { status: 400 });
+  }
+  const ugcStatus = hasUgcStatus ? (body.ugcStatus === null ? null : String(body.ugcStatus).trim()) : undefined;
+  if (ugcStatus !== undefined && ugcStatus !== null && !VALID_UGC_STATUSES.has(ugcStatus)) {
+    return NextResponse.json({ error: `ugcStatus must be one of: ${Array.from(VALID_UGC_STATUSES).join(', ')}, or null to clear` }, { status: 400 });
   }
 
-  if (hasUgcStatus) {
-    const ugcStatus = body.ugcStatus === null ? null : String(body.ugcStatus).trim();
-    if (ugcStatus !== null && !VALID_UGC_STATUSES.has(ugcStatus)) {
-      return NextResponse.json({ error: `ugcStatus must be one of: ${Array.from(VALID_UGC_STATUSES).join(', ')}, or null to clear` }, { status: 400 });
+  for (const accId of foundAccountIds) {
+    const clusterKeys = clusterAssetKeysByAccount.get(accId) || [assetKey];
+    if (theme !== undefined) {
+      await query('UPDATE meta_creative_assets SET theme = $1, updated_at = now() WHERE account_id = $2 AND asset_key = ANY($3)', [theme, accId, clusterKeys]);
     }
-    await query('UPDATE meta_creative_assets SET ugc_status = $1, updated_at = now() WHERE account_id = ANY($2) AND asset_key = $3', [ugcStatus, foundAccountIds, assetKey]);
+    if (ugcStatus !== undefined) {
+      await query('UPDATE meta_creative_assets SET ugc_status = $1, updated_at = now() WHERE account_id = $2 AND asset_key = ANY($3)', [ugcStatus, accId, clusterKeys]);
+    }
   }
 
   return NextResponse.json({ ok: true, appliedToAccountIds: foundAccountIds });

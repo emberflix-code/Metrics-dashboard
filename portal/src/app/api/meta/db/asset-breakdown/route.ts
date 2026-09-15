@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHash, resolveClusteredThemeAndUgc } from '@/lib/phash';
+import { clusterByPerceptualHash, resolveClusteredThemeAndUgc, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
 import { fetchMetaKpiSheetRows } from '@/lib/metaKpiSheet';
 
 interface AssetSummary {
@@ -245,8 +245,26 @@ export async function GET(req: NextRequest) {
     // bucket even after being remapped to a different video:-prefixed
     // canonical key -- images and videos never cluster with each other since
     // their key prefixes/hash formats never collide.
-    const canonicalKeyOf = clusterByPerceptualHash(
-      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }))
+    // Confirms a wider-band phash candidate pair (see PHASH_CANDIDATE_THRESHOLD)
+    // with a real pixel-difference check on their stored thumbnail bytes —
+    // this route already has thumbnail_bytes for anything Creatives v3 has
+    // synced, so no extra fetch is needed beyond the DB round-trip.
+    // Un-synced (bytes-less) members never appear in a candidate pair since
+    // getOrComputePhashes only writes a phash once bytes were fetched.
+    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+      const rows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
+        `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+        [accountId, [a, b]]
+      );
+      const bytesOf = new Map(rows.map(r => [r.asset_key, r.thumbnail_bytes]));
+      const bufA = bytesOf.get(a), bufB = bytesOf.get(b);
+      if (!bufA || !bufB) return false;
+      const mad = await computePixelMAD(bufA, bufB);
+      return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+    };
+    const canonicalKeyOf = await clusterByPerceptualHash(
+      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) })),
+      confirmByPixelDiff
     );
     // Resolve theme/ugc_status independently of which member won canonical
     // display identity above — clusterByPerceptualHash's `tagged` tie-break

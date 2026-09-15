@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter, resolveResultsFromActions } from '@/lib/meta';
-import { getOrComputePhashes, clusterByPerceptualHash } from '@/lib/phash';
+import { getOrComputePhashes, clusterByPerceptualHash, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
 
 interface AssetFeedSpec {
   images?: { hash?: string; url?: string }[];
@@ -532,8 +532,29 @@ export async function GET(req: NextRequest) {
       accountId,
       Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, thumbnail: r.thumbnail }))
     );
-    const canonicalKeyOf = clusterByPerceptualHash(
-      Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, phash: phashByKey.get(r.assetKey) || null }))
+    // Same widened-candidate-band + pixel confirmation as the cached route
+    // (/api/meta/db/asset-breakdown) — see PHASH_CANDIDATE_THRESHOLD's
+    // comment in lib/phash.ts. No stored thumbnail_bytes here (this route
+    // never persists them), so candidate pairs are confirmed by re-fetching
+    // each thumbnail URL directly — acceptable since only a handful of
+    // pairs ever land in the wider candidate band per account.
+    const thumbnailByKey = new Map(Array.from(imageAgg.values()).map(r => [r.assetKey, r.thumbnail] as const));
+    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+      const urlA = thumbnailByKey.get(a), urlB = thumbnailByKey.get(b);
+      if (!urlA || !urlB) return false;
+      try {
+        const [resA, resB] = await Promise.all([fetch(urlA), fetch(urlB)]);
+        if (!resA.ok || !resB.ok) return false;
+        const [bufA, bufB] = await Promise.all([resA.arrayBuffer(), resB.arrayBuffer()]);
+        const mad = await computePixelMAD(Buffer.from(bufA), Buffer.from(bufB));
+        return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+      } catch {
+        return false;
+      }
+    };
+    const canonicalKeyOf = await clusterByPerceptualHash(
+      Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, phash: phashByKey.get(r.assetKey) || null })),
+      confirmByPixelDiff
     );
     const mergedImageAgg = new Map<string, AggBucket>();
     for (const row of Array.from(imageAgg.values())) {
