@@ -311,6 +311,19 @@ interface AssetBreakdownRow {
   // happened to arrive). Undefined/single-entry for a normal one-account
   // card.
   contributingAccountIds?: string[];
+  // False if ANY visually-clustered member folded into this card (see
+  // _mergeCreativesByPhash) is still missing a Theme or UGC tag of its OWN
+  // — deliberately NOT the same thing as "this card's theme/ugcStatus are
+  // both set." That merge backfills a tag from ANY tagged member onto the
+  // whole card (by design, so a card displays as tagged if any physical
+  // variant has been classified) — but that same backfill silently hid a
+  // real per-creative gap from the "Incomplete tags only" admin filter:
+  // confirmed live 2026-09-16, a theme-only image (missing its own UGC tag)
+  // got clustered with an unrelated, fully-tagged sibling and the merged
+  // card read as complete, even though the actual creative underneath
+  // still needed a UGC tag. Undefined for a card that was never merged
+  // (single member) — treat as equivalent to theme/ugcStatus in that case.
+  allMembersFullyTagged?: boolean;
   spend: number; results: number; impressions: number; linkClicks: number;
   ctr: number; cpl: number;
   // Real per-creative reach — only populated for rows synced since
@@ -1854,10 +1867,16 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
         // these can be genuinely absent, not just empty.
         bookings: null, cpb: null, joins: null, cpj: null, reach: null,
         contributingAccountIds: [canonicalRow.accountId],
+        // Starts from canonicalRow's OWN tag status, not true — the fold-in
+        // loop below AND-combines every other member as it's added, so this
+        // only ends up true if EVERY member (canonicalRow included) has both
+        // tags on its own row. See the field's own doc comment above.
+        allMembersFullyTagged: !!(canonicalRow.theme && canonicalRow.ugcStatus),
       });
       // Fall through so this same row's own numbers still get added by
       // the accumulation branch below, whether or not it was canonicalRow.
       const seeded = merged.get(canonicalKey)!;
+      seeded.allMembersFullyTagged = seeded.allMembersFullyTagged && !!(row.theme && row.ugcStatus);
       seeded.spend += row.spend;
       seeded.results += row.results;
       seeded.impressions += row.impressions;
@@ -1881,6 +1900,7 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
     }
     if (!existing.theme && row.theme) existing.theme = row.theme;
     if (!existing.ugcStatus && row.ugcStatus) existing.ugcStatus = row.ugcStatus;
+    existing.allMembersFullyTagged = (existing.allMembersFullyTagged ?? true) && !!(row.theme && row.ugcStatus);
     existing.spend += row.spend;
     existing.results += row.results;
     existing.impressions += row.impressions;
@@ -2456,8 +2476,17 @@ function renderCreativesV3() {
   // means this asset's thumbnail bytes haven't finished backfilling yet (see
   // fetchCreativesV3), not a permanently broken URL like v1's usual case —
   // wording on the toggle button reflects that distinction.
+  //
+  // "Incomplete tags only" force-includes hidden assets regardless of this
+  // toggle — an admin auditing tag gaps needs to see EVERY incomplete
+  // creative, not just the ones whose thumbnail happened to finish
+  // downloading first. Confirmed live 2026-09-16: 14 of 23 real incomplete
+  // images on one account were sitting in the still-downloading bucket,
+  // making the "Incomplete tags only" filter show 0 results even though
+  // real, taggable gaps existed — an admin had no way to reach them at all
+  // without first noticing and manually toggling "Show hidden assets".
   const hiddenCount = images.filter(r => r.hidden).length + videos.filter(r => r.hidden).length;
-  if (!_creativesV3ShowHidden) {
+  if (!_creativesV3ShowHidden && !(_isAdminView && _creativesV3OnlyUntagged)) {
     images = images.filter(r => !r.hidden);
     videos = videos.filter(r => !r.hidden);
   }
@@ -2488,7 +2517,19 @@ function renderCreativesV3() {
     // Theme but no UGC status, which the old "no Theme AND no UGC" filter
     // completely missed (it only ever matched the much smaller
     // fully-untagged set), hiding the real gap from admins.
-    active = active.filter(r => !r.theme || !r.ugcStatus);
+    //
+    // Checks allMembersFullyTagged (falls back to the card's own theme/
+    // ugcStatus when undefined — a card that was never phash-merged) rather
+    // than r.theme/r.ugcStatus directly. Those two fields reflect the MERGED
+    // card (backfilled from ANY visually-clustered member that has a tag —
+    // correct for display, so a card doesn't look untagged just because one
+    // physical variant wasn't classified yet), but that same backfill can
+    // silently mask a DIFFERENT member of the same cluster that's still
+    // missing its own tag. Confirmed live 2026-09-16: a theme-only image
+    // (real, taggable spend) got merged with an unrelated fully-tagged
+    // sibling and vanished from this filter entirely, with 0 results shown
+    // even though 23 real incomplete creatives existed for that period.
+    active = active.filter(r => r.allMembersFullyTagged !== undefined ? !r.allMembersFullyTagged : (!r.theme || !r.ugcStatus));
   }
 
   _renderCreativesAdminSummary('creatives-v3-admin-summary', active);
