@@ -78,7 +78,7 @@ export async function GET(req: NextRequest) {
     // every month regardless of this specific client's own history — the
     // rows must be filtered down to campaigns matching this client's own
     // campaign_filter first, the same rule every other KPI card applies.
-    let monthsWithSpend: Record<string, boolean> = {};
+    const monthsWithSpend: Record<string, boolean> = {};
     if (client.ad_account_ids && client.ad_account_ids.length > 0) {
       const spendRows = await query<SpendMonthRow>(
         `SELECT DISTINCT to_char(date, 'YYYY-MM') AS month, account_id, campaign_name
