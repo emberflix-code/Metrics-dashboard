@@ -3,7 +3,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHash, resolveClusteredThemeAndUgc, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
+import { clusterByPerceptualHashCached, hasFreshClusterCache, resolveClusteredThemeAndUgc, computeDownsampledGray, computePixelMADFromDownsampled, PIXEL_MAD_MATCH_THRESHOLD, PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD } from '@/lib/phash';
 import { fetchMetaKpiSheetRows } from '@/lib/metaKpiSheet';
 
 interface AssetSummary {
@@ -246,26 +246,61 @@ export async function GET(req: NextRequest) {
     // canonical key -- images and videos never cluster with each other since
     // their key prefixes/hash formats never collide.
     // Confirms a wider-band phash candidate pair (see PHASH_CANDIDATE_THRESHOLD)
-    // with a real pixel-difference check on their stored thumbnail bytes —
-    // this route already has thumbnail_bytes for anything Creatives v3 has
-    // synced, so no extra fetch is needed beyond the DB round-trip.
-    // Un-synced (bytes-less) members never appear in a candidate pair since
-    // getOrComputePhashes only writes a phash once bytes were fetched.
-    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
-      const rows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
-        `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
-        [accountId, [a, b]]
-      );
-      const bytesOf = new Map(rows.map(r => [r.asset_key, r.thumbnail_bytes]));
-      const bufA = bytesOf.get(a), bufB = bytesOf.get(b);
-      if (!bufA || !bufB) return false;
-      const mad = await computePixelMAD(bufA, bufB);
-      return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
-    };
-    const canonicalKeyOf = await clusterByPerceptualHash(
-      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) })),
-      confirmByPixelDiff
-    );
+    // with a real pixel-difference check on their stored thumbnail bytes.
+    // Fetches + decodes bytes ONCE PER ASSET up front (not once per PAIR) —
+    // a large rollup account can have thousands of candidate pairs sharing
+    // a much smaller set of distinct assets (Alloy Ops's shared ~3,800-image
+    // account: ~15,000 candidate pairs across ~2,100 distinct assets on
+    // 2026-09-16), and an earlier per-pair version fired one query + one
+    // image decode per PAIR — tens of thousands of DB round-trips within a
+    // single request, which could exhaust the connection pool and fail the
+    // whole request.
+    //
+    // Even fixed, the candidate SCAN itself (before any byte work) is
+    // O(n^2) in asset count and took ~14s alone on that same account — too
+    // slow to pay on every request. clusterByPerceptualHashCached (see
+    // lib/phash.ts) caches the resolved result per account, so skip this
+    // whole block's DB/decode work on a cache hit; hasFreshClusterCache is
+    // the cheap (O(n)) check that tells us whether it's safe to skip.
+    const clusterInputAssets = assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }));
+    let confirmByPixelDiff: ((a: string, b: string) => Promise<boolean>) | undefined;
+    if (!hasFreshClusterCache(accountId, clusterInputAssets)) {
+      const candidateAssetKeys = new Set<string>();
+      for (let i = 0; i < assetRows.length; i++) {
+        const a = assetRows[i];
+        if (!a.phash) continue;
+        for (let j = i + 1; j < assetRows.length; j++) {
+          const b = assetRows[j];
+          if (!b.phash) continue;
+          let x = BigInt('0x' + a.phash) ^ BigInt('0x' + b.phash);
+          let dist = 0;
+          while (x > BigInt(0)) { dist += Number(x & BigInt(1)); x >>= BigInt(1); }
+          if (dist > PHASH_MATCH_THRESHOLD && dist <= PHASH_CANDIDATE_THRESHOLD) {
+            candidateAssetKeys.add(a.asset_key);
+            candidateAssetKeys.add(b.asset_key);
+          }
+        }
+      }
+      const downsampledByKey = new Map<string, Buffer>();
+      if (candidateAssetKeys.size > 0) {
+        const bytesRows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
+          `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+          [accountId, Array.from(candidateAssetKeys)]
+        );
+        await Promise.all(bytesRows.map(async r => {
+          if (!r.thumbnail_bytes) return;
+          const downsampled = await computeDownsampledGray(r.thumbnail_bytes);
+          if (downsampled) downsampledByKey.set(r.asset_key, downsampled);
+        }));
+      }
+      confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+        const bufA = downsampledByKey.get(a), bufB = downsampledByKey.get(b);
+        if (!bufA || !bufB) return false;
+        const mad = computePixelMADFromDownsampled(bufA, bufB);
+        return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+      };
+    }
+    const canonicalKeyOf = await clusterByPerceptualHashCached(accountId, clusterInputAssets, confirmByPixelDiff);
     // Resolve theme/ugc_status independently of which member won canonical
     // display identity above — clusterByPerceptualHash's `tagged` tie-break
     // is a single boolean covering EITHER field, so a member tagged only by

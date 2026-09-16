@@ -82,6 +82,31 @@ export async function computePixelMAD(bufA: Buffer, bufB: Buffer): Promise<numbe
   }
 }
 
+// Pre-decodes one image down to the same 32x32 grayscale raw buffer
+// computePixelMAD compares — an asset that appears in many candidate pairs
+// (found live 2026-09-16: a 3,800-image account had 2,137 assets across
+// ~15,000 candidate pairs) would otherwise get re-decoded through sharp
+// once per pair it's part of. Callers should compute this once per asset
+// and pass the results to computePixelMADFromDownsampled instead of raw
+// bytes, so each image is only ever decoded once regardless of how many
+// candidate pairs it lands in. Returns null if the bytes fail to decode.
+export async function computeDownsampledGray(bytes: Buffer): Promise<Buffer | null> {
+  try {
+    return await sharp(bytes).resize(32, 32, { fit: 'fill' }).grayscale().raw().toBuffer();
+  } catch {
+    return null;
+  }
+}
+
+// Same comparison as computePixelMAD, but over two already-downsampled
+// buffers (see computeDownsampledGray) — pure array math, no decode cost.
+export function computePixelMADFromDownsampled(a: Buffer, b: Buffer): number | null {
+  if (a.length !== b.length || a.length === 0) return null;
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += Math.abs(a[i] - b[i]);
+  return sum / a.length;
+}
+
 // Cutoff for computePixelMAD's 0-255 scale below which two images are
 // treated as the same underlying photo. Chosen from the 2026-09-16 audit:
 // genuine duplicates (same photo, different offer text/resolution) mostly
@@ -167,21 +192,45 @@ export async function clusterByPerceptualHash(
   // (PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD]) are collected and
   // only unioned after confirmMatch resolves — running them serially would
   // needlessly slow down large accounts with many candidate pairs.
+  //
+  // MAX_CANDIDATE_PAIRS is a hard safety cap: candidate-pair count grows
+  // quadratically with asset count, and a large account (Alloy Ops's
+  // shared ~3,800-image account hit ~15,000 candidate pairs on
+  // 2026-09-16, each needing a confirmMatch round-trip) can turn one page
+  // load into tens of thousands of pixel comparisons. Past the cap, the
+  // remaining candidate pairs for this call are simply skipped (their
+  // assets fall back to PHASH_MATCH_THRESHOLD-only behavior — i.e. they
+  // just don't get the wider-band merge, never a wrong one) rather than
+  // letting the request balloon in cost. In practice a caller should keep
+  // the actual pair count well under this by pre-scoping `assets` (e.g.
+  // per ad account, not the whole rollup at once).
+  const MAX_CANDIDATE_PAIRS = 20_000;
   const candidatePairs: [string, string][] = [];
-  for (let i = 0; i < withHash.length; i++) {
+  outer: for (let i = 0; i < withHash.length; i++) {
     for (let j = i + 1; j < withHash.length; j++) {
       const dist = hammingDistance(withHash[i].phash, withHash[j].phash);
       if (dist <= PHASH_MATCH_THRESHOLD) {
         union(withHash[i].assetKey, withHash[j].assetKey);
       } else if (confirmMatch && dist <= PHASH_CANDIDATE_THRESHOLD) {
+        if (candidatePairs.length >= MAX_CANDIDATE_PAIRS) break outer;
         candidatePairs.push([withHash[i].assetKey, withHash[j].assetKey]);
       }
     }
   }
   if (confirmMatch && candidatePairs.length > 0) {
-    const confirmations = await Promise.all(candidatePairs.map(([a, b]) => confirmMatch(a, b)));
+    // allSettled, not all: a large account can have tens of thousands of
+    // candidate pairs (Alloy Ops's ~3,800-image account hit ~15,000 on
+    // 2026-09-16) — with Promise.all, ONE pair's confirmMatch throwing
+    // (a dropped connection, a bad image buffer) rejected the whole batch
+    // and failed clustering for the ENTIRE account, not just that pair.
+    // A single failed confirmation now safely fails open (treated as "not
+    // confirmed" — the two assets simply don't merge), which is also the
+    // correct default: an unconfirmable pair should never merge just
+    // because the confirmation itself broke.
+    const confirmations = await Promise.allSettled(candidatePairs.map(([a, b]) => confirmMatch(a, b)));
     for (let i = 0; i < candidatePairs.length; i++) {
-      if (confirmations[i]) union(candidatePairs[i][0], candidatePairs[i][1]);
+      const result = confirmations[i];
+      if (result.status === 'fulfilled' && result.value) union(candidatePairs[i][0], candidatePairs[i][1]);
     }
   }
 
@@ -202,6 +251,79 @@ export async function clusterByPerceptualHash(
     for (const m of members) canonicalOf.set(m.assetKey, winner);
   }
   return canonicalOf;
+}
+
+// ── Per-account clustering cache ────────────────────────────────────────────
+// The widened-candidate-band path (PHASH_CANDIDATE_THRESHOLD) is O(n^2) in
+// asset count for the hash-comparison pass alone, before any pixel
+// confirmation work — found live 2026-09-16 on Alloy Ops's shared rollup
+// account (3,784 images): a full clusterByPerceptualHash call took ~50
+// seconds end to end (DB fetch + candidate scan + byte fetch/decode +
+// pixel confirm), far too slow for a single page load even after fixing
+// the connection-pool-exhaustion and single-pair-failure bugs (see this
+// function's own comments). The underlying asset set for a given account
+// only changes when a sync writes new breakdown rows or an admin saves a
+// tag — both comparatively rare — so cache the resolved canonical-key map
+// per account and only recompute on a genuine cache miss or explicit
+// invalidation.
+const CLUSTER_CACHE_TTL_MS = 5 * 60_000;
+const _clusterCache = new Map<string, { expires: number; fingerprint: string; result: Map<string, string> }>();
+
+// Cheap fingerprint over exactly the fields clustering depends on (asset
+// key, phash, tagged) — recomputing this is O(n) and orders of magnitude
+// cheaper than the O(n^2) clustering itself, so a cache hit still costs
+// something but nowhere near the full computation. Deliberately does NOT
+// include spend/impressions/etc — those change on every sync without
+// affecting which assets cluster together, and invalidating on every such
+// change would defeat the cache.
+function fingerprintAssets(assets: { assetKey: string; phash: string | null; tagged?: boolean }[]): string {
+  const sorted = assets.map(a => `${a.assetKey}:${a.phash ?? ''}:${a.tagged ? 1 : 0}`).sort();
+  return `${sorted.length}|${sorted.join(',')}`;
+}
+
+// Lets a caller skip its OWN expensive pre-work (fetching+decoding
+// candidate-pair thumbnail bytes) when the cache is already going to hit —
+// clusterByPerceptualHashCached alone can't help with that, since by the
+// time a caller has assembled a confirmMatch callback it has already paid
+// for whatever byte-fetching that callback needs. Just the fingerprint
+// check (cheap, O(n)), not the full clustering call.
+export function hasFreshClusterCache(
+  accountKey: string,
+  assets: { assetKey: string; phash: string | null; tagged?: boolean }[]
+): boolean {
+  const hit = _clusterCache.get(accountKey);
+  return !!hit && hit.expires > Date.now() && hit.fingerprint === fingerprintAssets(assets);
+}
+
+// Same contract as clusterByPerceptualHash, cached per accountKey (callers
+// pass whatever key scopes their asset list — typically the Meta ad
+// account_id, but a caller clustering several accounts at once, like the
+// live route's per-account loop, should use each account's own id so a
+// change in one account's assets can't evict another's cache entry).
+export async function clusterByPerceptualHashCached(
+  accountKey: string,
+  assets: { assetKey: string; phash: string | null; tagged?: boolean }[],
+  confirmMatch?: (a: string, b: string) => Promise<boolean>
+): Promise<Map<string, string>> {
+  const fingerprint = fingerprintAssets(assets);
+  const hit = _clusterCache.get(accountKey);
+  if (hit && hit.expires > Date.now() && hit.fingerprint === fingerprint) {
+    return hit.result;
+  }
+  const result = await clusterByPerceptualHash(assets, confirmMatch);
+  _clusterCache.set(accountKey, { expires: Date.now() + CLUSTER_CACHE_TTL_MS, fingerprint, result });
+  return result;
+}
+
+// Called right after a tag save (see /api/admin/creative-tags) so the
+// SAME request's re-render sees the new tag's effect on canonical-member
+// selection immediately, instead of waiting out CLUSTER_CACHE_TTL_MS — the
+// fingerprint check above would eventually catch it anyway (a changed
+// theme/ugc_status changes `tagged`, which changes the fingerprint), but
+// only on the NEXT clustering call, which could still read the stale
+// cached result if it lands before that next call happens to run.
+export function invalidateClusterCache(accountKey: string): void {
+  _clusterCache.delete(accountKey);
 }
 
 /**

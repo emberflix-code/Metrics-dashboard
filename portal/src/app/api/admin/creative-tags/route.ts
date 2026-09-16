@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHash, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
+import { clusterByPerceptualHashCached, hasFreshClusterCache, invalidateClusterCache, computeDownsampledGray, computePixelMADFromDownsampled, PIXEL_MAD_MATCH_THRESHOLD, PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD } from '@/lib/phash';
 
 // Admin-only manual creative tagging (Theme, UGC status) — the dropdowns
 // that call this only ever render while an admin is impersonating a client
@@ -78,26 +78,60 @@ export async function POST(req: NextRequest) {
   // all per-(account_id, asset_key) rows.
   const clusterAssetKeysByAccount = new Map<string, string[]>();
   for (const accId of foundAccountIds) {
-    const accountAssets = await query<{ asset_key: string; phash: string | null; theme: string | null; ugc_status: string | null; thumbnail_bytes: Buffer | null }>(
-      'SELECT asset_key, phash, theme, ugc_status, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1',
+    const accountAssets = await query<{ asset_key: string; phash: string | null; theme: string | null; ugc_status: string | null }>(
+      'SELECT asset_key, phash, theme, ugc_status FROM meta_creative_assets WHERE account_id = $1',
       [accId]
     );
-    const bytesByKey = new Map(accountAssets.map(a => [a.asset_key, a.thumbnail_bytes] as const));
-    // Same widened-candidate-band + pixel confirmation as
-    // /api/meta/db/asset-breakdown's clustering — see PHASH_CANDIDATE_THRESHOLD's
-    // comment in lib/phash.ts. Applying a tag must fold in the exact same
+    // Same widened-candidate-band + pixel confirmation, per-asset byte
+    // fetch/decode, and result caching as /api/meta/db/asset-breakdown —
+    // see PHASH_CANDIDATE_THRESHOLD's and clusterByPerceptualHashCached's
+    // comments in lib/phash.ts. Applying a tag must fold in the exact same
     // cluster that Creatives v3 displays as one card, or a tag saved here
-    // could miss a sibling the badge/card already shows as merged.
-    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
-      const bufA = bytesByKey.get(a), bufB = bytesByKey.get(b);
-      if (!bufA || !bufB) return false;
-      const mad = await computePixelMAD(bufA, bufB);
-      return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
-    };
-    const canonicalKeyOf = await clusterByPerceptualHash(
-      accountAssets.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) })),
-      confirmByPixelDiff
-    );
+    // could miss a sibling the badge/card already shows as merged. Cache
+    // key is bare accId (this route clusters the WHOLE account, unlike the
+    // Creatives-tab routes' own narrower, differently-keyed slices) — this
+    // read uses the cache as-is (pre-write tag state, correct for deciding
+    // who bundles with `assetKey`); invalidateClusterCache runs after the
+    // write below so the NEXT read picks up the new tag.
+    const clusterInputAssets = accountAssets.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }));
+    let confirmByPixelDiff: ((a: string, b: string) => Promise<boolean>) | undefined;
+    if (!hasFreshClusterCache(accId, clusterInputAssets)) {
+      const candidateAssetKeys = new Set<string>();
+      for (let i = 0; i < accountAssets.length; i++) {
+        const a = accountAssets[i];
+        if (!a.phash) continue;
+        for (let j = i + 1; j < accountAssets.length; j++) {
+          const b = accountAssets[j];
+          if (!b.phash) continue;
+          let x = BigInt('0x' + a.phash) ^ BigInt('0x' + b.phash);
+          let dist = 0;
+          while (x > BigInt(0)) { dist += Number(x & BigInt(1)); x >>= BigInt(1); }
+          if (dist > PHASH_MATCH_THRESHOLD && dist <= PHASH_CANDIDATE_THRESHOLD) {
+            candidateAssetKeys.add(a.asset_key);
+            candidateAssetKeys.add(b.asset_key);
+          }
+        }
+      }
+      const downsampledByKey = new Map<string, Buffer>();
+      if (candidateAssetKeys.size > 0) {
+        const bytesRows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
+          `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+          [accId, Array.from(candidateAssetKeys)]
+        );
+        await Promise.all(bytesRows.map(async r => {
+          if (!r.thumbnail_bytes) return;
+          const downsampled = await computeDownsampledGray(r.thumbnail_bytes);
+          if (downsampled) downsampledByKey.set(r.asset_key, downsampled);
+        }));
+      }
+      confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+        const bufA = downsampledByKey.get(a), bufB = downsampledByKey.get(b);
+        if (!bufA || !bufB) return false;
+        const mad = computePixelMADFromDownsampled(bufA, bufB);
+        return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+      };
+    }
+    const canonicalKeyOf = await clusterByPerceptualHashCached(accId, clusterInputAssets, confirmByPixelDiff);
     const canonicalKey = canonicalKeyOf.get(assetKey) || assetKey;
     const clusterKeys = accountAssets
       .filter(a => (canonicalKeyOf.get(a.asset_key) || a.asset_key) === canonicalKey)
@@ -127,6 +161,19 @@ export async function POST(req: NextRequest) {
     if (ugcStatus !== undefined) {
       await query('UPDATE meta_creative_assets SET ugc_status = $1, updated_at = now() WHERE account_id = $2 AND asset_key = ANY($3)', [ugcStatus, accId, clusterKeys]);
     }
+    // A saved tag changes `tagged` for this asset, which is part of the
+    // clustering cache's fingerprint (see lib/phash.ts) — the fingerprint
+    // check would eventually catch this on its own, but only on whichever
+    // request happens to run AFTER this write; a request already in flight
+    // (e.g. this same admin's next page load) could still read a
+    // just-turned-stale cached result if it lands first. Explicit
+    // invalidation closes that window instead of relying on timing luck.
+    // Three separate cache slots exist per account (this route's own bare
+    // accId, plus the Creatives-tab routes' accId and `${accId}:static`
+    // keys — see their own comments) since each clusters a different asset
+    // scope; a tag change affects all three, so all three need clearing.
+    invalidateClusterCache(accId);
+    invalidateClusterCache(`${accId}:static`);
   }
 
   return NextResponse.json({ ok: true, appliedToAccountIds: foundAccountIds });

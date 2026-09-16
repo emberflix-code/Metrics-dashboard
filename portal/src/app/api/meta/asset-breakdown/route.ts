@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientConnection, isMultiKeywordFilter, matchesCampaignFilter, resolveResultsFromActions } from '@/lib/meta';
-import { getOrComputePhashes, clusterByPerceptualHash, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
+import { getOrComputePhashes, clusterByPerceptualHashCached, hasFreshClusterCache, computeDownsampledGray, computePixelMADFromDownsampled, PIXEL_MAD_MATCH_THRESHOLD, PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD } from '@/lib/phash';
 
 interface AssetFeedSpec {
   images?: { hash?: string; url?: string }[];
@@ -536,26 +536,64 @@ export async function GET(req: NextRequest) {
     // (/api/meta/db/asset-breakdown) — see PHASH_CANDIDATE_THRESHOLD's
     // comment in lib/phash.ts. No stored thumbnail_bytes here (this route
     // never persists them), so candidate pairs are confirmed by re-fetching
-    // each thumbnail URL directly — acceptable since only a handful of
-    // pairs ever land in the wider candidate band per account.
+    // each thumbnail URL — but only ONCE PER CANDIDATE ASSET, not once per
+    // pair. Found live 2026-09-16 on Alloy Ops (a rollup spanning a
+    // ~3,800-image shared account): a naive per-PAIR version here would
+    // have fired one external fetch to Meta's CDN per pair — tens of
+    // thousands of requests in a single page load, far worse than the
+    // sibling per-pair DB-query bug the cached route had (see that route's
+    // matching comment). This account's candidate pairs share a much
+    // smaller set of distinct assets, so fetching+decoding each asset's
+    // thumbnail exactly once first is the fix, same shape as the cached
+    // route's.
+    // Result caching (see clusterByPerceptualHashCached in lib/phash.ts):
+    // the O(n^2) candidate scan alone took ~14s on Alloy Ops's shared
+    // account, so skip it (and the CDN-refetch work below) entirely on a
+    // cache hit via the cheap hasFreshClusterCache check. Cache-keyed with
+    // a ":live" suffix — this route's phashes come from getOrComputePhashes
+    // (URL-fetched, no `tagged` concept), a different scope than the
+    // cached/synced routes' own DB-backed entries for the same account_id.
     const thumbnailByKey = new Map(Array.from(imageAgg.values()).map(r => [r.assetKey, r.thumbnail] as const));
-    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
-      const urlA = thumbnailByKey.get(a), urlB = thumbnailByKey.get(b);
-      if (!urlA || !urlB) return false;
-      try {
-        const [resA, resB] = await Promise.all([fetch(urlA), fetch(urlB)]);
-        if (!resA.ok || !resB.ok) return false;
-        const [bufA, bufB] = await Promise.all([resA.arrayBuffer(), resB.arrayBuffer()]);
-        const mad = await computePixelMAD(Buffer.from(bufA), Buffer.from(bufB));
-        return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
-      } catch {
-        return false;
+    const phashEntries = Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, phash: phashByKey.get(r.assetKey) || null }));
+    const clusterCacheKey = `${accountId}:live`;
+    let confirmByPixelDiff: ((a: string, b: string) => Promise<boolean>) | undefined;
+    if (!hasFreshClusterCache(clusterCacheKey, phashEntries)) {
+      const candidateAssetKeys = new Set<string>();
+      for (let i = 0; i < phashEntries.length; i++) {
+        const a = phashEntries[i];
+        if (!a.phash) continue;
+        for (let j = i + 1; j < phashEntries.length; j++) {
+          const b = phashEntries[j];
+          if (!b.phash) continue;
+          let x = BigInt('0x' + a.phash) ^ BigInt('0x' + b.phash);
+          let dist = 0;
+          while (x > BigInt(0)) { dist += Number(x & BigInt(1)); x >>= BigInt(1); }
+          if (dist > PHASH_MATCH_THRESHOLD && dist <= PHASH_CANDIDATE_THRESHOLD) {
+            candidateAssetKeys.add(a.assetKey);
+            candidateAssetKeys.add(b.assetKey);
+          }
+        }
       }
-    };
-    const canonicalKeyOf = await clusterByPerceptualHash(
-      Array.from(imageAgg.values()).map(r => ({ assetKey: r.assetKey, phash: phashByKey.get(r.assetKey) || null })),
-      confirmByPixelDiff
-    );
+      const downsampledByKey = new Map<string, Buffer>();
+      await Promise.all(Array.from(candidateAssetKeys).map(async key => {
+        const url = thumbnailByKey.get(key);
+        if (!url) return;
+        try {
+          const res = await fetch(url);
+          if (!res.ok) return;
+          const bytes = Buffer.from(await res.arrayBuffer());
+          const downsampled = await computeDownsampledGray(bytes);
+          if (downsampled) downsampledByKey.set(key, downsampled);
+        } catch { /* leave unconfirmable — this pair simply won't merge */ }
+      }));
+      confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+        const bufA = downsampledByKey.get(a), bufB = downsampledByKey.get(b);
+        if (!bufA || !bufB) return false;
+        const mad = computePixelMADFromDownsampled(bufA, bufB);
+        return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+      };
+    }
+    const canonicalKeyOf = await clusterByPerceptualHashCached(clusterCacheKey, phashEntries, confirmByPixelDiff);
     const mergedImageAgg = new Map<string, AggBucket>();
     for (const row of Array.from(imageAgg.values())) {
       const canonicalKey = canonicalKeyOf.get(row.assetKey) || row.assetKey;

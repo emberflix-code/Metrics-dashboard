@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHash, computePixelMAD, PIXEL_MAD_MATCH_THRESHOLD } from '@/lib/phash';
+import { clusterByPerceptualHashCached, hasFreshClusterCache, computeDownsampledGray, computePixelMADFromDownsampled, PIXEL_MAD_MATCH_THRESHOLD, PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD } from '@/lib/phash';
 
 interface CreativeRow {
   assetKey: string;
@@ -100,24 +100,54 @@ export async function GET(req: NextRequest) {
     // Two asset_key rows can be the same visual photo uploaded twice under
     // different Meta image_hash values (see 014_creative_asset_phash.sql) --
     // fold those onto one canonical card instead of showing duplicates.
-    // Same widened-candidate-band + pixel confirmation as
-    // /api/meta/db/asset-breakdown — see PHASH_CANDIDATE_THRESHOLD's comment
-    // in lib/phash.ts.
-    const confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
-      const rows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
-        `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
-        [accountId, [a, b]]
-      );
-      const bytesOf = new Map(rows.map(r => [r.asset_key, r.thumbnail_bytes]));
-      const bufA = bytesOf.get(a), bufB = bytesOf.get(b);
-      if (!bufA || !bufB) return false;
-      const mad = await computePixelMAD(bufA, bufB);
-      return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
-    };
-    const canonicalKeyOf = await clusterByPerceptualHash(
-      assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) })),
-      confirmByPixelDiff
-    );
+    // Same widened-candidate-band + pixel confirmation, per-asset byte
+    // fetch/decode, and result caching as /api/meta/db/asset-breakdown —
+    // see PHASH_CANDIDATE_THRESHOLD's and clusterByPerceptualHashCached's
+    // comments in lib/phash.ts. Cache-keyed with a ":static" suffix since
+    // this route clusters a different (static-creative) asset subset than
+    // the DCO route's own accountId-keyed cache entry — sharing a key
+    // between the two would just force constant cache misses against each
+    // other's differently-scoped asset list, never a correctness issue.
+    const clusterInputAssets = assetRows.map(a => ({ assetKey: a.asset_key, phash: a.phash, tagged: !!(a.theme || a.ugc_status) }));
+    const cacheKey = `${accountId}:static`;
+    let confirmByPixelDiff: ((a: string, b: string) => Promise<boolean>) | undefined;
+    if (!hasFreshClusterCache(cacheKey, clusterInputAssets)) {
+      const candidateAssetKeys = new Set<string>();
+      for (let i = 0; i < assetRows.length; i++) {
+        const a = assetRows[i];
+        if (!a.phash) continue;
+        for (let j = i + 1; j < assetRows.length; j++) {
+          const b = assetRows[j];
+          if (!b.phash) continue;
+          let x = BigInt('0x' + a.phash) ^ BigInt('0x' + b.phash);
+          let dist = 0;
+          while (x > BigInt(0)) { dist += Number(x & BigInt(1)); x >>= BigInt(1); }
+          if (dist > PHASH_MATCH_THRESHOLD && dist <= PHASH_CANDIDATE_THRESHOLD) {
+            candidateAssetKeys.add(a.asset_key);
+            candidateAssetKeys.add(b.asset_key);
+          }
+        }
+      }
+      const downsampledByKey = new Map<string, Buffer>();
+      if (candidateAssetKeys.size > 0) {
+        const bytesRows = await query<{ asset_key: string; thumbnail_bytes: Buffer | null }>(
+          `SELECT asset_key, thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = ANY($2)`,
+          [accountId, Array.from(candidateAssetKeys)]
+        );
+        await Promise.all(bytesRows.map(async r => {
+          if (!r.thumbnail_bytes) return;
+          const downsampled = await computeDownsampledGray(r.thumbnail_bytes);
+          if (downsampled) downsampledByKey.set(r.asset_key, downsampled);
+        }));
+      }
+      confirmByPixelDiff = async (a: string, b: string): Promise<boolean> => {
+        const bufA = downsampledByKey.get(a), bufB = downsampledByKey.get(b);
+        if (!bufA || !bufB) return false;
+        const mad = computePixelMADFromDownsampled(bufA, bufB);
+        return mad !== null && mad <= PIXEL_MAD_MATCH_THRESHOLD;
+      };
+    }
+    const canonicalKeyOf = await clusterByPerceptualHashCached(cacheKey, clusterInputAssets, confirmByPixelDiff);
 
     const rows = new Map<string, CreativeRow>();
     for (const m of mapRows) {
