@@ -11,6 +11,14 @@ export interface RetainerLookup {
   // a client's old flat-rate era with a new monthly-rate era would be wrong
   // more often than it'd be right.
   monthlyAmounts: Record<string, number>;
+  // Keyed by "YYYY-MM" — the set of months where this client actually had
+  // real Meta ad spend (from meta_daily_insights, level='campaign'). A month
+  // with no entry (or a false/zero value) contributes NO retainer at all,
+  // for either mode — this is what stops a long "Maximum" range from
+  // charging retainer for months before the client's ads (or the client
+  // relationship itself) existed. Required — callers must always pass this,
+  // even if it means querying real spend first.
+  monthsWithSpend: Record<string, boolean>;
 }
 
 function daysInMonth(year: number, month0: number): number {
@@ -36,10 +44,13 @@ export function proratedRetainerForRange(since: string, until: string, lookup: R
     const rangeEndDay = isLastMonth ? ed : daysInMonth(year, month0);
     const daysInRangeThisMonth = rangeEndDay - rangeStartDay + 1;
 
-    const amount = lookup.mode === 'monthly'
-      ? (lookup.monthlyAmounts[monthKey(year, month0)] ?? 0)
-      : lookup.flatAmount;
-    total += (amount / daysInMonth(year, month0)) * daysInRangeThisMonth;
+    const key = monthKey(year, month0);
+    if (lookup.monthsWithSpend[key]) {
+      const amount = lookup.mode === 'monthly'
+        ? (lookup.monthlyAmounts[key] ?? 0)
+        : lookup.flatAmount;
+      total += (amount / daysInMonth(year, month0)) * daysInRangeThisMonth;
+    }
 
     month0++;
     if (month0 > 11) { month0 = 0; year++; }

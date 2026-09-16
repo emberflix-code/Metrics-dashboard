@@ -532,12 +532,13 @@ let _dpLY = 0;
 let _dpLM = 0;
 let _dpActivePreset = 'last_30d';
 let _dpRecentlyUsed: string[] = [];
-// Omega-family clients (Omega - California/Florida/Midwest, AF Regional
-// Omega, etc. — anything with "Omega" in the client name) only ever want
-// this year's data: "Maximum" is clamped to Jan 1 of the current year
-// instead of the usual 37-month lookback. Set once per mount from
-// clientName in the DashboardClient component below.
-let _dpCapMaximumToThisYear = false;
+// "Maximum" clamps to Jan 1 of the current year for every client, not a
+// 37-month lookback to the account's full Meta history. The account's
+// creation/connection date reflects backfill/sync progress, not the
+// client's actual business history, so a longer lookback would silently
+// include months the client never really had a relationship with us for
+// (e.g. inflating retainer-based CPA — see lib/retainer.ts). Previously
+// this was an Omega-only special case; widened to all clients 2026-09-16.
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 /**
@@ -581,7 +582,7 @@ function _dpPresetRange(key: string): { since: string; until: string } | null {
     // Clamp to start-of-range on Jan 1 (tEnd = Dec 31 prior year would
     // otherwise invert since/until), same pattern as this_week/this_month.
     case 'maximum': {
-      const s = _dpCapMaximumToThisYear ? new Date(t.getFullYear(), 0, 1) : (() => { const d=new Date(t); d.setMonth(d.getMonth()-37); return d; })();
+      const s = new Date(t.getFullYear(), 0, 1);
       const u = tEnd<s?s:tEnd;
       return {since:_dpFmt(s),until:_dpFmt(u)};
     }
@@ -4971,7 +4972,6 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _hideAdsetAdTabs = hideAdsetAdTabs;
   _enablePageImageFallback = enablePageImageFallback;
   _showMetaKpiSheet = showMetaKpiSheet;
-  _dpCapMaximumToThisYear = /omega/i.test(clientName);
 
   useEffect(() => {
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
