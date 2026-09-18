@@ -116,6 +116,12 @@ export default function GhlConfigForm({ clientId, hasToken, currentLocationId, c
         <p className="mt-1 text-xs text-slate-500">
           When set, only contacts with this EXACT tag count toward the Leads KPI (e.g. won&apos;t match &ldquo;{leadsTag || 'new ad lead'} - stretch&rdquo; if this is &ldquo;{leadsTag || 'new ad lead'}&rdquo;) — useful when this location has multiple offer/campaign lines with different tags. Leave blank to count only contacts with an attributed campaign instead, which excludes manual entries and imports but doesn&apos;t distinguish between offers.
         </p>
+        <p className="mt-1 text-xs text-slate-500">
+          If this location has used more than one tag over time, list them all separated by <span className="font-mono">|</span> (e.g. <span className="font-mono">new ad lead|new ad lead v2</span>) — each one is still matched exactly.
+        </p>
+        <p className="mt-1 text-xs text-slate-500">
+          Bookings follow the same setting: with a tag set, a booking is any contact carrying both this tag and &ldquo;booked appointment&rdquo;, counted once in the month it was created. Left blank, bookings need an attributed campaign.
+        </p>
       </div>
 
       <div className="p-3 bg-slate-800/50 border border-slate-700/60 rounded-lg space-y-3">

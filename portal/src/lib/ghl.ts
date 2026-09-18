@@ -2,7 +2,9 @@
 //
 // fetchGhlBookings returns one row per (contact, attribution snapshot) for
 // every contact tagged "booked appointment" whose dateUpdated-dateAdded ≤ 30
-// days. fetchGhlLeads (below) returns one or two rows per contact for EVERY
+// days — or, when the client has a Leads Tag configured, exactly one row per
+// contact carrying BOTH tags (see the leadsTag comment on fetchGhlBookings).
+// fetchGhlLeads (below) returns one or two rows per contact for EVERY
 // contact in the location — used by the Agency Overview so Leads and
 // Bookings are genuinely distinct numbers instead of both reading the
 // tagged-contact set. The raw fetch is unfiltered; callers apply
@@ -143,8 +145,27 @@ export function dayInTimezone(isoTimestamp: string, timezone: string): string {
   return isoTimestamp.slice(0, 10);
 }
 
-export async function fetchGhlBookings(opts: { token: string; locationId?: string }): Promise<GhlFetchResult> {
+// leadsTag = the client's admin-configured Leads Tag (clients.ghl_leads_tag).
+// When set, a booking is a DISTINCT CONTACT carrying both that exact tag
+// (case-insensitive, same rule as isQualifyingLead) and the booking tag,
+// dated by dateAdded — one row per contact, campaign attribution optional,
+// and no 30-day window. This matches filtering GHL's own contact list by
+// those two tags. The attribution-based rules below undercounted it three
+// ways, confirmed live 2026-09-18 on Alloy Buckhead (Aug 2026: 17 shown vs
+// 20 real): contacts with no campaign on the record produced no row at all,
+// and the 30-day dateUpdated-dateAdded window silently removed contacts from
+// PAST months whenever their record was touched later (a booked lead tagged
+// "active membership" on day 31 vanished from the month they booked in) —
+// 56 of that location's 186 booked contacts, all time. With no Leads Tag
+// configured there is nothing else to tell an ad lead from a walk-in, so the
+// original attribution-based behaviour is kept unchanged for those clients.
+//
+// The Leads Tag field accepts several tags separated by `|` — see
+// parseLeadsTags below for why.
+export async function fetchGhlBookings(opts: { token: string; locationId?: string; leadsTag?: string }): Promise<GhlFetchResult> {
   const { token } = opts;
+  const leadsTags = parseLeadsTags(opts.leadsTag || '');
+  const leadsTag = leadsTags.join('|');
   if (!token) throw new GhlError('NO_TOKEN', 'GHL token is not configured for this client.', 400);
 
   // Resolve locationId: caller-provided wins, fall back to JWT payload.
@@ -153,7 +174,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
     throw new GhlError('NO_TOKEN', 'GHL location ID is required. Paste it in the admin form next to the PIT.', 400);
   }
 
-  const cacheKey = `${hashToken(token)}|${locationId}`;
+  const cacheKey = `${hashToken(token)}|${locationId}|${leadsTag}`;
   const hit = _cache.get(cacheKey);
   if (hit && hit.expires > Date.now()) return hit.result;
 
@@ -213,6 +234,24 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
       const tAdded = Date.parse(c.dateAdded);
       const tUpdated = Date.parse(c.dateUpdated);
       if (!Number.isFinite(tAdded) || !Number.isFinite(tUpdated)) continue;
+
+      if (leadsTag) {
+        const tags = Array.isArray(c.tags) ? c.tags : [];
+        if (!tags.some(t => leadsTags.includes(t.toLowerCase()))) continue;
+        const isCancelled = tags.includes(CANCELLED_TAG);
+        if (isCancelled) cancelledContacts++;
+        rows.push({
+          // '' when the contact has no ad campaign on record: still a real
+          // booking for the KPI card, just not attributable to a table row.
+          campaignId: c.attributionSource?.campaign?.trim() || c.lastAttributionSource?.campaign?.trim() || '',
+          date: c.dateAdded,
+          contactId: c.id,
+          attribution: 'first',
+          cancelled: isCancelled,
+        });
+        continue;
+      }
+
       if (tUpdated - tAdded > THIRTY_DAYS_MS) { outsideWindow++; continue; }
 
       // A contact is "cancelled" when they carry both the booked AND cancelled
@@ -502,9 +541,21 @@ export async function fetchGhlFormSubmissions(opts: { token: string; locationId?
 //     populated (came in via a tracked ad) — NOT a fallback to counting
 //     every contact in the location.
 export function isQualifyingLead(row: GhlLeadRow, leadsTag: string): boolean {
-  const tag = leadsTag.trim().toLowerCase();
-  if (tag) return row.tags.some(t => t.toLowerCase() === tag);
+  const tags = parseLeadsTags(leadsTag);
+  if (tags.length > 0) return row.tags.some(t => tags.includes(t.toLowerCase()));
   return row.hasAttribution;
+}
+
+// The admin Leads Tag field holds one tag or several separated by `|` (same
+// delimiter as campaign_filter and sheet_tab). Each is still an EXACT match,
+// so "new ad lead" never matches "new ad lead - stretch" by accident — but a
+// location that renames its own tag over time can list every spelling it has
+// used. Confirmed live 2026-09-18: the three Anytime Fitness BC clubs tag some
+// months "new ad lead" and others "new ad lead v2", and Taylor Made uses
+// "new ad lead - first session free" alongside "new ad lead"; a single exact
+// tag silently dropped whole months of their leads and bookings.
+export function parseLeadsTags(leadsTag: string): string[] {
+  return leadsTag.split('|').map(t => t.trim().toLowerCase()).filter(Boolean);
 }
 
 // Confirms a PIT token actually has access to the given locationId, catching

@@ -254,7 +254,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
         const token = decrypt(c.ghl_token_enc);
         const [leadsResult, bookingsResult, submissionsResult] = await Promise.all([
           fetchGhlLeads({ token, locationId: c.ghl_location_id }),
-          fetchGhlBookings({ token, locationId: c.ghl_location_id }),
+          fetchGhlBookings({ token, locationId: c.ghl_location_id, leadsTag: c.ghl_leads_tag }),
           fetchGhlFormSubmissions({ token, locationId: c.ghl_location_id }),
         ]);
 

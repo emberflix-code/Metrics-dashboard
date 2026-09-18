@@ -18,6 +18,7 @@ import { getClientConnection, getAccountTimezone } from '@/lib/meta';
 interface ClientConfig {
   ghl_token_enc: string;
   ghl_location_id: string;
+  ghl_leads_tag: string;
 }
 
 export async function GET(req: NextRequest) {
@@ -29,7 +30,7 @@ export async function GET(req: NextRequest) {
   const until = url.searchParams.get('until') ?? '';
 
   const [client] = await query<ClientConfig>(
-    `SELECT c.ghl_token_enc, c.ghl_location_id
+    `SELECT c.ghl_token_enc, c.ghl_location_id, c.ghl_leads_tag
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -49,7 +50,7 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const result = await fetchGhlBookings({ token, locationId: client.ghl_location_id || undefined });
+    const result = await fetchGhlBookings({ token, locationId: client.ghl_location_id || undefined, leadsTag: client.ghl_leads_tag || '' });
 
     // Bucket by the client's own Meta ad account timezone (not GHL's, and
     // not raw UTC) so "today/yesterday" here lines up with the rest of the
