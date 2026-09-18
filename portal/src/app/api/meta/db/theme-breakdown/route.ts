@@ -144,6 +144,15 @@ export async function GET(req: NextRequest) {
       );
       if (allowedAdIds.size === 0) continue;
 
+      // LEFT JOIN, not JOIN: a creative only gets a meta_creative_assets row once
+      // its metadata could be looked up (see metaSync.ts — deleted/old ads and
+      // failed hash lookups are left without one). Its spend is still real and
+      // still synced, so an inner join silently dropped it from Image vs Video:
+      // confirmed 2026-09-18 on Alloy Ops, Aug 2026 showed $70,174.70 where the
+      // breakdown table (and Meta) had $79,494 — 31% of that account's all-time
+      // breakdown spend has no asset row. Those rows have no theme/UGC tag by
+      // definition, so they only ever land in the Image/Video buckets.
+      //
       // Grouped by campaign_name too (not just asset_key) — needed to know
       // each creative's OWN spend within each campaign for the bookings/
       // joins attribution share below. b.campaign_name can be '' for rows
@@ -156,7 +165,7 @@ export async function GET(req: NextRequest) {
                 SUM(b.link_clicks)::text AS link_clicks, SUM(b.results)::text AS results,
                 SUM(b.reach)::text AS reach, (COUNT(b.reach) > 0) AS any_reach_synced
          FROM meta_asset_breakdown_daily b
-         JOIN meta_creative_assets a ON a.account_id = b.account_id AND a.asset_key = b.asset_key
+         LEFT JOIN meta_creative_assets a ON a.account_id = b.account_id AND a.asset_key = b.asset_key
          WHERE b.account_id = $1 AND b.date BETWEEN $2 AND $3 AND b.ad_id = ANY($4)
          GROUP BY b.asset_key, b.campaign_name, a.theme, a.ugc_status`,
         [accountId, since, until, Array.from(allowedAdIds)]
