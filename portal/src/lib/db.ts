@@ -479,6 +479,35 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_theme_breakdown BO
 // sees it until an admin enables it for them.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_insights BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// Live "is this client on their dashboard right now" presence, backing the
+// admin Monitoring page's Live badge (see /admin/monitoring). DashboardClient.tsx
+// pings POST /api/heartbeat every ~30s while its tab is open and visible;
+// the monitoring page treats a client as live if last_seen_at is within the
+// last ~90s (3 missed beats), so a closed tab or dead connection reads as
+// offline within that window without needing an explicit "tab closed" signal
+// (which the browser can't reliably send anyway — see beforeunload's
+// unreliability on mobile/backgrounding).
+//
+// Two tables, not one, because "current state" and "history" have different
+// write/read shapes: client_heartbeats is upserted in place (one row per
+// client, always the latest ping — cheap to read for the live badge without
+// scanning history), while client_heartbeat_events is append-only (one row
+// per ping received) so a short recent-activity trend is possible later.
+// Pruned by last_seen_at/seen_at age, not row count, since ping volume scales
+// with how many clients are simultaneously active, not with time.
+pool.query(`CREATE TABLE IF NOT EXISTS client_heartbeats (
+  client_id     UUID PRIMARY KEY REFERENCES clients(id) ON DELETE CASCADE,
+  last_seen_at  TIMESTAMPTZ NOT NULL,
+  last_path     TEXT NOT NULL DEFAULT ''
+)`).catch(() => {});
+pool.query(`CREATE TABLE IF NOT EXISTS client_heartbeat_events (
+  id         BIGSERIAL PRIMARY KEY,
+  client_id  UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  seen_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  path       TEXT NOT NULL DEFAULT ''
+)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_client_heartbeat_events_client_time ON client_heartbeat_events (client_id, seen_at DESC)`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

@@ -4977,6 +4977,34 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
     if (ready >= 2) initDashboard(accountIds, campaignFilter, showAccount);
   }, [ready, accountIds, campaignFilter, showAccount]);
 
+  // Presence heartbeat for the admin Monitoring page's Live badge — see
+  // client_heartbeats' own comment in lib/db.ts. Independent of the `ready`
+  // gate above (chart/icon script loads have nothing to do with whether a
+  // real person is looking at this tab), and gated on document visibility
+  // so a backgrounded/minimized tab stops pinging within one interval tick
+  // instead of reporting "live" for a tab nobody's looking at. Fires once
+  // immediately on mount (don't make an admin wait a full interval to see a
+  // client show up as live) then every 30s while visible.
+  useEffect(() => {
+    let cancelled = false;
+    function ping() {
+      if (cancelled || document.visibilityState !== 'visible') return;
+      fetch('/api/heartbeat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: window.location.pathname }),
+      }).catch(() => { /* best-effort — a missed ping just lets the Live badge lapse a bit early */ });
+    }
+    ping();
+    const interval = setInterval(ping, 30_000);
+    document.addEventListener('visibilitychange', ping);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', ping);
+    };
+  }, []);
+
   const incReady = () => setReady(r => r + 1);
 
   return (

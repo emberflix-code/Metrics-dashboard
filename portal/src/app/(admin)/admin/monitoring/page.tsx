@@ -2,6 +2,7 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
+import AutoRefresh from './AutoRefresh';
 
 interface ClientRow {
   id: string;
@@ -54,6 +55,18 @@ export default async function MonitoringPage() {
   `);
   const syncByAccount = new Map(syncRows.map(r => [r.account_id, r] as const));
 
+  // Live presence — see client_heartbeats' comment in lib/db.ts. A client
+  // counts as "live" if its last heartbeat (sent every ~30s while a tab is
+  // open and visible) landed within LIVE_WINDOW_SECONDS — wide enough to
+  // survive a couple of missed beats (a slow request, a brief network
+  // blip) without flickering offline, tight enough that a closed tab reads
+  // as offline well within one page auto-refresh cycle.
+  const LIVE_WINDOW_SECONDS = 90;
+  const heartbeats = await query<{ client_id: string; last_seen_at: string; last_path: string }>(
+    `SELECT client_id, last_seen_at, last_path FROM client_heartbeats WHERE last_seen_at > NOW() - INTERVAL '${LIVE_WINDOW_SECONDS} seconds'`
+  );
+  const liveByClient = new Map(heartbeats.map(h => [h.client_id, h] as const));
+
   // A sync run older than this with no update is worth flagging — the
   // daily scheduler (instrumentation.ts) is expected to touch every
   // client-attached account roughly once a day.
@@ -102,9 +115,19 @@ export default async function MonitoringPage() {
       <div className="max-w-7xl mx-auto">
         <div className="flex items-center justify-between mb-4 flex-wrap gap-3">
           <div>
-            <h1 className="text-xl font-bold text-white">Client Monitoring</h1>
+            <h1 className="text-xl font-bold text-white">
+              Client Monitoring
+              <span className="ml-2 font-mono text-[11px] text-slate-600 font-normal" title="Deployed build">
+                {(() => {
+                  const version = process.env.NEXT_PUBLIC_VERSION;
+                  const sha = process.env.NEXT_PUBLIC_BUILD_SHA || 'dev';
+                  return !version || version === sha ? `v.${sha}` : `${version} (${sha})`;
+                })()}
+              </span>
+            </h1>
             <p className="text-sm text-slate-400 mt-0.5">
               Config snapshot + Meta sync health per client — data/leads source, Creatives version, last sync, sync errors.
+              Live status auto-refreshes every 30s.
             </p>
           </div>
           <a
@@ -122,11 +145,16 @@ export default async function MonitoringPage() {
           <span className="text-xs font-semibold px-2 py-1 rounded-full bg-slate-700/50 text-slate-400">
             {rows.length - activeRows.length} inactive
           </span>
+          <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-2 py-1 rounded-full bg-blue-500/15 text-blue-300">
+            <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+            {liveByClient.size} live now
+          </span>
           {flaggedCount > 0 && (
             <span className="text-xs font-semibold px-2 py-1 rounded-full bg-amber-500/15 text-amber-300">
               {flaggedCount} flagged (no account / sync error / stale sync)
             </span>
           )}
+          <AutoRefresh intervalMs={30_000} />
         </div>
 
         <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden overflow-x-auto">
@@ -134,6 +162,7 @@ export default async function MonitoringPage() {
             <thead>
               <tr className="border-b border-slate-800 bg-slate-800/40">
                 <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Client</th>
+                <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Live</th>
                 <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Status</th>
                 <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Data Source</th>
                 <th className="text-left px-4 py-2.5 text-xs font-semibold text-slate-400 uppercase tracking-wider">Leads Source</th>
@@ -146,10 +175,21 @@ export default async function MonitoringPage() {
             <tbody>
               {rows.map(r => {
                 const c = r.client;
+                const heartbeat = liveByClient.get(c.id);
                 return (
                   <tr key={c.id} className={`border-b border-slate-800/50 hover:bg-slate-800/30 ${!c.active ? 'opacity-50' : ''}`}>
                     <td className="px-4 py-2.5 font-medium text-white">
                       <a href={`/admin/clients/${c.id}`} className="hover:text-blue-300">{c.name}</a>
+                    </td>
+                    <td className="px-4 py-2.5">
+                      {heartbeat ? (
+                        <span className="inline-flex items-center gap-1.5 text-xs font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-300" title={`On ${heartbeat.last_path || 'their dashboard'}`}>
+                          <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" />
+                          Live
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-600">—</span>
+                      )}
                     </td>
                     <td className="px-4 py-2.5">
                       <span className={`text-xs font-semibold px-1.5 py-0.5 rounded-full ${c.active ? 'bg-emerald-500/15 text-emerald-300' : 'bg-slate-700/50 text-slate-400'}`}>
