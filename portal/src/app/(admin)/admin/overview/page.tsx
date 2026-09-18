@@ -17,6 +17,7 @@ import InlineNumberField from './InlineNumberField';
 import GroupBySelect, { GroupByKey } from './GroupBySelect';
 import SearchBox from './SearchBox';
 import GroupSection from './GroupSection';
+import InactiveClientsSection from './InactiveClientsSection';
 import { groupColorFor } from './groupColors';
 import { resolveDateRange, resolveThisWeekRanges } from './dateRange';
 import { namePrefixGroup } from './grouping';
@@ -97,6 +98,20 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
     JOIN users u ON u.id = cu.user_id
     WHERE c.active = true
     ORDER BY c.sort_order ASC, c.name ASC
+  `);
+
+  // Inactive clients render as a separate, collapsed, metrics-free list
+  // below the main table (name + toggle only) — deliberately NOT run
+  // through the same Meta/GHL fetch pipeline as active clients, since an
+  // inactive client's numbers are stale by definition and computing them
+  // on every /admin/overview load would slow the page down for no benefit.
+  const inactiveClients = await query<{ id: string; name: string }>(`
+    SELECT c.id, c.name
+    FROM clients c
+    JOIN client_users cu ON cu.client_id = c.id
+    JOIN users u ON u.id = cu.user_id
+    WHERE c.active = false
+    ORDER BY c.name ASC
   `);
 
   const bmRows = await query<BmConnectionRow>(`SELECT token_enc, account_ids FROM agency_bm_connections`);
@@ -594,8 +609,16 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
                 )}
               </span>
             </h1>
-            <p className="text-sm text-slate-400 mt-0.5">
-              Active clients — leads &amp; bookings from GoHighLevel, spend from Meta, CPL computed per client.
+            <p className="text-sm text-slate-400 mt-0.5 flex items-center gap-2 flex-wrap">
+              <span>Active clients — leads &amp; bookings from GoHighLevel, spend from Meta, CPL computed per client.</span>
+              <span className="inline-flex items-center gap-1.5">
+                <span className="text-xs font-semibold px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300" title="Active clients">
+                  {results.length} active
+                </span>
+                <span className="text-xs font-semibold px-1.5 py-0.5 rounded-full bg-slate-700/50 text-slate-400" title="Inactive clients — hidden from this list's metrics, dashboard/login still works">
+                  {inactiveClients.length} inactive
+                </span>
+              </span>
             </p>
             <div className="mt-1.5">
               <DeployHistoryPanel />
@@ -661,6 +684,8 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
             </tbody>
           </table>
         </div>
+
+        {inactiveClients.length > 0 && <InactiveClientsSection clients={inactiveClients} />}
       </div>
     </div>
   );
