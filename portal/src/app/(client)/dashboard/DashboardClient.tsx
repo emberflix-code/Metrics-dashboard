@@ -216,6 +216,9 @@ let _cpaRetainerForRange = 0;
 // the CPA card can list who counted as an acquisition without a second
 // fetch. Only populated with rows where won === true.
 let _cpaWonLeads: { day: string; name: string }[] = [];
+// Booked GHL contacts for the current range — feeds the clickable Bookings
+// card's modal. Same rows the card's count is summed from.
+let _ghlBookingRows: { day: string; contactId: string; name: string; email: string; phone: string; tags: string[]; cancelled: boolean }[] = [];
 
 // LTV KPI card — won leads in the selected range (shares the CPA
 // acquisitions fetch above) x an admin-entered value per sale.
@@ -1015,7 +1018,8 @@ function renderCards(t: any, selCount=0) {
         subtitle = '<span class="text-slate-500 text-[11px]">— book rate</span>';
       }
     }
-    cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:subtitle, notFilterable:true});
+    if (bookingsSum > 0) subtitle += `<span class="block text-slate-500 text-[11px]">click to view</span>`;
+    cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:subtitle, notFilterable:true, onClick: bookingsSum > 0 ? '_openBookingsModal()' : undefined});
   }
   if (_showCpa && _cpaAcquisitionsByDay && _platform === 'meta') {
     let acquisitions = 0;
@@ -3761,21 +3765,26 @@ async function fetchGhlBookingsForClient(since: string, until: string): Promise<
   if (_leadsSource !== 'ghl' && !_showBookings) {
     _ghlBookingsByDay = null;
     _ghlBookingsByCampaignId = null;
+    _ghlBookingRows = [];
     return;
   }
   try {
     const url = `/api/ghl/bookings?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`;
     const res = await fetch(url);
     const json = await res.json() as {
-      rows?: { campaignId: string; day: string; contactId: string; attribution: 'first' | 'last'; cancelled: boolean }[];
+      rows?: { campaignId: string; day: string; contactId: string; attribution: 'first' | 'last'; cancelled: boolean; name?: string; email?: string; phone?: string; tags?: string[] }[];
       enabled?: boolean;
       error?: string;
     };
     if (!json.enabled || !json.rows) {
       _ghlBookingsByDay = null;
       _ghlBookingsByCampaignId = null;
+      _ghlBookingRows = [];
       return;
     }
+    _ghlBookingRows = json.rows
+      .map(r => ({ day: r.day, contactId: r.contactId, name: r.name || '', email: r.email || '', phone: r.phone || '', tags: r.tags || [], cancelled: r.cancelled }))
+      .sort((a, b) => b.day.localeCompare(a.day));
     const byDay: Record<string, number> = {};
     const byCampaign: Record<string, number> = {};
     for (const r of json.rows) {
@@ -3787,6 +3796,7 @@ async function fetchGhlBookingsForClient(since: string, until: string): Promise<
   } catch {
     _ghlBookingsByDay = null;
     _ghlBookingsByCampaignId = null;
+    _ghlBookingRows = [];
   }
 }
 
@@ -4853,6 +4863,50 @@ if (typeof window !== 'undefined') {
     document.body.style.overflow = '';
   };
 
+  // Bookings card click → the booked GHL contacts behind the number, with
+  // their contact details, tags and the day they were counted on. Rows arrive
+  // with the KPI fetch (same as the CPA modal), so there's nothing to load.
+  (window as any)._openBookingsModal = () => {
+    const modal = document.getElementById('bookings-modal');
+    const body = document.getElementById('bookings-modal-body');
+    if (!modal || !body) return;
+    let rows = _ghlBookingRows;
+    try {
+      const { since, until } = getDateRange();
+      rows = rows.filter(r => r.day >= since && r.day <= until);
+    } catch { /* keep the unclipped list */ }
+    if (rows.length === 0) {
+      body.innerHTML = `<p class="text-sm text-slate-400">No booked leads in the selected date range.</p>`;
+    } else {
+      body.innerHTML = `
+        <p class="text-xs text-slate-500 mb-3">${rows.length} booked lead${rows.length===1?'':'s'} in the selected date range</p>
+        <ul class="divide-y divide-slate-800">
+          ${rows.map(r => {
+            const contact = [r.email, r.phone].filter(Boolean).map(esc).join(' · ');
+            const tags = r.tags.map(t => `<span class="inline-block px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-300">${esc(t)}</span>`).join(' ');
+            return `
+            <li class="py-3">
+              <div class="flex items-start justify-between gap-3">
+                <span class="text-sm text-white">${esc(r.name || '(no name)')}${r.cancelled ? ' <span class="text-[10px] text-rose-300">cancelled</span>' : ''}</span>
+                <span class="text-xs text-slate-500 font-mono whitespace-nowrap">${_dpDisplay(r.day)}</span>
+              </div>
+              ${contact ? `<div class="mt-0.5 text-xs text-slate-400">${contact}</div>` : ''}
+              ${tags ? `<div class="mt-1.5 flex flex-wrap gap-1">${tags}</div>` : ''}
+            </li>`;
+          }).join('')}
+        </ul>`;
+    }
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  };
+
+  (window as any)._closeBookingsModal = () => {
+    const modal = document.getElementById('bookings-modal');
+    if (!modal) return;
+    modal.classList.add('hidden');
+    document.body.style.overflow = '';
+  };
+
   // Meta instant-form lead names. Unlike the CPA modal (whose rows arrive with
   // the KPI fetch), these are fetched on demand for the current range — the
   // walk from campaigns to forms to leads is several Graph calls, and most
@@ -4934,6 +4988,12 @@ if (typeof window !== 'undefined') {
     if (e.key === 'Escape') {
       const modal = document.getElementById('lead-names-modal');
       if (modal && !modal.classList.contains('hidden')) (window as any)._closeLeadNamesModal();
+    }
+  });
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      const modal = document.getElementById('bookings-modal');
+      if (modal && !modal.classList.contains('hidden')) (window as any)._closeBookingsModal();
     }
   });
   window.addEventListener('keydown', (e) => {
@@ -5791,6 +5851,19 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
             <button onClick={()=>(window as any)._closeCpaModal?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
           </div>
           <div id="cpa-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
+        </div>
+      </div>
+
+      {/* GHL booked leads */}
+      <div id="bookings-modal" className="hidden fixed inset-0 z-[210]" style={{background:'rgba(0,0,0,.7)',backdropFilter:'blur(4px)'}} onClick={(e)=>{ if(e.target===e.currentTarget) (window as any)._closeBookingsModal?.(); }} onKeyDown={(e)=>{ if(e.key==='Escape') (window as any)._closeBookingsModal?.(); }}>
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-slate-900 border border-slate-800 rounded-xl shadow-2xl w-[95vw] max-w-[640px] max-h-[80vh] overflow-hidden flex flex-col" onClick={e=>e.stopPropagation()}>
+          <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
+            <h3 className="text-sm font-semibold text-white flex items-center gap-2">
+              <i data-lucide="calendar-check" className="w-4 h-4 text-teal-400"></i> Booked leads
+            </h3>
+            <button onClick={()=>(window as any)._closeBookingsModal?.()} className="text-slate-400 hover:text-white text-xl leading-none">&times;</button>
+          </div>
+          <div id="bookings-modal-body" className="p-5 overflow-y-auto scrollbar-thin"></div>
         </div>
       </div>
 

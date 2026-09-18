@@ -52,6 +52,12 @@ export interface GhlBookingRow {
   // Counted toward total bookings but NOT toward kept bookings — used for
   // the Book Rate (kept / booked) ratio.
   cancelled: boolean;
+  // Contact details for the dashboard's clickable Bookings card. Served only
+  // to a session already scoped to this client's own GHL location.
+  name: string;
+  email: string;
+  phone: string;
+  tags: string[];
 }
 
 export interface GhlFetchResult {
@@ -85,6 +91,7 @@ interface GhlContact {
   firstName?: string;
   lastName?: string;
   email?: string;
+  phone?: string;
   attributionSource?: { campaign?: string; fbc?: string };
   lastAttributionSource?: { campaign?: string; fbc?: string };
 }
@@ -235,8 +242,15 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
       const tUpdated = Date.parse(c.dateUpdated);
       if (!Number.isFinite(tAdded) || !Number.isFinite(tUpdated)) continue;
 
+      const details = {
+        name: [c.firstName, c.lastName].filter(Boolean).join(' ').trim(),
+        email: c.email?.trim() || '',
+        phone: c.phone?.trim() || '',
+        tags: Array.isArray(c.tags) ? c.tags : [],
+      };
+
       if (leadsTag) {
-        const tags = Array.isArray(c.tags) ? c.tags : [];
+        const tags = details.tags;
         if (!tags.some(t => leadsTags.includes(t.toLowerCase()))) continue;
         const isCancelled = tags.includes(CANCELLED_TAG);
         if (isCancelled) cancelledContacts++;
@@ -248,6 +262,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
           contactId: c.id,
           attribution: 'first',
           cancelled: isCancelled,
+          ...details,
         });
         continue;
       }
@@ -270,6 +285,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
           contactId: c.id,
           attribution: 'first',
           cancelled,
+          ...details,
         });
       }
       if (lastCampaign && lastCampaign !== firstCampaign) {
@@ -279,6 +295,7 @@ export async function fetchGhlBookings(opts: { token: string; locationId?: strin
           contactId: c.id,
           attribution: 'last',
           cancelled,
+          ...details,
         });
       }
     }

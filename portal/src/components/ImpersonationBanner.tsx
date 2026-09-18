@@ -4,7 +4,7 @@ import { useState } from 'react';
 
 // Shown at the top of the client dashboard when an admin is viewing as
 // this client. Clicking Return posts to /api/admin/impersonate/stop which
-// swaps the session cookie back and redirects to /admin.
+// swaps the session cookie back and redirects to that client's config page.
 export default function ImpersonationBanner({ adminEmail, clientName }: { adminEmail: string; clientName: string }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -42,7 +42,7 @@ export default function ImpersonationBanner({ adminEmail, clientName }: { adminE
             disabled={loading}
             className="px-3 py-1 text-xs font-medium bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-md disabled:opacity-50"
           >
-            {loading ? 'Returning…' : 'Return to admin'}
+            {loading ? 'Returning…' : 'Back to client config'}
           </button>
         </div>
       </div>

@@ -47,7 +47,14 @@ export async function POST() {
 
   const isProd = (process.env.NEXTAUTH_URL || '').startsWith('https://');
   const cookieName = isProd ? '__Secure-next-auth.session-token' : 'next-auth.session-token';
-  const res = NextResponse.json({ ok: true, redirect: '/admin' });
+  // Land back on the config page of the client that was being viewed (that's
+  // where the "View dashboard" button lives), not the full client list. The
+  // UUID check keeps a malformed clientId from ever reaching the URL.
+  const viewedClientId = session.user.clientId;
+  const redirect = viewedClientId && /^[0-9a-f-]{36}$/i.test(viewedClientId)
+    ? `/admin/clients/${viewedClientId}`
+    : '/admin';
+  const res = NextResponse.json({ ok: true, redirect });
   res.cookies.set(cookieName, jwt, {
     httpOnly: true,
     secure: isProd,
