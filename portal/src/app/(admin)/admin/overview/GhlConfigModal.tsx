@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import PillTagInput from '../clients/[id]/PillTagInput';
 
 interface Props {
   clientId: string;
@@ -101,15 +102,11 @@ export default function GhlConfigModal({ clientId, clientName, currentLocationId
               Leads Tag
               <span className="ml-1 text-slate-500 font-normal">(optional)</span>
             </label>
-            <input
-              type="text"
-              value={leadsTag}
-              onChange={e => setLeadsTag(e.target.value)}
-              placeholder="e.g. web lead"
-              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono mb-1"
-            />
+            <div className="mb-1">
+              <PillTagInput value={leadsTag} onChange={setLeadsTag} placeholder="e.g. new ad lead" />
+            </div>
             <p className="text-xs text-slate-500 mb-4">
-              When set, only contacts with this EXACT tag count as leads (e.g. won&apos;t match a tag with extra words appended). Leave blank to count only contacts with an attributed campaign instead. Different clients can use different tags (e.g. per-offer tags). Separate several tags with <span className="font-mono">|</span> if this location has used more than one. Bookings use the same tag(s), combined with &ldquo;booked appointment&rdquo;.
+              One tag per pill — press Enter or click away to add one. When set, only contacts with one of these EXACT tags count as leads (a tag with extra words appended won&apos;t match). Leave empty to count only contacts with an attributed campaign instead. Different clients can use different tags (e.g. per-offer tags); add every tag this location has used as its own pill. Bookings use the same tag(s), combined with &ldquo;booked appointment&rdquo;.
             </p>
 
             {error && <p className="text-sm text-red-400 bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-3">{error}</p>}

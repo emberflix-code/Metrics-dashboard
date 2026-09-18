@@ -4881,17 +4881,20 @@ if (typeof window !== 'undefined') {
       body.innerHTML = `
         <p class="text-xs text-slate-500 mb-3">${rows.length} booked lead${rows.length===1?'':'s'} in the selected date range</p>
         <ul class="divide-y divide-slate-800">
-          ${rows.map(r => {
+          ${rows.map((r, i) => {
             const contact = [r.email, r.phone].filter(Boolean).map(esc).join(' · ');
             const tags = r.tags.map(t => `<span class="inline-block px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-300">${esc(t)}</span>`).join(' ');
             return `
-            <li class="py-3">
+            <li class="py-3 flex gap-3">
+              <span class="w-6 shrink-0 text-right text-xs text-slate-500 font-mono pt-0.5">${i + 1}.</span>
+              <div class="min-w-0 flex-1">
               <div class="flex items-start justify-between gap-3">
                 <span class="text-sm text-white">${esc(r.name || '(no name)')}${r.cancelled ? ' <span class="text-[10px] text-rose-300">cancelled</span>' : ''}</span>
                 <span class="text-xs text-slate-500 font-mono whitespace-nowrap">${_dpDisplay(r.day)}</span>
               </div>
               ${contact ? `<div class="mt-0.5 text-xs text-slate-400">${contact}</div>` : ''}
               ${tags ? `<div class="mt-1.5 flex flex-wrap gap-1">${tags}</div>` : ''}
+              </div>
             </li>`;
           }).join('')}
         </ul>`;

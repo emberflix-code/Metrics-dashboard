@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import PillTagInput from './PillTagInput';
 
 interface Props {
   clientId: string;
@@ -21,6 +22,9 @@ export default function GhlConfigForm({ clientId, hasToken, currentLocationId, c
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState('');
   const [clearingConfirmed, setClearingConfirmed] = useState(false);
+
+  // First pill, for the help text's example (the stored value is `a|b|c`).
+  const exampleTag = leadsTag.split('|').map(t => t.trim()).filter(Boolean)[0] || 'new ad lead';
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -106,18 +110,12 @@ export default function GhlConfigForm({ clientId, hasToken, currentLocationId, c
           Leads Tag
           <span className="ml-1 text-slate-500 font-normal">(optional)</span>
         </label>
-        <input
-          type="text"
-          value={leadsTag}
-          onChange={e => setLeadsTag(e.target.value)}
-          placeholder="e.g. web lead"
-          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500 font-mono"
-        />
+        <PillTagInput value={leadsTag} onChange={setLeadsTag} placeholder="e.g. new ad lead" />
         <p className="mt-1 text-xs text-slate-500">
-          When set, only contacts with this EXACT tag count toward the Leads KPI (e.g. won&apos;t match &ldquo;{leadsTag || 'new ad lead'} - stretch&rdquo; if this is &ldquo;{leadsTag || 'new ad lead'}&rdquo;) — useful when this location has multiple offer/campaign lines with different tags. Leave blank to count only contacts with an attributed campaign instead, which excludes manual entries and imports but doesn&apos;t distinguish between offers.
+          One tag per pill — press Enter or click away to add one. When set, only contacts with one of these EXACT tags count toward the Leads KPI (e.g. &ldquo;{exampleTag}&rdquo; won&apos;t match &ldquo;{exampleTag} - stretch&rdquo;) — useful when this location has multiple offer/campaign lines with different tags. Leave empty to count only contacts with an attributed campaign instead, which excludes manual entries and imports but doesn&apos;t distinguish between offers.
         </p>
         <p className="mt-1 text-xs text-slate-500">
-          If this location has used more than one tag over time, list them all separated by <span className="font-mono">|</span> (e.g. <span className="font-mono">new ad lead|new ad lead v2</span>) — each one is still matched exactly.
+          If this location has used more than one tag over time (e.g. <span className="font-mono">new ad lead</span> and <span className="font-mono">new ad lead v2</span>), add each one as its own pill.
         </p>
         <p className="mt-1 text-xs text-slate-500">
           Bookings follow the same setting: with a tag set, a booking is any contact carrying both this tag and &ldquo;booked appointment&rdquo;, counted once in the month it was created. Left blank, bookings need an attributed campaign.
