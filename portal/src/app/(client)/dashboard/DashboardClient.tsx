@@ -161,7 +161,7 @@ let _sheetLeadsByDay: Record<string, number> | null = null;
 let _sheetLeadsRows: { day: string; campaign: string; leads: number }[] | null = null;
 
 // GHL bookings integration. Source for the optional 7th "Bookings" KPI card
-// AND for the Leads card when _leadsSource === 'ghl'. Pattern mirrors the
+// (the Leads card in GHL mode has its own source, _ghlLeadsByDay). Pattern mirrors the
 // sheet-leads state above — day-bucketed and campaign-id-bucketed for the
 // per-day chart and per-campaign table column respectively.
 //
@@ -216,6 +216,12 @@ let _cpaRetainerForRange = 0;
 // the CPA card can list who counted as an acquisition without a second
 // fetch. Only populated with rows where won === true.
 let _cpaWonLeads: { day: string; name: string }[] = [];
+// Real GHL leads for the Leads card when _leadsSource === 'ghl' — contacts
+// qualifying under the client's Leads Tag (see /api/ghl/leads), NOT the
+// booked-appointment set the Bookings card uses. Null = not in GHL mode or
+// the fetch failed, in which case the Leads card keeps Meta's own number.
+let _ghlLeadsByDay: Record<string, number> | null = null;
+let _ghlLeadRows: { day: string; contactId: string; name: string; email: string; phone: string; tags: string[]; booked: boolean }[] = [];
 // Booked GHL contacts for the current range — feeds the clickable Bookings
 // card's modal. Same rows the card's count is summed from.
 let _ghlBookingRows: { day: string; contactId: string; name: string; email: string; phone: string; tags: string[]; cancelled: boolean }[] = [];
@@ -917,9 +923,9 @@ function renderCards(t: any, selCount=0) {
           if (day >= since && day <= until) sum += leads;
         }
         t = { ...t, results: sum };
-      } else if (_leadsSource === 'ghl' && _ghlBookingsByDay) {
+      } else if (_leadsSource === 'ghl' && _ghlLeadsByDay) {
         let sum = 0;
-        for (const [day, count] of Object.entries(_ghlBookingsByDay)) {
+        for (const [day, count] of Object.entries(_ghlLeadsByDay)) {
           if (day >= since && day <= until) sum += count;
         }
         t = { ...t, results: sum };
@@ -997,6 +1003,16 @@ function renderCards(t: any, selCount=0) {
     const leadsCount = typeof t.results === 'number' ? t.results : 0;
     if (leadsCard && leadsCount > 0) {
       leadsCard.onClick = '_openLeadNamesModal()';
+      leadsCard.delta = `${leadsCard.delta || ''}<span class="block text-slate-500 text-[11px]">click to view</span>`;
+    }
+  }
+  // GHL-sourced Leads card opens the list of those GHL contacts (names,
+  // contact details, tags, date) — rows arrive with the KPI fetch.
+  if (_leadsSource === 'ghl' && _ghlLeadsByDay && _platform === 'meta') {
+    const leadsCard = cards.find(c => c.label === leadsLabel);
+    const leadsCount = typeof t.results === 'number' ? t.results : 0;
+    if (leadsCard && leadsCount > 0) {
+      leadsCard.onClick = '_openGhlLeadsModal()';
       leadsCard.delta = `${leadsCard.delta || ''}<span class="block text-slate-500 text-[11px]">click to view</span>`;
     }
   }
@@ -1184,9 +1200,9 @@ function renderTable() {
         let sum = 0;
         for (const [day, leads] of Object.entries(_sheetLeadsByDay)) if (day >= since && day <= until) sum += leads;
         kpiTotal = sum; sourceLabel = 'your Google Sheet';
-      } else if (_leadsSource === 'ghl' && _ghlBookingsByDay) {
+      } else if (_leadsSource === 'ghl' && _ghlLeadsByDay) {
         let sum = 0;
-        for (const [day, count] of Object.entries(_ghlBookingsByDay)) if (day >= since && day <= until) sum += count;
+        for (const [day, count] of Object.entries(_ghlLeadsByDay)) if (day >= since && day <= until) sum += count;
         kpiTotal = sum; sourceLabel = 'GoHighLevel';
       }
     } catch { /* leave kpiTotal null on any error */ }
@@ -1199,7 +1215,7 @@ function renderTable() {
           <i data-lucide="info" class="w-3.5 h-3.5 text-amber-400 shrink-0 mt-0.5"></i>
           <div class="text-[11px] text-amber-200/90 leading-relaxed">
             <span class="font-semibold">Heads up:</span> the top KPI card shows <span class="font-mono">${kpiTotal}</span> leads (from ${sourceLabel}), but the campaign table&apos;s Leads column sums to <span class="font-mono">${totals.results}</span> (Meta&apos;s own attribution) — a ${pct.toFixed(0)}% gap.
-            <div class="mt-1">${sourceLabel === 'your Google Sheet' ? 'The sheet has no per-campaign breakdown, so its total can&apos;t be split across rows below.' : 'GoHighLevel bookings aren&apos;t attributed per-campaign in the same way Meta is.'} The KPI card remains the source of truth for total leads.</div>
+            <div class="mt-1">${sourceLabel === 'your Google Sheet' ? 'The sheet has no per-campaign breakdown, so its total can&apos;t be split across rows below.' : 'GoHighLevel leads aren&apos;t attributed per-campaign in the same way Meta is.'} The KPI card remains the source of truth for total leads.</div>
           </div>`;
         tableMismatchBanner.classList.remove('hidden');
         tableMismatchBanner.classList.add('flex');
@@ -3632,7 +3648,7 @@ function buildInsights(): InsightReport {
   if (_selectedRows.size) filtersOn.push(`${_selectedRows.size} selected row${_selectedRows.size > 1 ? 's' : ''}`);
   const basis = [
     `${fmt(rows.length)} ${rows.length === 1 ? noun[0] : noun[1]} from the ${Noun} table for ${rangeLabel} (${days} day${days > 1 ? 's' : ''})${filtersOn.length ? `, filtered by ${filtersOn.join(', ')}` : ''}.`,
-    `Leads source: ${_leadsSource === 'sheet' ? 'client KPI sheet' : _leadsSource === 'ghl' ? 'GoHighLevel bookings' : 'Meta lead actions'}. Daily figures come from the same series as the Analytics charts.`,
+    `Leads source: ${_leadsSource === 'sheet' ? 'client KPI sheet' : _leadsSource === 'ghl' ? 'GoHighLevel leads' : 'Meta lead actions'}. Daily figures come from the same series as the Analytics charts.`,
   ];
   if (_showThemeBreakdown) basis.push('Theme findings cover only DCO creatives with an admin-set Theme/UGC tag, so their totals are smaller than the KPI cards.');
 
@@ -3761,8 +3777,43 @@ async function fetchSheetLeadsForMeta(): Promise<void> {
 // enabled. Buckets rows by day (for KPI + trend chart) and by Meta campaign
 // id (for the per-campaign table column).
 async function fetchGhlBookingsForClient(since: string, until: string): Promise<void> {
-  // Skip the network call entirely when neither feature needs it.
-  if (_leadsSource !== 'ghl' && !_showBookings) {
+  await Promise.all([fetchGhlBookingRows(since, until), fetchGhlLeadsForClient(since, until)]);
+}
+
+// Leads card source when the admin set leads_source = 'ghl'. Any failure
+// leaves _ghlLeadsByDay null so the card falls back to Meta's own number
+// rather than showing a misleading 0.
+async function fetchGhlLeadsForClient(since: string, until: string): Promise<void> {
+  if (_leadsSource !== 'ghl') {
+    _ghlLeadsByDay = null;
+    _ghlLeadRows = [];
+    return;
+  }
+  try {
+    const res = await fetch(`/api/ghl/leads?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
+    const json = await res.json() as {
+      leads?: { contactId: string; name: string; email: string; phone: string; day: string; tags: string[]; booked: boolean }[];
+      enabled?: boolean;
+      error?: string;
+    };
+    if (!res.ok || !json.enabled || !json.leads) {
+      _ghlLeadsByDay = null;
+      _ghlLeadRows = [];
+      return;
+    }
+    const byDay: Record<string, number> = {};
+    for (const l of json.leads) byDay[l.day] = (byDay[l.day] || 0) + 1;
+    _ghlLeadsByDay = byDay;
+    _ghlLeadRows = json.leads;
+  } catch {
+    _ghlLeadsByDay = null;
+    _ghlLeadRows = [];
+  }
+}
+
+async function fetchGhlBookingRows(since: string, until: string): Promise<void> {
+  // Skip the network call entirely when the Bookings card is off.
+  if (!_showBookings) {
     _ghlBookingsByDay = null;
     _ghlBookingsByCampaignId = null;
     _ghlBookingRows = [];
@@ -4910,6 +4961,45 @@ if (typeof window !== 'undefined') {
     document.body.style.overflow = '';
   };
 
+  // GHL-sourced Leads card click → the GHL contacts behind the number. Reuses
+  // the Leads modal shell below; rows arrive with the KPI fetch.
+  (window as any)._openGhlLeadsModal = () => {
+    const modal = document.getElementById('lead-names-modal');
+    const body = document.getElementById('lead-names-modal-body');
+    if (!modal || !body) return;
+    let rows = _ghlLeadRows;
+    try {
+      const { since, until } = getDateRange();
+      rows = rows.filter(r => r.day >= since && r.day <= until);
+    } catch { /* keep the unclipped list */ }
+    if (rows.length === 0) {
+      body.innerHTML = `<p class="text-sm text-slate-400">No leads found in the selected date range.</p>`;
+    } else {
+      body.innerHTML = `
+        <p class="text-xs text-slate-500 mb-3">${rows.length} lead${rows.length === 1 ? '' : 's'} in the selected date range</p>
+        <ul class="divide-y divide-slate-800">
+          ${rows.map((r, i) => {
+            const contact = [r.email, r.phone].filter(Boolean).map(esc).join(' · ');
+            const tags = r.tags.map(t => `<span class="inline-block px-1.5 py-0.5 rounded bg-slate-800 border border-slate-700 text-[10px] text-slate-300">${esc(t)}</span>`).join(' ');
+            return `
+            <li class="py-3 flex gap-3">
+              <span class="w-6 shrink-0 text-right text-xs text-slate-500 font-mono pt-0.5">${i + 1}.</span>
+              <div class="min-w-0 flex-1">
+              <div class="flex items-start justify-between gap-3">
+                <span class="text-sm text-white font-medium">${esc(r.name || '(no name)')}${r.booked ? ' <span class="text-[10px] text-teal-300">booked</span>' : ''}</span>
+                <span class="text-xs text-slate-500 font-mono whitespace-nowrap">${_dpDisplay(r.day)}</span>
+              </div>
+              ${contact ? `<div class="mt-0.5 text-xs text-slate-400">${contact}</div>` : ''}
+              ${tags ? `<div class="mt-1.5 flex flex-wrap gap-1">${tags}</div>` : ''}
+              </div>
+            </li>`;
+          }).join('')}
+        </ul>`;
+    }
+    modal.classList.remove('hidden');
+    document.body.style.overflow = 'hidden';
+  };
+
   // Meta instant-form lead names. Unlike the CPA modal (whose rows arrive with
   // the KPI fetch), these are fetched on demand for the current range — the
   // walk from campaigns to forms to leads is several Graph calls, and most
@@ -4932,14 +5022,17 @@ if (typeof window !== 'undefined') {
       body.innerHTML = `
         <p class="text-xs text-slate-500 mb-3">${rows.length} lead${rows.length === 1 ? '' : 's'} in the selected date range</p>
         <ul class="divide-y divide-slate-800">
-          ${rows.map(l => `
-            <li class="py-2.5">
+          ${rows.map((l, i) => `
+            <li class="py-2.5 flex gap-3">
+              <span class="w-6 shrink-0 text-right text-xs text-slate-500 font-mono pt-0.5">${i + 1}.</span>
+              <div class="min-w-0 flex-1">
               <div class="flex items-start justify-between gap-3">
                 <span class="text-sm text-white font-medium">${esc(l.name)}</span>
                 <span class="text-xs text-slate-500 font-mono shrink-0">${_dpDisplay(l.createdTime.slice(0, 10))}</span>
               </div>
               ${l.email ? `<div class="text-xs text-slate-400 mt-0.5">${esc(l.email)}</div>` : ''}
               ${l.phone ? `<div class="text-xs text-slate-400 mt-0.5 font-mono">${esc(l.phone)}</div>` : ''}
+              </div>
             </li>`).join('')}
         </ul>`;
     };

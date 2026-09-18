@@ -121,7 +121,7 @@ export default function SheetConfigForm({ clientId, currentSheetId, currentSheet
             Google Sheet — sum of &ldquo;Leads&rdquo; column from the Meta tab above{sheetDisabled ? ' (set a Meta tab first)' : ''}
           </option>
           <option value="ghl" disabled={ghlDisabled}>
-            GoHighLevel — count of booked-contact attributions{ghlDisabled ? ' (configure a GHL token first)' : ''}
+            GoHighLevel — contacts carrying the Leads Tag (or an attributed campaign if no tag is set){ghlDisabled ? ' (configure a GHL token first)' : ''}
           </option>
         </select>
         <p className="text-[11px] text-slate-500 leading-relaxed">

@@ -331,6 +331,7 @@ export interface GhlLeadRow {
   contactId: string;
   name: string;
   email: string;
+  phone: string;
   tags: string[];
   hasAttribution: boolean;
 }
@@ -415,6 +416,7 @@ export async function fetchGhlLeads(opts: { token: string; locationId?: string }
         contactId: c.id,
         name: [c.firstName, c.lastName].filter(Boolean).join(' ').trim(),
         email: c.email?.trim() || '',
+        phone: c.phone?.trim() || '',
         tags: Array.isArray(c.tags) ? c.tags : [],
         hasAttribution: campaignId.length > 0,
       });
