@@ -1105,7 +1105,12 @@ interface BreakdownRow {
   ad_id?: string; date_start?: string; spend?: string; impressions?: string; inline_link_clicks?: string; reach?: string;
   campaign_name?: string;
   actions?: { action_type: string; value: string }[];
-  image_asset?: { hash?: string }; video_asset?: { video_id?: string };
+  // Meta sends the asset's own preview link inside every breakdown row (a
+  // full-size image url, or a video's poster thumbnail_url). Kept so the
+  // creative gets a meta_creative_assets row even when the per-ad creative
+  // lookup never succeeds for it (deleted/old ads) — see the upsert after
+  // the breakdown write below.
+  image_asset?: { hash?: string; url?: string }; video_asset?: { video_id?: string; thumbnail_url?: string };
 }
 
 async function syncCreatives(
@@ -1562,8 +1567,22 @@ async function syncCreatives(
   // CREATIVES_ONLY_BUDGET_MS (10 min) before the breakdown fetch even
   // starts, on top of AD_METADATA_BACKFILL_BUDGET_MS (45s) and
   // STALE_THUMBNAIL_BACKFILL_BUDGET_MS (3min) already running ahead of it.
-  const ORPHANED_HASH_BACKFILL_LIMIT = 150;
+  // Images and videos get their own quotas, highest spend first: one
+  // unordered LIMIT over both used to let hundreds of unresolvable
+  // cross-account videos (see memory: meta blocks cross-account video
+  // lookups) fill every slot run after run, starving images that WOULD
+  // resolve. Confirmed 2026-09-22 on the old Alloy account: 1,015 video
+  // orphans vs 2,755 image orphans, and adimages resolved 300/300 of the
+  // images probed.
+  const ORPHANED_IMAGE_BACKFILL_LIMIT = 300;
+  const ORPHANED_VIDEO_BACKFILL_LIMIT = 40;
   const ORPHANED_HASH_BACKFILL_BUDGET_MS = 60_000;
+  // adimages?hashes=[...] caps its response at 25 images unless `limit` is
+  // set and paging is followed — one un-paginated call for 150 hashes came
+  // back with 25 on every account tested, so the old single call could never
+  // recover more than 25 per sync run. Meta also rejects very long hash
+  // lists, hence 50 per request.
+  const ADIMAGES_HASHES_PER_CALL = 50;
   // Two distinct ways a breakdown-referenced asset_key can still need this
   // lookup: (a) no meta_creative_assets row at all yet (a.asset_key IS NULL
   // — the original case this pass covered), or (b) a row DOES exist but was
@@ -1578,13 +1597,19 @@ async function syncCreatives(
   // Confirmed on a real account: /adimages returns a genuine full-resolution
   // image for one of these "existing but never enriched" rows.
   const orphanedRows = await query<{ asset_key: string }>(
-    `SELECT DISTINCT bd.asset_key
-     FROM meta_asset_breakdown_daily bd
-     LEFT JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
-     WHERE bd.account_id = $1
-       AND (a.asset_key IS NULL OR a.thumbnail_fetched_at IS NULL)
-       AND (bd.asset_key LIKE 'image:%' OR bd.asset_key LIKE 'video:%')
-     LIMIT ${ORPHANED_HASH_BACKFILL_LIMIT}`,
+    `(SELECT bd.asset_key, SUM(bd.spend) AS spend
+      FROM meta_asset_breakdown_daily bd
+      LEFT JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
+      WHERE bd.account_id = $1 AND bd.asset_key LIKE 'image:%'
+        AND (a.asset_key IS NULL OR a.thumbnail_fetched_at IS NULL)
+      GROUP BY bd.asset_key ORDER BY spend DESC LIMIT ${ORPHANED_IMAGE_BACKFILL_LIMIT})
+     UNION ALL
+     (SELECT bd.asset_key, SUM(bd.spend) AS spend
+      FROM meta_asset_breakdown_daily bd
+      LEFT JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
+      WHERE bd.account_id = $1 AND bd.asset_key LIKE 'video:%'
+        AND (a.asset_key IS NULL OR a.thumbnail_fetched_at IS NULL)
+      GROUP BY bd.asset_key ORDER BY spend DESC LIMIT ${ORPHANED_VIDEO_BACKFILL_LIMIT})`,
     [accountId]
   );
   console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCreatives:orphanedHashBackfill', count: orphanedRows.length }));
@@ -1598,13 +1623,24 @@ async function syncCreatives(
     }
     if (orphanedImageHashes.length > 0) {
       try {
-        const u = new URL(`${GRAPH}/act_${accountId}/adimages`);
-        u.searchParams.set('hashes', JSON.stringify(orphanedImageHashes));
-        u.searchParams.set('fields', 'hash,url,permalink_url');
-        u.searchParams.set('access_token', token);
-        const res = await fetch(u.toString());
-        const json = await res.json() as { data?: { hash?: string; url?: string; permalink_url?: string }[] };
-        for (const img of json.data || []) {
+        // Chunked + paginated (see ADIMAGES_HASHES_PER_CALL above).
+        const resolved: { hash?: string; url?: string; permalink_url?: string }[] = [];
+        for (const hashChunk of chunkArrayGeneric(orphanedImageHashes, ADIMAGES_HASHES_PER_CALL)) {
+          if (Date.now() > orphanedHashDeadline) break;
+          const u = new URL(`${GRAPH}/act_${accountId}/adimages`);
+          u.searchParams.set('hashes', JSON.stringify(hashChunk));
+          u.searchParams.set('fields', 'hash,url,permalink_url');
+          u.searchParams.set('limit', '100');
+          u.searchParams.set('access_token', token);
+          let next: string | null = u.toString();
+          while (next) {
+            const res = await fetch(next);
+            const json = await res.json() as { data?: { hash?: string; url?: string; permalink_url?: string }[]; paging?: { next?: string } };
+            resolved.push(...(json.data || []));
+            next = json.paging?.next || null;
+          }
+        }
+        for (const img of resolved) {
           const url = img.url || img.permalink_url;
           if (!img.hash || !url) continue;
           await query(
@@ -1881,6 +1917,20 @@ async function syncCreatives(
       }
       const prepared = Array.from(preparedByKey.values());
 
+      // Preview link per asset_key from the same rows — free, no extra Graph
+      // calls. Without this, a creative whose ad-level lookup fails (the
+      // common case for deleted/old ads) never gets a meta_creative_assets
+      // row at all, so the dashboard shows "NO PREVIEW" and the Theme
+      // Breakdown page could not even count its spend before v1.0.55.
+      // Confirmed 2026-09-22: 37% of the old Alloy account's breakdown spend
+      // ($280k) had no row or no bytes while Meta still served every image.
+      const previewByKey = new Map<string, string>();
+      for (const r of rows) {
+        const assetHash = breakdown === 'image_asset' ? r.image_asset?.hash : r.video_asset?.video_id;
+        const previewUrl = breakdown === 'image_asset' ? r.image_asset?.url : r.video_asset?.thumbnail_url;
+        if (assetHash && previewUrl && /^https?:\/\//.test(previewUrl)) previewByKey.set(`${breakdown === 'image_asset' ? 'image' : 'video'}:${assetHash}`, previewUrl);
+      }
+
       // Batched upsert — this is the highest-volume write in the whole sync
       // (per asset × per ad × per day), the main source of the row-by-row
       // Postgres log flood this batching pass fixes.
@@ -1899,6 +1949,27 @@ async function syncCreatives(
             batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results), batch.map(p => p.reach),
             batch.map(p => p.campaignName),
           ]
+        );
+      }
+
+      // Create the asset row (or fill in a missing thumbnail) from the
+      // breakdown row's own link. Only ever fills gaps: a row that already
+      // has a fetched thumbnail keeps it, since the per-ad creative lookup
+      // above is the richer source (body/title/video source). The 1b bytes
+      // backfill then downloads these like any other thumbnail URL.
+      const previewEntries = Array.from(previewByKey.entries());
+      for (const batch of chunkArrayGeneric(previewEntries, DB_BATCH_SIZE)) {
+        await query(
+          `INSERT INTO meta_creative_assets (account_id, asset_key, type, thumbnail, thumbnail_fetched_at, video_id, updated_at)
+           SELECT $1, asset_key, CASE WHEN asset_key LIKE 'video:%' THEN 'video' ELSE 'image' END, url, now(),
+                  CASE WHEN asset_key LIKE 'video:%' THEN substr(asset_key, 7) END, now()
+           FROM unnest($2::text[], $3::text[]) AS t(asset_key, url)
+           ON CONFLICT (account_id, asset_key) DO UPDATE SET
+             thumbnail = CASE WHEN meta_creative_assets.thumbnail IS NULL OR meta_creative_assets.thumbnail_fetched_at IS NULL THEN EXCLUDED.thumbnail ELSE meta_creative_assets.thumbnail END,
+             thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL OR meta_creative_assets.thumbnail_fetched_at IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
+             video_id = COALESCE(meta_creative_assets.video_id, EXCLUDED.video_id),
+             updated_at = now()`,
+          [accountId, batch.map(([k]) => k), batch.map(([, u]) => u)]
         );
       }
 
