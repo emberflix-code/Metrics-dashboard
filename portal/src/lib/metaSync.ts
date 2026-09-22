@@ -371,7 +371,7 @@ async function finishSync(accountId: string, opts: { success: boolean; error?: s
 }
 
 // ── Step 1: entity refresh (campaigns/adsets/ads) ───────────────────────
-interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string } }
+interface EntityRow { id: string; name?: string; effective_status?: string; campaign?: { id?: string; name?: string }; adset?: { id?: string; name?: string }; created_time?: string; optimization_goal?: string }
 
 // Batch size for unnest()-array upserts. Large enough to collapse thousands
 // of rows into a handful of round-trips, small enough to keep each query's
@@ -386,12 +386,12 @@ function chunkArrayGeneric<T>(arr: T[], size: number): T[][] {
   return out;
 }
 
-async function syncEntities(accountId: string, token: string): Promise<number> {
+export async function syncEntities(accountId: string, token: string): Promise<number> {
   let upserted = 0;
   const deadline = Date.now() + ENTITIES_BUDGET_MS;
   const levels: { level: 'campaign' | 'adset' | 'ad'; path: string; fields: string }[] = [
-    { level: 'campaign', path: 'campaigns', fields: 'id,name,effective_status' },
-    { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name}' },
+    { level: 'campaign', path: 'campaigns', fields: 'id,name,effective_status,created_time' },
+    { level: 'adset', path: 'adsets', fields: 'id,name,effective_status,campaign{id,name},optimization_goal' },
     { level: 'ad', path: 'ads', fields: 'id,name,effective_status,campaign{id,name},adset{id,name}' },
   ];
   // TEMP-DIAG: checkpoint logging to pinpoint an intermittent stall on
@@ -425,25 +425,105 @@ async function syncEntities(accountId: string, token: string): Promise<number> {
       const adsetIds = batch.map(r => lvl.level === 'ad' ? (r.adset?.id || null) : (lvl.level === 'adset' ? r.id : null));
       const adsetNames = batch.map(r => lvl.level === 'ad' ? (r.adset?.name || null) : (lvl.level === 'adset' ? (r.name || '') : null));
       const statuses = batch.map(r => r.effective_status || 'UNKNOWN');
+      const createdTimes = batch.map(r => lvl.level === 'campaign' ? (r.created_time || null) : null);
+      const optimizationGoals = batch.map(r => lvl.level === 'adset' ? (r.optimization_goal || null) : null);
 
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:start', level: lvl.level, batchNum, batchSize: batch.length }));
       await query(
-        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, updated_at)
-         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, now()
-         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[])
-           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status)
+        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time, optimization_goal, updated_at)
+         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time::timestamptz, optimization_goal, now()
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[])
+           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time, optimization_goal)
          ON CONFLICT (account_id, level, entity_id) DO UPDATE SET
            name = EXCLUDED.name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
            adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name,
-           effective_status = EXCLUDED.effective_status, updated_at = now()`,
-        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses]
+           effective_status = EXCLUDED.effective_status,
+           created_time = COALESCE(EXCLUDED.created_time, meta_entities.created_time),
+           optimization_goal = COALESCE(EXCLUDED.optimization_goal, meta_entities.optimization_goal),
+           updated_at = now()`,
+        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses, createdTimes, optimizationGoals]
       );
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:done', level: lvl.level, batchNum }));
       upserted += batch.length;
     }
   }
   console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:done', upserted }));
+  invalidateResultsRules(accountId);
   return upserted;
+}
+
+// ── Ads Manager "Results" rule ─────────────────────────────────────────
+// For these accounts the cached `results` reproduce Ads Manager's Results
+// column campaign for campaign, instead of the pixel-or-form heuristic in
+// resolveResultsFromActions. Reverse-engineered 2026-09-22 against an
+// Ads Manager export for AF Regional Omega (Jan 1–Sep 21 2026, 2,359
+// campaigns): 2,357 rows exact, total 24,320 vs 24,318 (the last day was
+// still settling). What Ads Manager does:
+//   - "Leads (form)"  = onsite_conversion.lead_grouped only. Given to a
+//     campaign ONLY when every ad set optimises for LEAD_GENERATION AND the
+//     campaign was created on/after ~June 2026 (older instant-form
+//     campaigns, created Mar–May, still get the combined figure — a Meta
+//     reporting change by creation date; any cutoff May 8–Jul 12 matched).
+//   - everything else ("Leads", "Website leads") = Meta's combined `lead`
+//     action (pixel + form). The campaign objective is OUTCOME_LEADS for
+//     all of them, so it does not distinguish; only optimisation goal and
+//     creation date do.
+// The old heuristic picked ONE of pixel/form per campaign and was ~1% low
+// on Omega (24,045). Scoped by account because it changes every
+// Meta-sourced Leads/CPL figure and needs a full results re-sync when an
+// account is added; the user's instruction was Omega + the other Anytime
+// Fitness accounts, not the Canada ones and not Alloy / non-AF.
+const ADS_MANAGER_RESULTS_ACCOUNTS = new Set([
+  '4594093867301854', // GymMembersNow AF Regional Omega
+  '216024513873696',  // GymMembersNow AF #4299 - Grand Parkway, TX (Matthew McCool)
+  '156873523271047',  // GymMembersNow - AF Multiple FZ's (Legacy) #1
+  '886442192224283',  // GymMembersNow - AF Multiple FZ's (Legacy) #2
+  '9135921576479804', // GymMembersNow AF Regional Aaron Meier
+  '794347999225743',  // GymMembersNow AF Regional Rob Jent
+]);
+const FORM_ONLY_CREATED_CUTOFF = '2026-06-01';
+type ResultsRule = 'form' | 'lead';
+interface ResultsRules { byCampaign: Map<string, ResultsRule>; byAd: Map<string, ResultsRule> }
+const RESULTS_RULES_TTL_MS = 15 * 60_000;
+const _resultsRulesCache = new Map<string, { expires: number; rules: ResultsRules }>();
+
+export function invalidateResultsRules(accountId: string): void { _resultsRulesCache.delete(accountId); }
+
+// null = account not in scope, caller keeps resolveResultsFromActions.
+// Built from meta_entities (created_time / optimization_goal are filled by
+// syncEntities, which runs first in every sync). A campaign with no ad-set
+// rows yet, or one whose ad sets carry no goal, falls back to 'lead'.
+export async function getResultsRules(accountId: string): Promise<ResultsRules | null> {
+  if (!ADS_MANAGER_RESULTS_ACCOUNTS.has(accountId)) return null;
+  const hit = _resultsRulesCache.get(accountId);
+  if (hit && hit.expires > Date.now()) return hit.rules;
+  const campaigns = await query<{ entity_id: string; created: string | null }>(
+    `SELECT entity_id, to_char(created_time, 'YYYY-MM-DD') AS created FROM meta_entities WHERE account_id = $1 AND level = 'campaign'`, [accountId]);
+  const adsets = await query<{ campaign_id: string | null; optimization_goal: string | null }>(
+    `SELECT campaign_id, optimization_goal FROM meta_entities WHERE account_id = $1 AND level = 'adset'`, [accountId]);
+  const ads = await query<{ entity_id: string; campaign_id: string | null }>(
+    `SELECT entity_id, campaign_id FROM meta_entities WHERE account_id = $1 AND level = 'ad'`, [accountId]);
+  const allForm = new Map<string, boolean>();
+  for (const a of adsets) {
+    if (!a.campaign_id) continue;
+    const prev = allForm.get(a.campaign_id);
+    allForm.set(a.campaign_id, (prev ?? true) && a.optimization_goal === 'LEAD_GENERATION');
+  }
+  const byCampaign = new Map<string, ResultsRule>();
+  for (const c of campaigns) {
+    byCampaign.set(c.entity_id, allForm.get(c.entity_id) === true && !!c.created && c.created >= FORM_ONLY_CREATED_CUTOFF ? 'form' : 'lead');
+  }
+  const byAd = new Map<string, ResultsRule>();
+  for (const a of ads) byAd.set(a.entity_id, (a.campaign_id && byCampaign.get(a.campaign_id)) || 'lead');
+  const rules = { byCampaign, byAd };
+  _resultsRulesCache.set(accountId, { expires: Date.now() + RESULTS_RULES_TTL_MS, rules });
+  return rules;
+}
+
+export function resultsUnderRule(actions: { action_type: string; value: string }[] | undefined, rule: ResultsRule): number {
+  const wanted = rule === 'form' ? 'onsite_conversion.lead_grouped' : 'lead';
+  const hit = (actions || []).find(a => a.action_type === wanted);
+  return hit ? (parseInt(hit.value || '0', 10) || 0) : 0;
 }
 
 // ── Step 2: daily insights backfill + top-up ────────────────────────────
@@ -717,6 +797,7 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
 
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
+  const resultsRules = await getResultsRules(accountId);
 
   interface Prepared {
     entityId: string; date: string; campaignId: string; campaignName: string;
@@ -739,7 +820,11 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
     const impressions = parseInt(r.impressions || '0', 10) || 0;
     const spend = parseFloat(r.spend || '0') || 0;
     const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
-    const results = resolveResultsFromActions(r.actions, r.campaign_name);
+    // Ads Manager decides the result type per CAMPAIGN, so ad-set and ad rows
+    // inherit their campaign's rule — keeps every level summing to the same total.
+    const results = resultsRules
+      ? resultsUnderRule(r.actions, (r.campaign_id && resultsRules.byCampaign.get(r.campaign_id)) || 'lead')
+      : resolveResultsFromActions(r.actions, r.campaign_name);
     const existing = preparedByKey.get(key);
     if (existing) {
       existing.reach += reach;
@@ -1780,6 +1865,10 @@ async function syncCreatives(
   // here, which is both slow and needlessly overwrote already-final days.
   const breakdownTypes: ('image_asset' | 'video_asset')[] = ['image_asset', 'video_asset'];
 
+  // Same per-campaign Results rule as syncInsightsChunk (see
+  // ADS_MANAGER_RESULTS_ACCOUNTS), looked up by ad id here since breakdown
+  // rows carry ad_id but not campaign_id. null = account not in scope.
+  const breakdownResultsRules = await getResultsRules(accountId);
   const runBreakdownRange = async (range: { since: string; until: string; kind: 'topup' | 'backfill' }, deadline?: number): Promise<{ persisted: string | null; reachedSince: boolean }> => {
     const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
     const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
@@ -1893,7 +1982,9 @@ async function syncCreatives(
         const impressions = parseInt(r.impressions || '0', 10) || 0;
         const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
         const campaignName = r.campaign_name || '';
-        const results = resolveResultsFromActions(r.actions, campaignName);
+        const results = breakdownResultsRules
+          ? resultsUnderRule(r.actions, breakdownResultsRules.byAd.get(r.ad_id) || 'lead')
+          : resolveResultsFromActions(r.actions, campaignName);
         const reach = parseInt(r.reach || '0', 10) || 0;
         const existing = preparedByKey.get(key);
         if (existing) {

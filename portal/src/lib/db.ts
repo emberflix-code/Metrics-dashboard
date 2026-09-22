@@ -202,6 +202,11 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
       )
     `);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_entities_campaign ON meta_entities (account_id, campaign_id)`);
+    // Ads Manager's per-campaign "Results" rule needs the campaign's creation
+    // date and each ad set's optimisation goal — see ADS_MANAGER_RESULTS_ACCOUNTS
+    // in metaSync.ts. Filled by syncEntities; NULL until an account re-syncs.
+    await pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS created_time TIMESTAMPTZ`).catch(() => {});
+    await pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS optimization_goal TEXT`).catch(() => {});
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meta_daily_insights (
