@@ -81,6 +81,18 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     await query('UPDATE clients SET offer = $1 WHERE id = $2', [String(body.offer).trim(), params.id]);
   }
 
+  if (body.client_contact_name !== undefined) {
+    await query('UPDATE clients SET client_contact_name = $1 WHERE id = $2', [String(body.client_contact_name).trim(), params.id]);
+  }
+
+  if (body.coach_name !== undefined) {
+    await query('UPDATE clients SET coach_name = $1 WHERE id = $2', [String(body.coach_name).trim(), params.id]);
+  }
+
+  if (body.location_address !== undefined) {
+    await query('UPDATE clients SET location_address = $1 WHERE id = $2', [String(body.location_address).trim(), params.id]);
+  }
+
   if (body.sort_order !== undefined) {
     const n = Number(body.sort_order);
     if (!Number.isFinite(n) || !Number.isInteger(n)) {
