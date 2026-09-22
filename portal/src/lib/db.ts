@@ -44,6 +44,15 @@ pool.query(`CREATE INDEX IF NOT EXISTS idx_clients_active ON clients (active)`).
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS marketing_type TEXT NOT NULL DEFAULT ''`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer TEXT NOT NULL DEFAULT ''`).catch(() => {});
 
+// Marketing/coaching roster fields (see migration 030), mirrored from the
+// marketing team's Marketing_Coaching_Material spreadsheet: the owner/contact
+// at the client, the GMN coach(es) assigned (comma-separated when shared),
+// and the physical location address. Plain text, informational only — not
+// used by any dashboard computation.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS client_contact_name TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS coach_name TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS location_address TEXT NOT NULL DEFAULT ''`).catch(() => {});
+
 // Agency Overview: manual display order per client (see migrations 018,
 // 019). Lower sorts first; ties broken by name. Only affects row order
 // within the overview table (and within each group, when grouping is on)
@@ -507,6 +516,13 @@ pool.query(`CREATE TABLE IF NOT EXISTS client_heartbeat_events (
   path       TEXT NOT NULL DEFAULT ''
 )`).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS idx_client_heartbeat_events_client_time ON client_heartbeat_events (client_id, seen_at DESC)`).catch(() => {});
+
+// Per-client toggle: hides the Theme/UGC tag badges (client view) and edit
+// dropdowns (admin view) on Creatives v2/v3 cards, without touching the
+// cards themselves (thumbnail, spend, leads, CPL, etc. stay visible). Added
+// 2026-09-22 for AF Regional Omega while its tags were mid-correction —
+// off by default so every other client is unaffected.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_creative_tagging BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
 export async function query<T = Record<string, unknown>>(
   sql: string,

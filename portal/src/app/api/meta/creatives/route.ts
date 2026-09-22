@@ -374,7 +374,7 @@ export async function GET(req: NextRequest) {
       const impressions = parseInt(ins.impressions || '0', 10) || 0;
       const linkClicks = parseInt(ins.inline_link_clicks || '0', 10) || 0;
       const reach = parseInt(ins.reach || '0', 10) || 0;
-      const results = resolveResultsFromActions(ins.actions);
+      const results = resolveResultsFromActions(ins.actions, ins.campaign_name);
 
       const linkData = creative?.object_story_spec?.link_data;
       const videoData = creative?.object_story_spec?.video_data;

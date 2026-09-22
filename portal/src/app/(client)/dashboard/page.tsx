@@ -40,6 +40,7 @@ interface ClientRow {
   meta_kpi_sheet_id: string;
   meta_kpi_sheet_tab: string;
   show_meta_kpi_sheet: boolean;
+  hide_creative_tagging: boolean;
 }
 
 export default async function DashboardPage({
@@ -89,7 +90,7 @@ export default async function DashboardPage({
             c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value, c.show_meta_lead_names,
             c.show_creative_campaign_breakdown, c.show_creatives_v3, c.enable_cross_account_creative_tagging,
             c.show_theme_breakdown, c.show_insights, c.hide_adset_ad_tabs, c.enable_page_image_fallback,
-            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet
+            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet, c.hide_creative_tagging
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -181,6 +182,7 @@ export default async function DashboardPage({
         // empty client_meta_kpi_sheet_tabs already degrades gracefully
         // (falls back to the cache, or shows nothing) rather than erroring.
         showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id)}
+        hideCreativeTagging={!!client?.hide_creative_tagging}
         dataSourceByAccount={dataSourceByAccount}
         isAdminView={!!impersonatedBy}
         autoLoginToken={autoLoginToken}

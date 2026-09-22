@@ -739,7 +739,7 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
     const impressions = parseInt(r.impressions || '0', 10) || 0;
     const spend = parseFloat(r.spend || '0') || 0;
     const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
-    const results = resolveResultsFromActions(r.actions);
+    const results = resolveResultsFromActions(r.actions, r.campaign_name);
     const existing = preparedByKey.get(key);
     if (existing) {
       existing.reach += reach;
@@ -1892,9 +1892,9 @@ async function syncCreatives(
         const spend = parseFloat(r.spend || '0') || 0;
         const impressions = parseInt(r.impressions || '0', 10) || 0;
         const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
-        const results = resolveResultsFromActions(r.actions);
-        const reach = parseInt(r.reach || '0', 10) || 0;
         const campaignName = r.campaign_name || '';
+        const results = resolveResultsFromActions(r.actions, campaignName);
+        const reach = parseInt(r.reach || '0', 10) || 0;
         const existing = preparedByKey.get(key);
         if (existing) {
           existing.spend += spend;

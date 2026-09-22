@@ -319,7 +319,7 @@ export async function GET(req: NextRequest) {
       const sp = parseFloat(r.spend || '0') || 0;
       const im = parseInt(r.impressions || '0', 10) || 0;
       const lc = parseInt(r.inline_link_clicks || '0', 10) || 0;
-      const ld = resolveResultsFromActions(r.actions);
+      const ld = resolveResultsFromActions(r.actions, r.campaign_name);
       row.spend += sp; row.impressions += im; row.linkClicks += lc; row.results += ld;
       row._adIdSet.add(adId);
       const cur = row._perAd.get(adId) || { spend: 0, results: 0, impressions: 0, linkClicks: 0 };

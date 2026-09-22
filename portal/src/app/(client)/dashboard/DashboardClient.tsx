@@ -107,6 +107,13 @@ interface Props {
   // period). Admin-togglable per client — see ShowInsightsToggle. Off by
   // default.
   showInsights?: boolean;
+  // When true, hides the Theme/UGC badges (client view) and edit dropdowns
+  // (admin view) on every Creatives v2/v3 card — the rest of the card
+  // (thumbnail, spend, leads, CPL, etc.) is unaffected. Off by default.
+  // Added for AF Regional Omega while its Theme/UGC tags were mid-correction
+  // (see project_af_corporate_theme_tagging_pass memory) — this client's
+  // tags shouldn't be client-visible until that settles.
+  hideCreativeTagging?: boolean;
 }
 
 // ── Module-level mutable state (client-only, one instance per browser tab) ──
@@ -184,6 +191,8 @@ let _showThemeBreakdown = false;
 let _showInsights = false;
 // See Props.enableCrossAccountCreativeTagging.
 let _enableCrossAccountCreativeTagging = false;
+// See Props.hideCreativeTagging.
+let _hideCreativeTagging = false;
 let _hideAdsetAdTabs = true;
 let _enablePageImageFallback = false;
 // True only when an admin is viewing via impersonation — gates internal
@@ -2303,8 +2312,10 @@ function renderCreativesV2() {
     const nameLine = '';
     // Theme / UGC tags — manual admin-only classification, no Meta equivalent.
     // Everyone sees the badges (when set); only admins (impersonation view)
-    // get the edit dropdowns to set/change/clear them.
-    const themeUgcLine = _isAdminView
+    // get the edit dropdowns to set/change/clear them. Whole thing hidden
+    // (badges AND dropdowns, admin included) when _hideCreativeTagging is on
+    // — see Props.hideCreativeTagging.
+    const themeUgcLine = _hideCreativeTagging ? '' : _isAdminView
       ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
           <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
             <option value="">Theme…</option>
@@ -2325,9 +2336,11 @@ function renderCreativesV2() {
     // fully tagged while the server (or client cross-account merge) has
     // folded in OTHER visually-similar photos that are themselves still
     // untagged — see untaggedSiblingCount's doc comment for why that
-    // happens. Admin-only (same audience as the tag dropdowns/filter) and
-    // v3-only (thumbnails needed to make sense of "which photo is this").
-    const siblingGapLine = (_isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
+    // happens. Admin-only (same audience as the tag dropdowns/filter),
+    // v3-only (thumbnails needed to make sense of "which photo is this"),
+    // and hidden along with the rest of the tagging UI when
+    // _hideCreativeTagging is on.
+    const siblingGapLine = (!_hideCreativeTagging && _isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
       ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below still have their own untagged spend. Setting a Theme or Type on this card now applies it to every member of the cluster at once, so re-saving either dropdown clears this.">
           <i data-lucide="alert-triangle" class="w-3 h-3 shrink-0"></i>
           <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}) — re-save Theme/Type to fix</span>
@@ -2643,7 +2656,9 @@ function renderCreativesV3() {
     // Card-level name/title label removed — same rationale as the v2 grid
     // above (sourced from a single arbitrary ad's headline, not reliable).
     const nameLine = '';
-    const themeUgcLine = _isAdminView
+    // Whole thing hidden (badges AND dropdowns, admin included) when
+    // _hideCreativeTagging is on — see Props.hideCreativeTagging.
+    const themeUgcLine = _hideCreativeTagging ? '' : _isAdminView
       ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
           <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
             <option value="">Theme…</option>
@@ -2663,7 +2678,9 @@ function renderCreativesV3() {
     // See the matching comment in the v2 grid above — this card's Theme/
     // Type badges can display fully tagged while a visually-similar sibling
     // photo folded into the same cluster is still untagged underneath it.
-    const siblingGapLine = (_isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
+    // Also hidden along with the rest of the tagging UI when
+    // _hideCreativeTagging is on.
+    const siblingGapLine = (!_hideCreativeTagging && _isAdminView && _renderingCreativesV3 && r.untaggedSiblingCount > 0)
       ? `<div class="flex items-center gap-1 mb-2 text-[10px] font-medium bg-amber-500/10 text-amber-300 px-1.5 py-1 rounded" title="This card's Theme/Type shown above come from a tagged member of a cluster of visually-similar photos — the other member(s) below still have their own untagged spend. Setting a Theme or Type on this card now applies it to every member of the cluster at once, so re-saving either dropdown clears this.">
           <i data-lucide="alert-triangle" class="w-3 h-3 shrink-0"></i>
           <span>${r.untaggedSiblingCount} similar photo${r.untaggedSiblingCount === 1 ? '' : 's'} untagged ($${r.untaggedSiblingSpend.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}) — re-save Theme/Type to fix</span>
@@ -4002,7 +4019,13 @@ async function fetchMetaCampaigns() {
             for (const a of (item.actions||[])) am[a.action_type]=parseInt(a.value||0);
             const pL=am['offsite_conversion.fb_pixel_lead']||0;
             const fL=am['onsite_conversion.lead_grouped']||0;
-            const results=pL>0?pL:fL>0?fL:(am['lead']||0);
+            // See resolveResultsFromActions in lib/meta.ts for why "Instant
+            // Form" campaigns (on-Facebook Lead Ads) must prefer the onsite
+            // count even when pixel is also >0 — the two aren't mutually
+            // exclusive fallbacks for the same number, they're genuinely
+            // different funnel events a campaign can produce both of.
+            const isInstantForm=/instant form/i.test(item.campaign_name||'');
+            const results=(isInstantForm&&fL>0)?fL:pL>0?pL:fL>0?fL:(am['lead']||0);
             const entityId=item[lvl.idField];
             const existing = byEntity[entityId];
             if (existing) {
@@ -4089,7 +4112,7 @@ async function fetchMetaCampaigns() {
         const trendUnits: { acc: string; w: { s: string; u: string } }[] = [];
         for (const acc of accountIds) for (const w of windows) trendUnits.push({ acc, w });
         await runPooled(trendUnits, 4, async ({ acc, w }) => {
-          let tUrl: string|null = `${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+          let tUrl: string|null = `${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,campaign_name,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
           let tFirst=true;
           while (tUrl) {
             const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
@@ -4101,7 +4124,10 @@ async function fetchMetaCampaigns() {
               const am: Record<string,number>={};
               for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
               const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
-              const results=pL>0?pL:fL>0?fL:(am['lead']||0);
+              // See the matching comment above (first inline copy) — Instant
+              // Form campaigns must prefer onsite even when pixel is also >0.
+              const isInstantForm=/instant form/i.test(d.campaign_name||'');
+              const results=(isInstantForm&&fL>0)?fL:pL>0?pL:fL>0?fL:(am['lead']||0);
               const spend=Math.round(parseFloat(d.spend||0)*100)/100;
               const dt=d.date_start;
               if (!byDate[dt]) byDate[dt]={date:dt,spend:0,results:0};
@@ -4150,6 +4176,15 @@ async function fetchMetaCampaigns() {
               const d=ctotJson.data[0]; const am: Record<string,number>={};
               for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
               const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+              // KNOWN GAP: this is a level=account fetch with no per-campaign
+              // breakdown, so the Instant-Form-name heuristic used everywhere
+              // else this pixel/onsite ambiguity comes up (see
+              // resolveResultsFromActions in lib/meta.ts) can't be applied
+              // here without restructuring this to campaign-level + a
+              // second re-aggregation pass. Left as pixel-first for now —
+              // only affects this one comparison-period SUMMARY total (This
+              // Week vs. prior period card), not the trend chart above
+              // (already fixed) or any of the main KPI/table numbers.
               compTot.reach += parseInt(d.reach||0);
               compTot.impressions += parseInt(d.impressions||0);
               compTot.spent = Math.round((compTot.spent + parseFloat(d.spend||0)) * 100) / 100;
@@ -4177,7 +4212,7 @@ async function fetchMetaCampaigns() {
             const cUnits: { acc: string; w: { s: string; u: string } }[] = [];
             for (const acc of accountIds) for (const w of cWindows) cUnits.push({ acc, w });
             await runPooled(cUnits, 4, async ({ acc, w }) => {
-              let ctUrl: string|null=`${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+              let ctUrl: string|null=`${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,campaign_name,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
               let ctFirst=true;
               while (ctUrl) {
                 const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;
@@ -4188,10 +4223,14 @@ async function fetchMetaCampaigns() {
                   const am: Record<string,number>={};
                   for (const a of (d.actions||[])) am[a.action_type]=parseInt(a.value||0);
                   const pL=am['offsite_conversion.fb_pixel_lead']||0; const fL=am['onsite_conversion.lead_grouped']||0;
+                  // See the matching comment further up (first inline copy)
+                  // — Instant Form campaigns must prefer onsite even when
+                  // pixel is also >0.
+                  const isInstantForm=/instant form/i.test(d.campaign_name||'');
                   const spend=Math.round(parseFloat(d.spend||0)*100)/100; const dt=d.date_start;
                   if (!cByDate[dt]) cByDate[dt]={date:dt,spend:0,results:0};
                   cByDate[dt].spend=Math.round((cByDate[dt].spend+spend)*100)/100;
-                  cByDate[dt].results+=(pL>0?pL:fL>0?fL:(am['lead']||0));
+                  cByDate[dt].results+=((isInstantForm&&fL>0)?fL:pL>0?pL:fL>0?fL:(am['lead']||0));
                 }
                 ctUrl=ctJson.paging?.next||null;
               }
@@ -5101,7 +5140,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, hideCreativeTagging = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -5123,6 +5162,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   // live mode, rather than show an empty/broken grid (see Props.showCreativesV3).
   _showCreativesV3Tab = showCreativesV3 && accountIds.every(id => dataSourceByAccount[id] === 'cached');
   _enableCrossAccountCreativeTagging = enableCrossAccountCreativeTagging;
+  _hideCreativeTagging = hideCreativeTagging;
   _showThemeBreakdown = showThemeBreakdown;
   _showInsights = showInsights;
   _hideAdsetAdTabs = hideAdsetAdTabs;
@@ -5820,7 +5860,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                       renderCreativesV3();
                     }}
                   >Has results only</button>
-                  {_isAdminView && (
+                  {_isAdminView && !hideCreativeTagging && (
                     <button
                       id="creatives-v3-only-untagged-btn"
                       className="sort-btn ml-1"

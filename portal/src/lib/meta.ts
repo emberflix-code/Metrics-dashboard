@@ -251,20 +251,40 @@ export function matchesCampaignFilter(name: string, campaignFilter: string, acco
 
 /**
  * Resolves a Meta `actions[]` array (from any insights response) down to a
- * single "results" count. Pixel-based leads take priority over onsite leads
- * over a generic 'lead' action, mirroring how Meta's own Ads Manager reports
- * results for lead-gen campaigns. Shared by the creatives and asset-breakdown
+ * single "results" count. Shared by the creatives and asset-breakdown
  * routes and the DB sync module so cached-mode numbers match live-mode
  * byte-for-byte. (DashboardClient.tsx has its own inline copies of this same
  * chain — those are browser-side, hitting our routes rather than Meta
  * directly, so they're intentionally left as-is rather than merged here.)
+ *
+ * Pixel-based leads (offsite_conversion.fb_pixel_lead) and onsite Lead-Ad
+ * form submissions (onsite_conversion.lead_grouped) are NOT mutually
+ * exclusive fallbacks for the same underlying number — they're two
+ * genuinely different funnel events that a single campaign can produce
+ * real, non-zero counts for simultaneously (a click that both submits an
+ * on-Facebook lead form AND separately fires a website pixel). Which one
+ * Meta's own Ads Manager reports as "Results"/"Leads (Form)" depends on the
+ * campaign's own objective, not a fixed priority order — confirmed live
+ * 2026-09-18 on Omega campaign "#1803 - Decatur, IN": Ads Manager showed 33
+ * Leads (Form) for the Sep 1-17 range, but this function's old pixel-first
+ * logic returned 14 (that range's pixel count) because pixel happened to be
+ * >0 on several of those days too, silently under-counting by more than
+ * half — not a rare edge case: 82% of Omega's campaigns are named "Instant
+ * Form" (i.e. an on-Facebook Lead Ad, Meta's own term), where onsite is the
+ * real number Ads Manager reports. campaignName is the only reliable signal
+ * available here (the actual objective/optimization_goal field isn't
+ * fetched by any sync path) — every "Conversion"-named campaign checked
+ * alongside this fix had onsite stuck at exactly 0, confirming pixel-first
+ * is still correct for that campaign type.
  */
-export function resolveResultsFromActions(actions?: { action_type: string; value: string }[]): number {
+export function resolveResultsFromActions(actions?: { action_type: string; value: string }[], campaignName?: string): number {
   if (!actions) return 0;
   const m: Record<string, number> = {};
   for (const a of actions) m[a.action_type] = parseInt(a.value || '0', 10);
   const pixel = m['offsite_conversion.fb_pixel_lead'] || 0;
   const onsite = m['onsite_conversion.lead_grouped'] || 0;
+  const isInstantForm = /instant form/i.test(campaignName || '');
+  if (isInstantForm && onsite > 0) return onsite;
   if (pixel > 0) return pixel;
   if (onsite > 0) return onsite;
   return m['lead'] || 0;
