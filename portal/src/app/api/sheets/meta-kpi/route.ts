@@ -145,5 +145,13 @@ export async function GET(req: NextRequest) {
     rows.push(...monthRows);
   }
 
-  return NextResponse.json({ rows, enabled: true, ...(anyError ? { partialError: anyError } : {}) });
+  // Months with a REAL configured tab (client_meta_kpi_sheet_tabs), as
+  // "YYYY-MM" — distinct from `months` above, which also includes any
+  // month that only has leftover cache data with no live tab behind it.
+  // The dashboard uses this to gate the Bookings/Joins KPI cards to just
+  // the months an admin actually configured, instead of showing
+  // (potentially stale) cache-only numbers for months nobody set up.
+  const configuredMonths = tabRows.map(r => r.month.slice(0, 7));
+
+  return NextResponse.json({ rows, enabled: true, configuredMonths, ...(anyError ? { partialError: anyError } : {}) });
 }

@@ -266,6 +266,12 @@ interface MetaLeadRow { name: string; email: string; phone: string; createdTime:
 // reference sheet) so holding it all client-side is cheap.
 let _showMetaKpiSheet = false;
 let _metaKpiSheetRows: MetaKpiSheetRow[] | null = null;
+// Months (as "YYYY-MM") with a REAL configured tab in
+// client_meta_kpi_sheet_tabs — a strict subset of what's actually present
+// in _metaKpiSheetRows, which also includes cache-only months (no live tab,
+// last-synced numbers only). Used to gate the Bookings/Joins KPI cards to
+// just the months an admin actually set up, not stale leftover cache data.
+let _metaKpiSheetConfiguredMonths: string[] = [];
 let _kpiFilterCampaignType = 'all';
 let _kpiFilterOffer = 'all';
 let _kpiFilterLocation = 'all';
@@ -1079,17 +1085,26 @@ function renderCards(t: any, selCount=0) {
       notFilterable: true,
     });
   }
-  // Meta KPI sheet cards — Bookings and Joins. Gated on the admin toggle AND
+  // Meta KPI sheet cards — Bookings and Joins. Gated on the admin toggle,
   // having actually fetched *some* rows (any month, all-time — not the
-  // current date-range filter), same guard shape as every other
-  // conditional card above: if either is false the push() simply never
-  // runs, so a client with the toggle on but no tabs/cache ever configured
-  // sees no blank/zero cards and no layout gap — nothing renders at all.
-  // Once there's any all-time data, the range-filtered sum can legitimately
-  // be 0 for the selected period — that's a real value, not a missing-
-  // config state, so it still renders (matches every other KPI card here).
-  if (_showMetaKpiSheet && _metaKpiSheetRows && _metaKpiSheetRows.length > 0 && _platform === 'meta') {
-    const filtered = _filteredMetaKpiSheetRows();
+  // current date-range filter), AND the selected date range actually
+  // overlapping a month with a REAL configured tab (client_meta_kpi_sheet_tabs)
+  // — not just cache-only leftover data. Without that last check, a client
+  // whose sheet was only ever set up for one month (e.g. AF Regional Omega,
+  // configured for 2026-07 only) would still show Bookings/Joins cards for
+  // every other month too, sourced from stale meta_kpi_sheet_cache rows with
+  // nothing currently backing them — misleading rather than "a real value
+  // that happens to be 0" (2026-09-22). If either guard is false the push()
+  // simply never runs, so no blank/zero cards and no layout gap.
+  const kpiRangeHasConfiguredMonth = (() => {
+    if (_metaKpiSheetConfiguredMonths.length === 0) return false;
+    let since = '', until = '';
+    try { ({ since, until } = getDateRange()); } catch { return false; }
+    return _metaKpiSheetConfiguredMonths.some(m => m >= since.slice(0, 7) && m <= until.slice(0, 7));
+  })();
+  if (_showMetaKpiSheet && _metaKpiSheetRows && _metaKpiSheetRows.length > 0 && kpiRangeHasConfiguredMonth && _platform === 'meta') {
+    const configuredMonthSet = new Set(_metaKpiSheetConfiguredMonths);
+    const filtered = _filteredMetaKpiSheetRows().filter(r => configuredMonthSet.has(r.day.slice(0, 7)));
     const bookingsSum = filtered.reduce((sum, r) => sum + r.bookings, 0);
     const joinsSum = filtered.reduce((sum, r) => sum + r.joins, 0);
     cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:''});
@@ -3927,10 +3942,12 @@ async function fetchMetaKpiSheetForClient(): Promise<void> {
   if (_metaKpiSheetRows !== null) return; // already fetched this session
   try {
     const res = await fetch('/api/sheets/meta-kpi');
-    const json = await res.json() as { rows?: MetaKpiSheetRow[]; enabled?: boolean };
+    const json = await res.json() as { rows?: MetaKpiSheetRow[]; enabled?: boolean; configuredMonths?: string[] };
     _metaKpiSheetRows = json.enabled && json.rows ? json.rows : [];
+    _metaKpiSheetConfiguredMonths = json.configuredMonths || [];
   } catch {
     _metaKpiSheetRows = [];
+    _metaKpiSheetConfiguredMonths = [];
   }
 }
 
