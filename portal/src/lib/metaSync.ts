@@ -2320,6 +2320,33 @@ async function fetchGeoMeta(token: string, keys: { kind: string; key: string }[]
       }
     }
   }
+  // A "place" is a Facebook Page's location (e.g. the client's own studio).
+  // adgeolocationmeta returns no coordinates for it, but the Page node
+  // does when the token can read it.
+  const placeKeys = (byKind.get('place') ?? []).filter(k => { const m = out.get(`place:${k}`); return !m || m.lat === null || m.lat === undefined; });
+  for (let i = 0; i < placeKeys.length; i += 50) {
+    if (deadline !== undefined && Date.now() > deadline) break;
+    const batch = placeKeys.slice(i, i + 50);
+    try {
+      const u = new URL(`${GRAPH}/`);
+      u.searchParams.set('ids', batch.join(','));
+      u.searchParams.set('fields', 'name,location{latitude,longitude,city,state,country}');
+      u.searchParams.set('access_token', token);
+      const json = await fetchGraphJson<Record<string, { name?: string; location?: { latitude?: number; longitude?: number; city?: string; state?: string; country?: string }; error?: unknown }>>(u, deadline);
+      for (const key of batch) {
+        const v = json[key];
+        if (!v || v.error) continue;
+        const prev = out.get(`place:${key}`) ?? {};
+        out.set(`place:${key}`, {
+          ...prev, name: prev.name ?? v.name, region: prev.region ?? v.location?.state, countryName: prev.countryName ?? v.location?.country,
+          lat: typeof v.location?.latitude === 'number' ? v.location.latitude : prev.lat ?? null,
+          lng: typeof v.location?.longitude === 'number' ? v.location.longitude : prev.lng ?? null,
+        });
+      }
+    } catch (err) {
+      console.error('[META-SYNC-ERR]', JSON.stringify({ step: 'placeLocation', count: batch.length, error: err instanceof Error ? err.message : String(err) }));
+    }
+  }
   return out;
 }
 
@@ -2447,8 +2474,53 @@ export async function syncAdsetTargeting(accountId: string, token: string, budge
     }
   }
   await query(`UPDATE agency_meta_sync_state SET targeting_synced_at = now(), updated_at = now() WHERE account_id = $1`, [accountId]).catch(() => {});
+  try {
+    await resolvePendingGeoRows(accountId, token, deadline);
+  } catch (err) {
+    console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'resolvePendingGeoRows', error: err instanceof Error ? err.message : String(err) }));
+  }
   console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAdsetTargeting:done', fetched: rows.length, geoRows }));
   return { fetched: rows.length, geoRows, skipped: skipped.length };
+}
+
+// Keyed geo rows (zip/city/place/region) written without coordinates — a
+// geocoder miss at the time, or an ad set that isn't due for a targeting
+// refetch (paused ones refresh weekly) — get another resolution pass from
+// the stored keys alone. No Meta targeting refetch needed; one
+// adgeolocationmeta call per 50 keys plus the geocoder for new keys.
+export async function resolvePendingGeoRows(accountId: string, token: string, deadline?: number): Promise<{ pending: number; resolved: number }> {
+  const pending = await query<{ kind: string; key: string; name: string | null; region: string | null; country: string | null }>(
+    `SELECT DISTINCT kind, key, name, region, country FROM meta_adset_geo
+     WHERE account_id = $1 AND lat IS NULL AND key IS NOT NULL AND kind IN ('zip', 'city', 'place', 'region', 'geo_market')`,
+    [accountId]
+  );
+  if (pending.length === 0) return { pending: 0, resolved: 0 };
+  const metaGeo = await fetchGeoMeta(token, pending.map(p => ({ kind: p.kind, key: p.key })), deadline);
+  const direct = new Map<string, { lat: number; lng: number }>();
+  const keyQueries: { kind: string; key: string; query: string }[] = [];
+  for (const p of pending) {
+    const m = metaGeo.get(`${p.kind}:${p.key}`);
+    if (m && m.lat !== null && m.lat !== undefined && m.lng !== null && m.lng !== undefined) { direct.set(`${p.kind}:${p.key}`, { lat: m.lat, lng: m.lng }); continue; }
+    const country = m?.countryName || m?.countryCode || p.country || '';
+    let q: string | null = null;
+    if (p.kind === 'zip') q = m?.primaryCity ? [m.primaryCity, m.region, country].filter(Boolean).join(', ') : geoKeyQuery({ kind: 'zip', key: p.key, name: p.name, region: p.region, country: p.country });
+    else if (p.kind === 'city') q = [m?.name || p.name, m?.region || p.region, country].filter(Boolean).join(', ');
+    else if (p.kind === 'region' || p.kind === 'geo_market') q = [m?.name || p.name, country].filter(Boolean).join(', ');
+    else if (p.kind === 'place' && (m?.name || p.name)) q = [m?.name || p.name, m?.region, country].filter(Boolean).join(', ');
+    if (q) keyQueries.push({ kind: p.kind, key: p.key, query: q });
+  }
+  const resolved = keyQueries.length ? await resolveGeoKeys(keyQueries) : new Map<string, { lat: number; lng: number } | null>();
+  for (const [k, v] of Array.from(direct.entries())) resolved.set(k, v);
+  let n = 0;
+  for (const [k, v] of Array.from(resolved.entries())) {
+    if (!v) continue;
+    const idx = k.indexOf(':');
+    const kind = k.slice(0, idx), key = k.slice(idx + 1);
+    await query(`UPDATE meta_adset_geo SET lat = $3, lng = $4 WHERE account_id = $1 AND kind = $2 AND key = $5 AND lat IS NULL`, [accountId, kind, v.lat, v.lng, key]);
+    n++;
+  }
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'resolvePendingGeoRows', pending: pending.length, resolved: n, placeMetaWithCoords: Array.from(direct.keys()).filter(k => k.startsWith('place:')).length }));
+  return { pending: pending.length, resolved: n };
 }
 
 // ── Recent ad-set / ad daily insights (last 90 days) ────────────────────

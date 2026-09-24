@@ -43,13 +43,31 @@ async function geocodeGoogle(q: string): Promise<GeocodeResult | null> {
   return { lat: r.geometry.location.lat, lng: r.geometry.location.lng, source: 'google', precision: r.geometry.location_type, formatted: r.formatted_address };
 }
 
+// Country restriction for Nominatim: club addresses are all US/CA, but ad
+// set targeting keys can name any country ("Perth, Western Australia,
+// Australia"), so when the query itself ends in a known country the
+// restriction follows it, and an unknown country lifts it.
+const COUNTRY_CODES: [RegExp, string][] = [
+  [/,\s*(united states|usa|us)$/i, 'us'], [/,\s*canada$/i, 'ca'], [/,\s*australia$/i, 'au'],
+  [/,\s*(united kingdom|uk)$/i, 'gb'], [/,\s*new zealand$/i, 'nz'], [/,\s*mexico$/i, 'mx'],
+];
+function countryCodesFor(q: string): string | null {
+  for (const [re, cc] of COUNTRY_CODES) if (re.test(q)) return cc;
+  // A trailing ", <Word>" that isn't a US/CA state-style token: treat as an
+  // unknown country and don't restrict.
+  const tail = q.split(',').pop()?.trim() || '';
+  if (/^[A-Za-z][A-Za-z .'-]{4,}$/.test(tail) && !/^[A-Z]{2}$/.test(tail) && !/\d/.test(tail) && /^(?!.*\b(county|city|township)\b)/i.test(tail) && q.split(',').length >= 3) return null;
+  return 'us,ca';
+}
+
 async function geocodeNominatim(q: string): Promise<GeocodeResult | null> {
   return nominatimSlot(async () => {
     const u = new URL('https://nominatim.openstreetmap.org/search');
     u.searchParams.set('format', 'jsonv2');
     u.searchParams.set('limit', '1');
     u.searchParams.set('q', q);
-    u.searchParams.set('countrycodes', 'us,ca');
+    const cc = countryCodesFor(q);
+    if (cc) u.searchParams.set('countrycodes', cc);
     const res = await fetch(u, {
       headers: { 'User-Agent': `GymMembersNow-Dashboard/1.0 (${CONTACT()})`, 'Accept-Language': 'en' },
       signal: AbortSignal.timeout(15_000),
