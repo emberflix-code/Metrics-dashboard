@@ -3,6 +3,7 @@ import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import BmConnectionsManager from './BmConnectionsManager';
 import PageTokenManager from './PageTokenManager';
+import MarketersManager from './MarketersManager';
 
 export default async function SettingsPage() {
   const session = await getServerSession(authOptions);
@@ -29,6 +30,15 @@ export default async function SettingsPage() {
             One agency-wide Page token powering two per-client features: sharper creative images (Page-content image fallback) and instant-form lead names on the Leads KPI card. Enable either in that client&apos;s settings.
           </p>
           <PageTokenManager />
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h1 className="text-lg font-bold text-white mb-1">Marketing specialists</h1>
+          <p className="text-sm text-slate-400 mb-5">
+            Logins for the <span className="font-mono text-slate-300">marketer</span> role. A specialist sees every active client at once under{' '}
+            <a href="/marketer" className="text-blue-300 hover:text-blue-200">/marketer</a> (targeting overlap, asset library, alerts) and can tag creatives, but has no access to this admin panel or to client settings.
+          </p>
+          <MarketersManager />
         </div>
       </div>
     </div>

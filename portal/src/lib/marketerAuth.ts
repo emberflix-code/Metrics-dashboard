@@ -7,12 +7,19 @@ import { getServerSession, type Session } from 'next-auth';
 import { redirect } from 'next/navigation';
 import { NextResponse } from 'next/server';
 import { authOptions } from './auth';
+import { query } from './db';
 
 export async function getMarketerSession(): Promise<Session | null> {
   const session = await getServerSession(authOptions);
   if (!session) return null;
   const role = session.user.role;
   if (role !== 'admin' && role !== 'marketer') return null;
+  // Sessions are JWTs, so a removed marketer login would otherwise keep
+  // working until the token expires. One indexed lookup per request makes
+  // "Remove" on the admin settings page take effect immediately (and also
+  // drops a token whose role was changed since it was issued).
+  const [row] = await query<{ role: string }>(`SELECT role FROM users WHERE id = $1`, [session.user.id]);
+  if (!row || row.role !== role) return null;
   return session;
 }
 
