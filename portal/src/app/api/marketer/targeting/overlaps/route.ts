@@ -30,11 +30,18 @@ export async function GET(req: NextRequest) {
   const minScoreRaw = Number(sp.get('minScore'));
   const minScore = Number.isFinite(minScoreRaw) && sp.get('minScore') !== null ? Math.max(0, Math.min(1, minScoreRaw)) : 0.05;
 
+  // Same semantics as the page: `client` alone = focus mode (full universe +
+  // neighbours ring); `client` with `only=1` = the old client filter.
+  const clientIds = csv(sp.get('client'));
+  const only = sp.get('only') === '1';
+  const ringRaw = Number(sp.get('ring'));
   try {
     const report = await buildTargetingReport({
       since: range.since,
       until: range.until,
-      clientIds: csv(sp.get('client')),
+      clientIds: only ? clientIds : undefined,
+      focusClientId: !only && clientIds?.length ? clientIds[0] : undefined,
+      ringKm: Number.isFinite(ringRaw) && ringRaw > 0 ? ringRaw : undefined,
       brand: sp.get('brand') || undefined,
       accountIds: csv(sp.get('account'))?.map(a => a.replace(/^act_/i, '')),
       minScore,

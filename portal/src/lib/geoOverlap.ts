@@ -163,6 +163,79 @@ export function computeOverlaps(
   return pairs;
 }
 
+// ── Focus-mode simulation (runs in the browser) ─────────────────────────
+// A "proposal" is a hypothetical circle: an existing focus ad set with a
+// radius the marketer is dragging, or a dropped pin. Nothing here touches
+// Meta — the result only tells them what a radius change would collide
+// with before they apply it in Ads Manager.
+
+export const MILE_KM = 1.609344;
+
+export interface ProposalSource {
+  id: string;                  // circleId for a real ad set, 'pin' for a dropped pin
+  lat: number;
+  lng: number;
+  radiusKm: number;
+  accountId: string | null;
+  adsetId: string | null;
+  campaignId: string | null;
+}
+
+export interface ProposalHit {
+  target: AdsetCircle;
+  distanceKm: number;
+  score: number;
+  sameCampaign: boolean;
+  counted: boolean;            // false for same-campaign siblings unless the toggle is on
+}
+
+function targetsOf(source: ProposalSource, targets: AdsetCircle[]): AdsetCircle[] {
+  // Another circle of the same ad set is the same audience, not a collision.
+  return targets.filter(t => !(source.adsetId !== null && t.adsetId === source.adsetId && t.accountId === source.accountId));
+}
+
+export function proposalHits(
+  source: ProposalSource,
+  targets: AdsetCircle[],
+  opts: { includeSameCampaign?: boolean } = {}
+): ProposalHit[] {
+  const out: ProposalHit[] = [];
+  for (const t of targetsOf(source, targets)) {
+    const distanceKm = haversineKm(source, t);
+    if (distanceKm >= source.radiusKm + t.radiusKm) continue;
+    const score = circleOverlapFraction(distanceKm, source.radiusKm, t.radiusKm);
+    if (score <= 0) continue;
+    const sameCampaign = source.campaignId !== null && source.accountId === t.accountId && source.campaignId === t.campaignId;
+    out.push({ target: t, distanceKm, score, sameCampaign, counted: !sameCampaign || !!opts.includeSameCampaign });
+  }
+  out.sort((x, y) => y.score - x.score || y.target.spend - x.target.spend);
+  return out;
+}
+
+/**
+ * Largest radius (in miles, 0.5-mi steps) at which the source touches no
+ * counted target. Overlap is monotonic in the radius, so the scan stops at
+ * the first collision. Null when even the smallest step already collides.
+ */
+export function safeCeilingMi(
+  source: Omit<ProposalSource, 'radiusKm'>,
+  targets: AdsetCircle[],
+  opts: { includeSameCampaign?: boolean; maxMi?: number; stepMi?: number } = {}
+): number | null {
+  const maxMi = opts.maxMi ?? 50;
+  const stepMi = opts.stepMi ?? 0.5;
+  const relevant = targetsOf({ ...source, radiusKm: 0 }, targets)
+    .filter(t => opts.includeSameCampaign || !(source.campaignId !== null && source.accountId === t.accountId && source.campaignId === t.campaignId))
+    .map(t => ({ gapKm: haversineKm(source, t) - t.radiusKm }));
+  let best: number | null = null;
+  for (let mi = stepMi; mi <= maxMi + 1e-9; mi += stepMi) {
+    const rKm = mi * MILE_KM;
+    if (relevant.some(t => rKm >= t.gapKm)) break;
+    best = Math.round(mi / stepMi) * stepMi;
+  }
+  return best;
+}
+
 /**
  * Circles whose center is farther from their attributed club than the
  * circle's own radius (min 5 km, so a tight 1-mile radius one street over

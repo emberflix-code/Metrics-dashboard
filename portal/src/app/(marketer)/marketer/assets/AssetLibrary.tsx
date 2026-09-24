@@ -142,31 +142,108 @@ function useDismiss(open: boolean, onClose: () => void) {
   return ref;
 }
 
+// Searchable multi-select: type to filter offers (case-insensitive
+// substring), selected offers are chips inside the box. Keyboard: ArrowUp/
+// Down move the highlight, Enter toggles it, Esc closes, Backspace on an
+// empty input removes the last chip. Value stays a plain string[] so the
+// `offer=` CSV URL param and the query are unchanged.
 function OfferMultiSelect({ options, value, onChange }: { options: { token: string; campaignCount: number }[]; value: string[]; onChange: (v: string[]) => void }) {
   const [open, setOpen] = useState(false);
-  const close = useCallback(() => setOpen(false), []);
+  const [text, setText] = useState('');
+  const [hi, setHi] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const close = useCallback(() => { setOpen(false); setText(''); }, []);
   const ref = useDismiss(open, close);
+
+  const filtered = useMemo(() => {
+    const t = text.trim().toLowerCase();
+    return t ? options.filter(o => o.token.toLowerCase().includes(t)) : options;
+  }, [options, text]);
+
+  // The list changes under the highlight whenever the filter text does.
+  useEffect(() => { setHi(0); }, [text, open]);
+  useEffect(() => {
+    listRef.current?.querySelector<HTMLElement>(`[data-idx="${hi}"]`)?.scrollIntoView({ block: 'nearest' });
+  }, [hi]);
+
   const toggle = (t: string) => onChange(value.includes(t) ? value.filter(v => v !== t) : [...value, t]);
-  const label = value.length === 0 ? 'All offers' : value.length === 1 ? value[0] : `${value.length} offers`;
+  const remove = (t: string) => onChange(value.filter(v => v !== t));
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (!open) setOpen(true); else setHi(h => Math.min(h + 1, Math.max(0, filtered.length - 1)));
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setHi(h => Math.max(h - 1, 0));
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      if (open && filtered[hi]) toggle(filtered[hi].token); else setOpen(true);
+    } else if (e.key === 'Escape') {
+      close();
+    } else if (e.key === 'Backspace' && text === '' && value.length > 0) {
+      e.preventDefault();
+      onChange(value.slice(0, -1));
+    }
+  };
+
   return (
     <div ref={ref} className="relative">
-      <button type="button" onClick={() => setOpen(o => !o)} className={`${inputCls} flex items-center gap-2 min-w-[140px]`}>
-        <span className={value.length ? 'text-white' : 'text-slate-400'}>{label}</span>
-        <span className="ml-auto text-slate-500 text-xs">▾</span>
-      </button>
+      {/* The whole box focuses the input so it behaves like one control. */}
+      <div
+        onMouseDown={e => { if (e.target === e.currentTarget) { e.preventDefault(); inputRef.current?.focus(); setOpen(true); } }}
+        className={`${inputCls} flex flex-wrap items-center gap-1 min-w-[180px] max-w-[420px] cursor-text py-1.5`}
+      >
+        {value.map(t => (
+          <span key={t} className="inline-flex items-center gap-1 text-[11px] px-2 py-0.5 rounded-full border text-blue-300 border-blue-500/30 bg-blue-500/10 max-w-[160px]">
+            <span className="truncate">{t}</span>
+            <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => remove(t)} aria-label={`Remove ${t}`} className="text-blue-300/70 hover:text-white leading-none">×</button>
+          </span>
+        ))}
+        <input
+          ref={inputRef}
+          type="text"
+          role="combobox"
+          aria-expanded={open}
+          aria-controls="offer-combo-list"
+          value={text}
+          placeholder={value.length ? '' : 'All offers'}
+          onFocus={() => setOpen(true)}
+          onChange={e => { setText(e.target.value); setOpen(true); }}
+          onKeyDown={onKeyDown}
+          className="flex-1 min-w-[70px] bg-transparent outline-none text-sm text-white placeholder:text-slate-400 py-0.5"
+        />
+        <span className="text-slate-500 text-xs select-none" onMouseDown={e => { e.preventDefault(); setOpen(o => !o); inputRef.current?.focus(); }}>▾</span>
+      </div>
       {open && (
-        <div className="absolute z-30 mt-1 w-72 max-h-80 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg shadow-xl p-1">
+        <div id="offer-combo-list" role="listbox" aria-multiselectable ref={listRef}
+          className="absolute z-30 mt-1 w-80 max-h-80 overflow-y-auto bg-slate-900 border border-slate-700 rounded-lg shadow-xl p-1">
           {value.length > 0 && (
-            <button type="button" onClick={() => onChange([])} className="w-full text-left text-xs text-blue-300 hover:text-blue-200 px-2 py-1.5">Clear selection</button>
+            <button type="button" onMouseDown={e => e.preventDefault()} onClick={() => onChange([])} className="w-full text-left text-xs text-blue-300 hover:text-blue-200 px-2 py-1.5">
+              Clear selection ({value.length})
+            </button>
           )}
-          {options.length === 0 && <p className="text-xs text-slate-500 px-2 py-1.5">No offers found</p>}
-          {options.map(o => (
-            <label key={o.token} className="flex items-center gap-2 px-2 py-1.5 rounded hover:bg-slate-800 cursor-pointer text-sm text-slate-200">
-              <input type="checkbox" checked={value.includes(o.token)} onChange={() => toggle(o.token)} className="accent-blue-500" />
-              <span className="truncate">{o.token}</span>
-              <span className="ml-auto text-[11px] text-slate-500">{o.campaignCount}</span>
-            </label>
-          ))}
+          {filtered.length === 0 && <p className="text-xs text-slate-500 px-2 py-1.5">{options.length === 0 ? 'No offers found' : `No offers match “${text.trim()}”`}</p>}
+          {filtered.map((o, i) => {
+            const checked = value.includes(o.token);
+            return (
+              <div
+                key={o.token}
+                data-idx={i}
+                role="option"
+                aria-selected={checked}
+                onMouseEnter={() => setHi(i)}
+                // mousedown (not click) so the input keeps focus and the list stays open for multi-picking
+                onMouseDown={e => { e.preventDefault(); toggle(o.token); }}
+                className={`flex items-center gap-2 px-2 py-1.5 rounded cursor-pointer text-sm ${i === hi ? 'bg-slate-800 text-white' : 'text-slate-200 hover:bg-slate-800/60'}`}
+              >
+                <input type="checkbox" readOnly checked={checked} tabIndex={-1} className="accent-blue-500 pointer-events-none" />
+                <span className="truncate">{o.token}</span>
+                <span className="ml-auto text-[11px] text-slate-500">{o.campaignCount}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

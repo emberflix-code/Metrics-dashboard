@@ -9,19 +9,25 @@
 import { query } from '../db';
 import { loadMarketerScope, type MarketerClient } from '../marketerScope';
 import {
-  computeOverlaps, offClubFlags, type AdsetCircle, type OverlapPair, type OffClubFlag,
+  computeOverlaps, offClubFlags, haversineKm, circleOverlapFraction,
+  type AdsetCircle, type OverlapPair, type OffClubFlag,
 } from '../geoOverlap';
 
 export interface TargetingFilters {
   since: string;
   until: string;
-  clientIds?: string[];
+  clientIds?: string[];          // "show only" filter — narrows the universe
   brand?: string;
   accountIds?: string[];
   minScore?: number;
   includeSameCampaign?: boolean;
   includeInactive?: boolean;
+  focusClientId?: string;        // focus mode — full universe plus a `focus` block around this client
+  ringKm?: number;
 }
+
+export const DEFAULT_RING_KM = 50;
+export const RING_OPTIONS_KM = [10, 25, 50, 100];
 
 export interface TargetingClub {
   clientId: string;
@@ -46,6 +52,39 @@ export interface BroadAdset {
   spend: number;
 }
 
+export type UnmappedReason = 'no targeting' | 'no coordinates' | 'broad';
+
+export interface FocusNeighbour {
+  circle: AdsetCircle;
+  distanceKm: number;            // focused club (or circle centroid) -> neighbour centre
+  overlapWithFocus: { adsetId: string; circleId: string; score: number }[];
+}
+
+export interface UnmappedNeighbour {
+  accountId: string;
+  adsetId: string;
+  adsetName: string;
+  campaignName: string;
+  clientId: string | null;
+  clientName: string | null;
+  spend: number;
+  reason: UnmappedReason;
+  clubDistanceKm: number | null; // distance of the ad set's club from the focus centre (null = the focused client itself)
+}
+
+export interface FocusReport {
+  clientId: string;
+  clientName: string;
+  brand: string;
+  clubs: TargetingClub[];
+  center: { lat: number; lng: number } | null;
+  centerSource: 'club' | 'circles' | 'none';
+  ringKm: number;
+  focusCircles: AdsetCircle[];
+  neighbours: FocusNeighbour[];
+  unmappedNeighbours: UnmappedNeighbour[];
+}
+
 export interface TargetingReport {
   range: { since: string; until: string };
   clubs: TargetingClub[];
@@ -53,6 +92,7 @@ export interface TargetingReport {
   pairs: OverlapPair[];
   offClub: OffClubFlag[];
   broad: BroadAdset[];
+  focus: FocusReport | null;
   unmapped: {
     adsetsWithoutTargeting: number;
     adsetsWithoutCoordinates: { accountId: string; adsetId: string; adsetName: string; campaignName: string; spend: number }[];
@@ -114,6 +154,8 @@ function cacheKey(f: TargetingFilters): string {
     minScore: f.minScore ?? 0.05,
     sc: !!f.includeSameCampaign,
     ia: !!f.includeInactive,
+    focus: f.focusClientId ?? '',
+    ring: f.ringKm ?? DEFAULT_RING_KM,
   });
 }
 
@@ -149,7 +191,7 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
 
   const empty: TargetingReport = {
     range: { since: f.since, until: f.until },
-    clubs: [], adsets: [], pairs: [], offClub: [], broad: [],
+    clubs: [], adsets: [], pairs: [], offClub: [], broad: [], focus: null,
     unmapped: { adsetsWithoutTargeting: 0, adsetsWithoutCoordinates: [], clientsWithoutGeocode: [] },
     summary: { adsets: 0, circles: 0, pairsHigh: 0, pairsMedium: 0, pairsLow: 0, spendInHighPairs: 0, clubs: 0, clubsGeocoded: 0 },
   };
@@ -218,13 +260,24 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
   const circles: AdsetCircle[] = [];
   const broad: BroadAdset[] = [];
   const withoutCoordinates: TargetingReport['unmapped']['adsetsWithoutCoordinates'] = [];
+  // Every universe ad set that did NOT become a circle, with why — focus
+  // mode reports the ones attributed to clubs inside the ring as "can't assess".
+  const nonCircle: Omit<UnmappedNeighbour, 'clubDistanceKm'>[] = [];
   let withoutTargeting = 0;
 
   for (const r of universe) {
     const k = `${r.account_id}:${r.entity_id}`;
     const s = spendByAdset.get(k)!;
     const client = r.client_id ? scope.clientById.get(r.client_id) : undefined;
-    if (!r.has_targeting) { withoutTargeting++; continue; }
+    const base = {
+      accountId: r.account_id, adsetId: r.entity_id, adsetName: r.name, campaignName: r.campaign_name || '',
+      clientId: client?.id ?? null, clientName: client?.name ?? null, spend: s.spend,
+    };
+    if (!r.has_targeting) {
+      withoutTargeting++;
+      nonCircle.push({ ...base, reason: 'no targeting' });
+      continue;
+    }
 
     const rows = geoByAdset.get(k) ?? [];
     const radiusRows = rows.filter(g => g.radius_km !== null && g.radius_km > 0);
@@ -264,6 +317,7 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
     if (radiusRows.length > 0) {
       // City/zip rows whose key never resolved through geo_key_cache.
       withoutCoordinates.push({ accountId: r.account_id, adsetId: r.entity_id, adsetName: r.name, campaignName: r.campaign_name || '', spend: s.spend });
+      nonCircle.push({ ...base, reason: 'no coordinates' });
       continue;
     }
 
@@ -276,6 +330,7 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
       kinds: rows.length > 0 ? Array.from(new Set(rows.map(g => g.kind))) : ['no geo rows'],
       spend: s.spend,
     });
+    nonCircle.push({ ...base, reason: 'broad' });
   }
   broad.sort((x, y) => y.spend - x.spend);
   withoutCoordinates.sort((x, y) => y.spend - x.spend);
@@ -327,6 +382,10 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
   let spendInHighPairs = 0;
   highAdsets.forEach(v => { spendInHighPairs += v; });
 
+  const focus = f.focusClientId
+    ? buildFocus(f.focusClientId, f.ringKm ?? DEFAULT_RING_KM, scope.clientById.get(f.focusClientId), clubs, circles, nonCircle, clubCoords)
+    : null;
+
   return {
     range: { since: f.since, until: f.until },
     clubs,
@@ -334,6 +393,7 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
     pairs,
     offClub,
     broad,
+    focus,
     unmapped: { adsetsWithoutTargeting: withoutTargeting, adsetsWithoutCoordinates: withoutCoordinates, clientsWithoutGeocode },
     summary: {
       adsets: universe.length,
@@ -343,5 +403,77 @@ async function assemble(f: TargetingFilters): Promise<TargetingReport> {
       clubs: visibleClubs.length,
       clubsGeocoded: clubs.length,
     },
+  };
+}
+
+// Everything running around one client: its own circles, every other
+// circle whose centre sits inside the ring (or that already touches one
+// of its circles, however far), and the ad sets we could not place but
+// whose club is inside the ring.
+function buildFocus(
+  clientId: string,
+  ringKm: number,
+  client: MarketerClient | undefined,
+  clubs: TargetingClub[],
+  circles: AdsetCircle[],
+  nonCircle: Omit<UnmappedNeighbour, 'clubDistanceKm'>[],
+  clubCoords: Map<string, { lat: number; lng: number }>
+): FocusReport {
+  const focusClubs = clubs.filter(c => c.clientId === clientId);
+  const focusCircles = circles.filter(c => c.clientId === clientId);
+
+  let center: { lat: number; lng: number } | null = null;
+  let centerSource: FocusReport['centerSource'] = 'none';
+  if (focusClubs.length > 0) {
+    center = { lat: focusClubs[0].lat, lng: focusClubs[0].lng };
+    centerSource = 'club';
+  } else if (focusCircles.length > 0) {
+    center = {
+      lat: focusCircles.reduce((s, c) => s + c.lat, 0) / focusCircles.length,
+      lng: focusCircles.reduce((s, c) => s + c.lng, 0) / focusCircles.length,
+    };
+    centerSource = 'circles';
+  }
+
+  const neighbours: FocusNeighbour[] = [];
+  const unmappedNeighbours: UnmappedNeighbour[] = [];
+  if (center) {
+    for (const c of circles) {
+      if (c.clientId === clientId) continue;
+      const distanceKm = haversineKm(center, c);
+      const overlapWithFocus = focusCircles
+        .map(fc => ({ adsetId: fc.adsetId, circleId: fc.circleId, score: circleOverlapFraction(haversineKm(fc, c), fc.radiusKm, c.radiusKm) }))
+        .filter(o => o.score > 0)
+        .sort((x, y) => y.score - x.score);
+      if (distanceKm <= ringKm || overlapWithFocus.length > 0) {
+        neighbours.push({ circle: c, distanceKm, overlapWithFocus });
+      }
+    }
+    neighbours.sort((x, y) => x.distanceKm - y.distanceKm);
+
+    for (const n of nonCircle) {
+      if (n.clientId === clientId) {
+        unmappedNeighbours.push({ ...n, clubDistanceKm: null });
+        continue;
+      }
+      const club = n.clientId ? clubCoords.get(n.clientId) : undefined;
+      if (!club) continue;
+      const d = haversineKm(center, club);
+      if (d <= ringKm) unmappedNeighbours.push({ ...n, clubDistanceKm: d });
+    }
+    unmappedNeighbours.sort((x, y) => (x.clubDistanceKm ?? -1) - (y.clubDistanceKm ?? -1) || y.spend - x.spend);
+  }
+
+  return {
+    clientId,
+    clientName: client?.name ?? clientId,
+    brand: client?.brand ?? '',
+    clubs: focusClubs,
+    center,
+    centerSource,
+    ringKm,
+    focusCircles,
+    neighbours,
+    unmappedNeighbours,
   };
 }

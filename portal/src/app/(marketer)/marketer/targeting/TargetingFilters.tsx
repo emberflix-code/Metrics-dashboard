@@ -2,12 +2,16 @@
 
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { fmtMi } from '../_components/format';
 
 export interface ClientOption { id: string; name: string; brand: string }
 export interface AccountOption { id: string; name: string }
 
 export interface CurrentFilters {
   clientIds: string[];
+  only: boolean;              // "show only this client" — the pre-focus filter behaviour
+  ringKm: number;
+  ringOptionsKm: number[];
   brand: string;
   accountIds: string[];
   minScore: number;
@@ -20,6 +24,8 @@ const MIN_SCORE_OPTIONS: { value: number; label: string }[] = [
   { value: 0.2, label: 'Medium and up (≥20%)' },
   { value: 0.5, label: 'High only (≥50%)' },
 ];
+
+const FILTER_KEYS = ['client', 'only', 'ring', 'brand', 'account', 'minScore', 'includeSameCampaign', 'includeInactive'];
 
 const inputCls = 'bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500';
 
@@ -46,7 +52,10 @@ export default function TargetingFilters({ clients, brands, accounts, current }:
     if (value) p.set(key, value); else p.delete(key);
   };
 
-  // Client multi-select: a search box with a dropdown, selected ones as chips.
+  // Client picker: a search box with a dropdown, selected ones as chips. In
+  // focus mode there is exactly one focused client, so picking another
+  // replaces it; "show only" keeps the multi-select filter behaviour.
+  const focusMode = !current.only;
   const [clientQuery, setClientQuery] = useState('');
   const [open, setOpen] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
@@ -72,30 +81,31 @@ export default function TargetingFilters({ clients, brands, accounts, current }:
   function addClient(id: string) {
     setClientQuery('');
     setOpen(false);
-    setClients([...current.clientIds, id]);
+    setClients(focusMode ? [id] : [...current.clientIds, id]);
   }
   function removeClient(id: string) {
     setClients(current.clientIds.filter(x => x !== id));
   }
 
-  const anyActive = current.clientIds.length > 0 || !!current.brand || current.accountIds.length > 0 || current.minScore !== 0.05 || current.includeSameCampaign || current.includeInactive;
+  const hasClient = current.clientIds.length > 0;
+  const anyActive = hasClient || current.only || current.ringKm !== 50 || !!current.brand || current.accountIds.length > 0 || current.minScore !== 0.05 || current.includeSameCampaign || current.includeInactive;
 
   return (
     <div className="bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-3 flex flex-wrap items-start gap-x-4 gap-y-3">
       <div ref={boxRef} className="relative min-w-[260px] flex-1">
-        <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Clients</label>
+        <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1">{focusMode ? 'Focus on client' : 'Clients'}</label>
         <div className={`${inputCls} flex flex-wrap items-center gap-1 py-1.5 min-h-[38px]`} onClick={() => setOpen(true)}>
           {selectedClients.map(c => (
-            <span key={c.id} className="inline-flex items-center gap-1 bg-blue-600/20 text-blue-200 border border-blue-500/30 rounded-md px-2 py-0.5 text-xs">
+            <span key={c.id} className={`inline-flex items-center gap-1 rounded-md px-2 py-0.5 text-xs border ${focusMode ? 'bg-emerald-600/20 text-emerald-200 border-emerald-500/30' : 'bg-blue-600/20 text-blue-200 border-blue-500/30'}`}>
               {c.name}
-              <button type="button" aria-label={`Remove ${c.name}`} onClick={e => { e.stopPropagation(); removeClient(c.id); }} className="text-blue-300 hover:text-white leading-none">×</button>
+              <button type="button" aria-label={`Remove ${c.name}`} onClick={e => { e.stopPropagation(); removeClient(c.id); }} className="hover:text-white leading-none opacity-80">×</button>
             </span>
           ))}
           <input
             value={clientQuery}
             onChange={e => { setClientQuery(e.target.value); setOpen(true); }}
             onFocus={() => setOpen(true)}
-            placeholder={selectedClients.length === 0 ? 'All location clients — type to filter…' : 'Add another…'}
+            placeholder={selectedClients.length === 0 ? (focusMode ? 'Pick a client to see what runs around it…' : 'All location clients — type to filter…') : focusMode ? 'Switch focus…' : 'Add another…'}
             className="bg-transparent outline-none text-sm text-white placeholder:text-slate-500 flex-1 min-w-[140px]"
           />
         </div>
@@ -111,6 +121,20 @@ export default function TargetingFilters({ clients, brands, accounts, current }:
             ))}
           </ul>
         )}
+      </div>
+
+      <div>
+        <label className="block text-[11px] font-semibold uppercase tracking-wider text-slate-500 mb-1">Ring</label>
+        <select
+          value={String(current.ringKm)}
+          disabled={!hasClient || current.only}
+          title={!hasClient ? 'Pick a client first' : current.only ? 'Not used when showing only this client' : 'How far around the club to look'}
+          onChange={e => navigate(p => setOrDelete(p, 'ring', e.target.value === '50' ? '' : e.target.value))}
+          className={`${inputCls} disabled:opacity-50`}
+        >
+          {current.ringOptionsKm.map(km => <option key={km} value={String(km)}>{km} km · {fmtMi(km)}</option>)}
+          {!current.ringOptionsKm.includes(current.ringKm) && <option value={String(current.ringKm)}>{current.ringKm} km · {fmtMi(current.ringKm)}</option>}
+        </select>
       </div>
 
       <div>
@@ -140,6 +164,10 @@ export default function TargetingFilters({ clients, brands, accounts, current }:
       </div>
 
       <div className="flex flex-col gap-1.5 pt-5 text-sm text-slate-300">
+        <label className={`inline-flex items-center gap-2 ${hasClient ? 'cursor-pointer' : 'opacity-50'}`} title={hasClient ? 'Filter the whole page down to the selected client(s) instead of focusing on one' : 'Pick a client first'}>
+          <input type="checkbox" disabled={!hasClient} checked={current.only} onChange={e => navigate(p => { setOrDelete(p, 'only', e.target.checked ? '1' : ''); if (e.target.checked) p.delete('ring'); })} className="accent-blue-500" />
+          Show only this client
+        </label>
         <label className="inline-flex items-center gap-2 cursor-pointer">
           <input type="checkbox" checked={current.includeSameCampaign} onChange={e => navigate(p => setOrDelete(p, 'includeSameCampaign', e.target.checked ? '1' : ''))} className="accent-blue-500" />
           Include same-campaign pairs
@@ -153,7 +181,7 @@ export default function TargetingFilters({ clients, brands, accounts, current }:
       {anyActive && (
         <button
           type="button"
-          onClick={() => navigate(p => { for (const k of ['client', 'brand', 'account', 'minScore', 'includeSameCampaign', 'includeInactive']) p.delete(k); })}
+          onClick={() => navigate(p => { for (const k of FILTER_KEYS) p.delete(k); })}
           className="self-end text-xs text-slate-400 hover:text-white border border-slate-700 hover:border-slate-600 rounded-lg px-3 py-2 transition-colors"
         >
           Clear filters
