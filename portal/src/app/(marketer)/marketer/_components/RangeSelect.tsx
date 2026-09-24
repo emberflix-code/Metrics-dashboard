@@ -21,10 +21,17 @@ const PRESETS: { key: PresetKey; label: string }[] = [
 
 // "Live from Meta" is offered for short ranges only (≤ LIVE_MAX_DAYS): one
 // campaign-level insights call per account is cheap for a week, and the
-// nightly cache can lag a day behind for "this week" checks.
+// nightly cache can lag a day behind for "this week" checks. Live also
+// runs the range through TODAY (the cached views floor at yesterday), so
+// eligibility is measured against the extended range.
 export const LIVE_MAX_DAYS = 14;
 function rangeDays(since: string, until: string): number {
   return Math.round((Date.parse(`${until}T00:00:00Z`) - Date.parse(`${since}T00:00:00Z`)) / 86_400_000) + 1;
+}
+// Today in America/New_York, matching the server's live clock.
+function todayEt(): string {
+  const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(new Date());
+  return `${p.find(x => x.type === 'year')!.value}-${p.find(x => x.type === 'month')!.value}-${p.find(x => x.type === 'day')!.value}`;
 }
 
 export default function RangeSelect({ currentPreset, currentSince, currentUntil, allowLive = false, live = false }: {
@@ -71,7 +78,10 @@ export default function RangeSelect({ currentPreset, currentSince, currentUntil,
     navigate(params);
   }
 
-  const liveEligible = allowLive && rangeDays(currentSince, currentUntil) <= LIVE_MAX_DAYS;
+  // When live is off the shown range ends yesterday, so measure the cap
+  // against what live would actually request (through today).
+  const liveUntil = currentUntil >= todayEt() ? currentUntil : todayEt();
+  const liveEligible = allowLive && rangeDays(currentSince, liveUntil) <= LIVE_MAX_DAYS;
   const cls = 'bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500';
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -93,7 +103,7 @@ export default function RangeSelect({ currentPreset, currentSince, currentUntil,
       {allowLive && (
         <label
           className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border ${liveEligible ? 'border-slate-700 text-slate-300 cursor-pointer hover:border-slate-600' : 'border-slate-800 text-slate-600 cursor-not-allowed'}`}
-          title={liveEligible ? 'Pull spend and leads straight from Meta for this range instead of the nightly cache (still through yesterday)' : `Live mode is available for ranges up to ${LIVE_MAX_DAYS} days`}
+          title={liveEligible ? `Pull spend and leads straight from Meta for this range instead of the nightly cache, through today (${liveUntil}). Today's numbers are partial and still settling.` : `Live mode is available for ranges up to ${LIVE_MAX_DAYS} days (including today)`}
         >
           <input type="checkbox" checked={live && liveEligible} disabled={!liveEligible} onChange={e => toggleLive(e.target.checked)} className="accent-emerald-500" />
           Live from Meta

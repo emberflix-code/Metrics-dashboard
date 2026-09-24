@@ -1,8 +1,7 @@
 import { requireMarketerSession } from '@/lib/marketerAuth';
 import { loadMarketerScope } from '@/lib/marketerScope';
-import { resolveDateRange } from '@/lib/dateRange';
 import { buildOfferMatrix } from '@/lib/marketer/offerMatrix';
-import { liveRangeAllowed } from '@/lib/marketer/campaignStats';
+import { resolveLiveRange } from '@/lib/marketer/campaignStats';
 import RangeSelect from '../_components/RangeSelect';
 import StatTile from '../_components/StatTile';
 import { fmtInt, fmtUsd } from '../_components/format';
@@ -17,12 +16,15 @@ const first = (v: string | string[] | undefined): string | undefined => (Array.i
 // columns = offer tokens parsed from campaign names, cells = CPL.
 export default async function MarketerOffersPage({ searchParams }: { searchParams: SearchParams }) {
   await requireMarketerSession();
-  const range = resolveDateRange({ preset: first(searchParams.preset), since: first(searchParams.since), until: first(searchParams.until) }, '30');
   const brand = first(searchParams.brand) || '';
   const groupBy: 'client' | 'brand' = first(searchParams.groupBy) === 'brand' ? 'brand' : 'client';
   const minSpendRaw = Number(first(searchParams.minSpend));
   const minSpend = Number.isFinite(minSpendRaw) && minSpendRaw > 0 ? minSpendRaw : 0;
-  const live = first(searchParams.live) === '1' && liveRangeAllowed(range.since, range.until);
+  // Live mode runs through today (see resolveLiveRange).
+  const { live, ...range } = resolveLiveRange(
+    { preset: first(searchParams.preset), since: first(searchParams.since), until: first(searchParams.until) },
+    first(searchParams.live) === '1'
+  );
 
   const [scope, matrix] = await Promise.all([
     loadMarketerScope(),
@@ -43,7 +45,7 @@ export default async function MarketerOffersPage({ searchParams }: { searchParam
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-white">Offers</h1>
-          <p className="text-sm text-slate-400">CPL by offer and location, from campaign-name offer tokens. Which promotion is earning its spend where.{live ? ' Live from Meta.' : ''}</p>
+          <p className="text-sm text-slate-400">CPL by offer and location, from campaign-name offer tokens. Which promotion is earning its spend where.{live ? ` Live from Meta, including today (${range.until}).` : ''}</p>
         </div>
         <RangeSelect currentPreset={range.preset} currentSince={range.since} currentUntil={range.until} allowLive live={live} />
       </div>

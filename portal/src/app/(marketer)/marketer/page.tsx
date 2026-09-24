@@ -1,8 +1,7 @@
 import { requireMarketerSession } from '@/lib/marketerAuth';
 import { loadMarketerScope } from '@/lib/marketerScope';
-import { resolveDateRange } from '@/lib/dateRange';
 import { buildScorecard, coachNames } from '@/lib/marketer/scorecard';
-import { liveRangeAllowed } from '@/lib/marketer/campaignStats';
+import { resolveLiveRange } from '@/lib/marketer/campaignStats';
 import { buildAlerts } from '@/lib/marketer/alerts';
 import { query } from '@/lib/db';
 import RangeSelect from './_components/RangeSelect';
@@ -22,12 +21,16 @@ const first = (v: string | string[] | undefined): string | undefined => (Array.i
 // lib functions; the client components only add sorting and triage.
 export default async function MarketerOverviewPage({ searchParams }: { searchParams: SearchParams }) {
   await requireMarketerSession();
-  const range = resolveDateRange({ preset: first(searchParams.preset), since: first(searchParams.since), until: first(searchParams.until) }, '30');
   const brand = first(searchParams.brand) || '';
   const coach = first(searchParams.coach) || '';
   // Live = campaign-level numbers straight from Meta for short ranges (the
-  // nightly cache can lag a day for "this week"); still through yesterday.
-  const live = first(searchParams.live) === '1' && liveRangeAllowed(range.since, range.until);
+  // nightly cache can lag a day for "this week") AND the range runs through
+  // today, since "live" means as of now. Cached mode still floors at
+  // yesterday like the rest of the app.
+  const { live, ...range } = resolveLiveRange(
+    { preset: first(searchParams.preset), since: first(searchParams.since), until: first(searchParams.until) },
+    first(searchParams.live) === '1'
+  );
 
   const [scope, scorecard, alerts] = await Promise.all([
     loadMarketerScope(),
@@ -62,7 +65,7 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-white">Overview</h1>
-          <p className="text-sm text-slate-400">Every location against its peers, plus what needs attention today.{live ? ' Spend and leads live from Meta.' : ''}</p>
+          <p className="text-sm text-slate-400">Every location against its peers, plus what needs attention today.{live ? ` Spend and leads live from Meta, including today (${range.until}).` : ''}</p>
         </div>
         <RangeSelect currentPreset={range.preset} currentSince={range.since} currentUntil={range.until} allowLive live={live} />
       </div>

@@ -7,6 +7,11 @@ import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
 import { resolveResultsFromActions } from '@/lib/meta';
 import { getResultsRules, resultsUnderRule } from '@/lib/metaSync';
+import { resolveDateRange, todayInTimezone } from '@/lib/dateRange';
+
+// One shared clock for "today" in live mode, matching lib/dateRange's
+// preset boundaries. Most of the agency's accounts are Eastern anyway.
+const LIVE_TIMEZONE = 'America/New_York';
 
 export interface CampaignStat {
   clientId: string | null;     // null = no primary client matched (unattributed)
@@ -79,7 +84,10 @@ export async function loadCampaignStats(accountIds: string[], since: string, unt
 // (accounts, range).
 const GRAPH = 'https://graph.facebook.com/v22.0';
 const LIVE_TTL_MS = 2 * 60_000;
-const LIVE_MAX_RANGE_DAYS = 31;
+// Matches the checkbox's own limit in _components/RangeSelect.tsx
+// (LIVE_MAX_DAYS): a hand-typed URL shouldn't get a wider live pull than
+// the UI offers. Counted inclusively, today included.
+const LIVE_MAX_RANGE_DAYS = 14;
 const _liveCache = new Map<string, { expires: number; rows: CampaignStat[] }>();
 
 interface LiveRow { campaign_id?: string; campaign_name?: string; spend?: string; impressions?: string; inline_link_clicks?: string; reach?: string; actions?: { action_type: string; value: string }[] }
@@ -106,8 +114,36 @@ async function fetchLiveCampaignRows(accountId: string, token: string, since: st
 }
 
 export function liveRangeAllowed(since: string, until: string): boolean {
-  const d = (Date.parse(`${until}T00:00:00Z`) - Date.parse(`${since}T00:00:00Z`)) / 86_400_000;
-  return Number.isFinite(d) && d >= 0 && d <= LIVE_MAX_RANGE_DAYS;
+  const d = (Date.parse(`${until}T00:00:00Z`) - Date.parse(`${since}T00:00:00Z`)) / 86_400_000 + 1;
+  return Number.isFinite(d) && d >= 1 && d <= LIVE_MAX_RANGE_DAYS;
+}
+
+/**
+ * Live mode means "as of right now", so the range runs through TODAY —
+ * the rest of the app deliberately floors at yesterday because the cache
+ * only ever holds settled days, but a live pull can see today's partial
+ * numbers and that is the point of the toggle. Today is the calendar date
+ * in America/New_York, the same clock the presets use (see lib/dateRange).
+ * Returns the range unchanged when it already ends today or later.
+ */
+export function extendRangeToToday(range: { since: string; until: string }): { since: string; until: string } {
+  const today = todayInTimezone(LIVE_TIMEZONE);
+  return range.until >= today ? range : { since: range.since, until: today };
+}
+
+/** Resolves a range and, when live is on, extends it through today. */
+export function resolveLiveRange(
+  searchParams: { preset?: string; since?: string; until?: string },
+  wantLive: boolean,
+  defaultPreset = '30'
+): { preset: string; since: string; until: string; live: boolean } {
+  const base = resolveDateRange(searchParams, defaultPreset);
+  if (!wantLive) return { ...base, live: false };
+  const extended = extendRangeToToday(base);
+  // The cap is checked against the EXTENDED range, so a 14-day preset plus
+  // today can't quietly exceed the live limit.
+  const live = liveRangeAllowed(extended.since, extended.until);
+  return live ? { preset: base.preset, ...extended, live } : { ...base, live: false };
 }
 
 export async function loadCampaignStatsLive(accountIds: string[], since: string, until: string, opts: { includeUnattributed?: boolean } = {}): Promise<CampaignStat[]> {
