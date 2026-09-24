@@ -66,11 +66,47 @@ export function geocoderName(): 'google' | 'nominatim' {
   return GOOGLE_KEY() ? 'google' : 'nominatim';
 }
 
-/** Geocodes one free-text address/place string. Null when nothing matched; throws on provider errors. */
+/** Geocodes one free-text address/place string exactly as given. Null when nothing matched; throws on provider errors. */
 export async function geocodeAddress(q: string): Promise<GeocodeResult | null> {
   const s = q.replace(/\s+/g, ' ').trim();
   if (!s) return null;
   return GOOGLE_KEY() ? geocodeGoogle(s) : geocodeNominatim(s);
+}
+
+// Nominatim rejects most US strip-mall addresses verbatim ("8333 Greenway
+// Blvd Suite 140, Middleton, WI 53562" -> no match; 46 of 84 clubs failed on
+// the first prod run, 2026-09-24). Progressively simpler variants, most
+// precise first; the variant that matched is recorded in geocode_source so
+// an approximate pin is visible as such.
+export function addressVariants(raw: string): { query: string; precision: 'exact' | 'no-suite' | 'street' | 'locality' }[] {
+  let s = raw.replace(/\s+/g, ' ').trim();
+  // Trailing notes after the postal code ("…, Canada. In behind Bo's").
+  s = s.replace(/,?\s*(United States|USA|Canada)\b.*$/i, '');
+  const out: { query: string; precision: 'exact' | 'no-suite' | 'street' | 'locality' }[] = [{ query: s, precision: 'exact' }];
+  // Suite / unit / store / building tokens, anywhere (incl. a "Unit 200 "
+  // prefix before the street number) and "#123" fragments.
+  const noSuite = s
+    .replace(/^(unit|suite|ste|#)\s*[\w-]+\s+/i, '')
+    .replace(/,?\s*\b(suite|ste\.?|unit|apt|bldg|building|store|rm|room)\b\.?\s*#?\s*[\w-]+(\s+(unit|ste|suite)\s*[\w-]+)?/gi, '')
+    .replace(/\s*#\s*[\w-]+/g, '')
+    .replace(/\s+,/g, ',').replace(/,\s*,/g, ',').replace(/\s+/g, ' ').trim();
+  if (noSuite !== s) out.push({ query: noSuite, precision: 'no-suite' });
+  // Street without the house number ("Greenway Blvd, Middleton, WI 53562").
+  const street = noSuite.replace(/^\d+[\w-]*\s+/, '');
+  if (street !== noSuite && street.includes(',')) out.push({ query: street, precision: 'street' });
+  // Locality only: everything after the first comma.
+  const locality = noSuite.includes(',') ? noSuite.slice(noSuite.indexOf(',') + 1).trim() : '';
+  if (locality && locality !== street) out.push({ query: locality, precision: 'locality' });
+  return out;
+}
+
+/** Tries geocodeAddress over addressVariants(); returns the first hit with its precision tier. */
+export async function geocodeAddressLenient(raw: string): Promise<(GeocodeResult & { tier: 'exact' | 'no-suite' | 'street' | 'locality'; query: string }) | null> {
+  for (const v of addressVariants(raw)) {
+    const hit = await geocodeAddress(v.query);
+    if (hit) return { ...hit, tier: v.precision, query: v.query };
+  }
+  return null;
 }
 
 /**
@@ -92,15 +128,18 @@ export async function geocodePendingClients(opts: { clientId?: string; limit?: n
   let geocoded = 0, failed = 0, skipped = 0;
   for (const r of rows) {
     try {
-      const hit = await geocodeAddress(r.location_address);
+      const hit = await geocodeAddressLenient(r.location_address);
       if (!hit) {
         skipped++;
         await query(`UPDATE clients SET geocode_query = $2, geocode_error = 'no match', geocoded_at = now() WHERE id = $1`, [r.id, r.location_address]);
         continue;
       }
+      // geocode_source records provider + the variant tier that matched
+      // (exact / no-suite / street / locality) so the map can flag
+      // approximate pins.
       await query(
         `UPDATE clients SET location_lat = $2, location_lng = $3, geocode_source = $4, geocode_query = $5, geocode_error = NULL, geocoded_at = now() WHERE id = $1`,
-        [r.id, hit.lat, hit.lng, `${hit.source}${hit.precision ? `:${hit.precision}` : ''}`, r.location_address]
+        [r.id, hit.lat, hit.lng, `${hit.source}:${hit.tier}${hit.precision ? `:${hit.precision}` : ''}`, r.location_address]
       );
       geocoded++;
     } catch (err) {
