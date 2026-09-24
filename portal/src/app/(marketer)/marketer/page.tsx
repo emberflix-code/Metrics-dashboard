@@ -85,6 +85,15 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
         <StatTile label="High alerts" value={String(highAlerts)} tone={highAlerts > 0 ? 'bad' : 'good'} sub={`${alerts.alerts.length} open in total`} />
       </div>
 
+      <ScorecardTable rows={scorecard.rows} totals={scorecard.totals} agencyMedianCpl={scorecard.agencyMedianCpl} live={live} />
+
+      {scorecard.unattributed.campaigns > 0 && (
+        <p className="text-xs text-slate-500">
+          Unattributed spend: {fmtUsd(scorecard.unattributed.spend, 0)} across {scorecard.unattributed.campaigns} campaign{scorecard.unattributed.campaigns === 1 ? '' : 's'} ({fmtInt(scorecard.unattributed.results)} leads) isn&apos;t mapped to any location and is excluded from the scorecard.{' '}
+          <a href="/marketer/alerts?kinds=unattributed_campaign" className="text-blue-300 hover:text-blue-200">Review →</a>
+        </p>
+      )}
+
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
         <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-white">Needs attention</h2>
@@ -98,15 +107,6 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
           <AlertsList alerts={topAlerts} compact />
         )}
       </div>
-
-      <ScorecardTable rows={scorecard.rows} totals={scorecard.totals} agencyMedianCpl={scorecard.agencyMedianCpl} live={live} />
-
-      {scorecard.unattributed.campaigns > 0 && (
-        <p className="text-xs text-slate-500">
-          Unattributed spend: {fmtUsd(scorecard.unattributed.spend, 0)} across {scorecard.unattributed.campaigns} campaign{scorecard.unattributed.campaigns === 1 ? '' : 's'} ({fmtInt(scorecard.unattributed.results)} leads) isn&apos;t mapped to any location and is excluded from the scorecard.{' '}
-          <a href="/marketer/alerts?kinds=unattributed_campaign" className="text-blue-300 hover:text-blue-200">Review →</a>
-        </p>
-      )}
 
       <details className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden group">
         <summary className="px-4 py-3 cursor-pointer select-none flex items-center justify-between text-sm font-semibold text-white hover:bg-slate-800/30">
