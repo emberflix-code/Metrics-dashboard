@@ -39,6 +39,12 @@ export interface AssetLibraryQuery {
   theme?: string;
   ugc?: string;
   onlyActive?: boolean;
+  /**
+   * Widen scope to every client ever (active or not) and their accounts, so
+   * a marketer planning a new campaign can see what worked for past
+   * clients/offers. Off by default; the date range still applies.
+   */
+  includeInactive?: boolean;
 }
 
 export interface AssetLibraryRow {
@@ -141,8 +147,10 @@ interface ResolvedScope {
   clientFilter: string[] | null;
 }
 
-async function resolveScope(q: Pick<AssetLibraryQuery, 'accountIds' | 'clientIds' | 'brand'>): Promise<ResolvedScope> {
-  const scope = await loadMarketerScope();
+async function resolveScope(q: Pick<AssetLibraryQuery, 'accountIds' | 'clientIds' | 'brand' | 'includeInactive'>): Promise<ResolvedScope> {
+  // With includeInactive the scope's accountIds is the union over every
+  // client ever, and clientById resolves names for inactive clients too.
+  const scope = await loadMarketerScope({ includeInactive: !!q.includeInactive });
   let accountIds = scope.accountIds;
   if (q.accountIds && q.accountIds.length > 0) {
     const want = new Set(q.accountIds.map(a => a.replace(/^act_/i, '')));
@@ -486,6 +494,7 @@ export function parseAssetLibraryParams(src: ParamSource, range: { since: string
   const brand = (readParam(src, 'brand') || '').trim() || undefined;
   const q = (readParam(src, 'q') || '').trim() || undefined;
   const onlyActiveRaw = readParam(src, 'onlyActive');
+  const inactiveRaw = readParam(src, 'inactive');
 
   return {
     kind, since: range.since, until: range.until, sort, dir, page, pageSize,
@@ -499,6 +508,7 @@ export function parseAssetLibraryParams(src: ParamSource, range: { since: string
     theme: kind === 'creative' && themeRaw && THEMES.includes(themeRaw) ? themeRaw : undefined,
     ugc: kind === 'creative' && ugcRaw && UGC.includes(ugcRaw) ? ugcRaw : undefined,
     onlyActive: onlyActiveRaw === '1' || onlyActiveRaw === 'true',
+    includeInactive: inactiveRaw === '1' || inactiveRaw === 'true',
   };
 }
 
@@ -576,9 +586,11 @@ const groupMetrics = (r: GroupDbRow) => {
   return { spend, results, cpl: results > 0 ? round2(spend / results) : null };
 };
 
-export async function getAssetDetail(kind: AssetKind, key: string, since: string, until: string): Promise<AssetDetail | null> {
+export async function getAssetDetail(kind: AssetKind, key: string, since: string, until: string, opts: { includeInactive?: boolean } = {}): Promise<AssetDetail | null> {
   if (kind !== 'creative' && !isCopyKind(kind)) return null;
-  const { scope, accountIds } = await resolveScope({});
+  // Same scope switch as the list, or an asset opened from an inactive-only
+  // account would 404 here while visibly present in the table.
+  const { scope, accountIds } = await resolveScope({ includeInactive: opts.includeInactive });
   if (accountIds.length === 0) return null;
 
   const { cte, p } = detailFactsCte(kind, key, since, until, accountIds);

@@ -19,7 +19,20 @@ const PRESETS: { key: PresetKey; label: string }[] = [
   { key: 'custom', label: 'Custom range…' },
 ];
 
-export default function RangeSelect({ currentPreset, currentSince, currentUntil }: { currentPreset: string; currentSince: string; currentUntil: string }) {
+// "Live from Meta" is offered for short ranges only (≤ LIVE_MAX_DAYS): one
+// campaign-level insights call per account is cheap for a week, and the
+// nightly cache can lag a day behind for "this week" checks.
+export const LIVE_MAX_DAYS = 14;
+function rangeDays(since: string, until: string): number {
+  return Math.round((Date.parse(`${until}T00:00:00Z`) - Date.parse(`${since}T00:00:00Z`)) / 86_400_000) + 1;
+}
+
+export default function RangeSelect({ currentPreset, currentSince, currentUntil, allowLive = false, live = false }: {
+  currentPreset: string; currentSince: string; currentUntil: string;
+  /** Show the "Live from Meta" checkbox (only pages whose data layer supports it). */
+  allowLive?: boolean;
+  live?: boolean;
+}) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
@@ -52,6 +65,13 @@ export default function RangeSelect({ currentPreset, currentSince, currentUntil 
     navigate(params);
   }
 
+  function toggleLive(on: boolean) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (on) params.set('live', '1'); else params.delete('live');
+    navigate(params);
+  }
+
+  const liveEligible = allowLive && rangeDays(currentSince, currentUntil) <= LIVE_MAX_DAYS;
   const cls = 'bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500';
   return (
     <div className="flex items-center gap-2 flex-wrap">
@@ -70,6 +90,15 @@ export default function RangeSelect({ currentPreset, currentSince, currentUntil 
         </>
       )}
       <span className="text-xs text-slate-500 font-mono">{currentSince} → {currentUntil}</span>
+      {allowLive && (
+        <label
+          className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg border ${liveEligible ? 'border-slate-700 text-slate-300 cursor-pointer hover:border-slate-600' : 'border-slate-800 text-slate-600 cursor-not-allowed'}`}
+          title={liveEligible ? 'Pull spend and leads straight from Meta for this range instead of the nightly cache (still through yesterday)' : `Live mode is available for ranges up to ${LIVE_MAX_DAYS} days`}
+        >
+          <input type="checkbox" checked={live && liveEligible} disabled={!liveEligible} onChange={e => toggleLive(e.target.checked)} className="accent-emerald-500" />
+          Live from Meta
+        </label>
+      )}
     </div>
   );
 }

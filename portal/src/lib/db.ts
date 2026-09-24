@@ -708,6 +708,16 @@ pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_ear
 pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_backfill_complete BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_asset_breakdown_daily_asset ON meta_asset_breakdown_daily (account_id, asset_key, date)`).catch(() => {});
 
+// Booking calendar per client (migration 034): which GHL/MindBody calendar
+// a location's bookings come from, mirrored from the marketing team's
+// "Alloy booking calendars" sheet (lib/bookingCalendars.ts). Informational
+// — bookings are still counted from GHL contact tags — shown as a pill next
+// to Bookings on the marketer scorecard so the specialist knows the source.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS booking_calendar_name TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS booking_platform TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS booking_calendar_link TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS booking_calendar_synced_at TIMESTAMPTZ`).catch(() => {});
+
 // Phase 3 — alert dismissals (marketer UI).
 pool.query(`CREATE TABLE IF NOT EXISTS marketer_alert_dismissals (
   alert_key     TEXT PRIMARY KEY,

@@ -11,3 +11,23 @@ export function namePrefixGroup(name: string): string {
   const firstWord = name.split(/[\s,]+/)[0];
   return firstWord || name;
 }
+
+// Corporate-group brand for the marketer module. The prefix heuristic
+// above splits "AF Chilliwack" / "Anytime Fitness Kelowna" and "Alloy
+// Wheaton" / "Alloy Personal Training - Middleton" into separate groups;
+// the agency treats each pair as one corporate group (confirmed 2026-09-24),
+// so peer medians and brand filters use these merged names.
+const BRAND_RULES: { re: RegExp; brand: string }[] = [
+  { re: /^(anytime\s*fitness|anytime|af)\b/i, brand: 'Anytime Fitness' },
+  { re: /^alloy\b/i, brand: 'Alloy' },
+  { re: /^stretch\s*lab\b/i, brand: 'StretchLab' },
+  { re: /^stretch\s*zone\b/i, brand: 'Stretch Zone' },
+  { re: /^workout\s*anytime\b/i, brand: 'Workout Anytime' },
+  { re: /^omega\b/i, brand: 'Omega' },
+  { re: /^ncognito\b/i, brand: 'Ncognito' },
+];
+
+export function brandGroup(name: string): string {
+  for (const r of BRAND_RULES) if (r.re.test(name.trim())) return r.brand;
+  return namePrefixGroup(name);
+}

@@ -10,6 +10,6 @@ export async function GET(req: NextRequest) {
   if (!session) return marketerUnauthorized();
   const sp = req.nextUrl.searchParams;
   const range = resolveDateRange({ preset: sp.get('preset') || undefined, since: sp.get('since') || undefined, until: sp.get('until') || undefined }, '30');
-  const result = await buildScorecard({ since: range.since, until: range.until, brand: sp.get('brand') || undefined, coach: sp.get('coach') || undefined });
+  const result = await buildScorecard({ since: range.since, until: range.until, brand: sp.get('brand') || undefined, coach: sp.get('coach') || undefined, live: sp.get('live') === '1' });
   return NextResponse.json(result, NO_STORE);
 }

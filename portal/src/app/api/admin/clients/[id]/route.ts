@@ -109,6 +109,15 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
     geocodePendingClients({ clientId: params.id }).catch(() => {});
   }
 
+  // Marketer module: booking calendar shown as a pill next to Bookings.
+  // Normally filled by the booking-calendar sheet sync; editable here for
+  // clients that aren't on that sheet.
+  for (const col of ['booking_calendar_name', 'booking_platform', 'booking_calendar_link'] as const) {
+    if (body[col] !== undefined) {
+      await query(`UPDATE clients SET ${col} = $1, booking_calendar_synced_at = now() WHERE id = $2`, [String(body[col]).trim(), params.id]);
+    }
+  }
+
   if (body.sort_order !== undefined) {
     const n = Number(body.sort_order);
     if (!Number.isFinite(n) || !Number.isInteger(n)) {

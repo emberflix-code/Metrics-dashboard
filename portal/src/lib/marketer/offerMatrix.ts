@@ -13,11 +13,12 @@ export interface OfferMatrix {
   offers: { token: string; spend: number; results: number; cpl: number | null; medianCpl: number | null; clients: number }[];
   rows: MatrixRow[];
   groupBy: 'client' | 'brand';
+  live: boolean;
 }
 
-export async function buildOfferMatrix(f: { since: string; until: string; brand?: string; groupBy?: 'client' | 'brand'; minSpend?: number }): Promise<OfferMatrix> {
+export async function buildOfferMatrix(f: { since: string; until: string; brand?: string; groupBy?: 'client' | 'brand'; minSpend?: number; live?: boolean }): Promise<OfferMatrix> {
   const scope = await loadMarketerScope();
-  const stats = await loadCampaignStats(scope.accountIds, f.since, f.until);
+  const stats = await loadCampaignStats(scope.accountIds, f.since, f.until, { live: !!f.live });
   const groupBy = f.groupBy ?? 'client';
   const minSpend = f.minSpend ?? 0;
 
@@ -72,5 +73,5 @@ export async function buildOfferMatrix(f: { since: string; until: string; brand?
   }).filter(r => r.total.spend >= minSpend)
     .sort((a, b) => a.brand.localeCompare(b.brand) || a.label.localeCompare(b.label));
 
-  return { range: { since: f.since, until: f.until }, offers, rows, groupBy };
+  return { range: { since: f.since, until: f.until }, offers, rows, groupBy, live: !!f.live };
 }

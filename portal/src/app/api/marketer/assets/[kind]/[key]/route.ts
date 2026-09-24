@@ -21,7 +21,8 @@ export async function GET(req: NextRequest, { params }: { params: { kind: string
   const sp = req.nextUrl.searchParams;
   const range = resolveDateRange({ preset: sp.get('preset') ?? undefined, since: sp.get('since') ?? undefined, until: sp.get('until') ?? undefined }, '30');
 
-  const detail = await getAssetDetail(kind, key, range.since, range.until);
+  const inactive = sp.get('inactive');
+  const detail = await getAssetDetail(kind, key, range.since, range.until, { includeInactive: inactive === '1' || inactive === 'true' });
   if (!detail) return NextResponse.json({ error: 'Not found' }, { status: 404, ...NO_STORE });
   return NextResponse.json({ ...detail, range }, NO_STORE);
 }

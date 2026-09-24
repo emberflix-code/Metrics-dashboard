@@ -1,7 +1,8 @@
 import { requireMarketerSession } from '@/lib/marketerAuth';
 import { loadMarketerScope } from '@/lib/marketerScope';
 import { resolveDateRange } from '@/lib/dateRange';
-import { buildScorecard } from '@/lib/marketer/scorecard';
+import { buildScorecard, coachNames } from '@/lib/marketer/scorecard';
+import { liveRangeAllowed } from '@/lib/marketer/campaignStats';
 import { buildAlerts } from '@/lib/marketer/alerts';
 import { query } from '@/lib/db';
 import RangeSelect from './_components/RangeSelect';
@@ -24,10 +25,13 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
   const range = resolveDateRange({ preset: first(searchParams.preset), since: first(searchParams.since), until: first(searchParams.until) }, '30');
   const brand = first(searchParams.brand) || '';
   const coach = first(searchParams.coach) || '';
+  // Live = campaign-level numbers straight from Meta for short ranges (the
+  // nightly cache can lag a day for "this week"); still through yesterday.
+  const live = first(searchParams.live) === '1' && liveRangeAllowed(range.since, range.until);
 
   const [scope, scorecard, alerts] = await Promise.all([
     loadMarketerScope(),
-    buildScorecard({ since: range.since, until: range.until, brand: brand || undefined, coach: coach || undefined }),
+    buildScorecard({ since: range.since, until: range.until, brand: brand || undefined, coach: coach || undefined, live }),
     // Alerts are relative to the range end, not the range itself (their
     // windows are fixed 7d/28d lookbacks).
     buildAlerts({ until: range.until }),
@@ -42,6 +46,7 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
   const syncByAccount = new Map(syncRows.map(r => [r.account_id, r]));
 
   const brands = Array.from(new Set(scope.locationClients.map(c => c.brand).filter(Boolean))).sort((a, b) => a.localeCompare(b));
+  const coaches = coachNames(scope.locationClients);
   const withData = scorecard.rows.filter(r => r.spend > 0).length;
   const highAlerts = alerts.alerts.filter(a => a.severity === 'high').length;
   const topAlerts = alerts.alerts.slice(0, 8);
@@ -57,22 +62,24 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h1 className="text-xl font-bold text-white">Overview</h1>
-          <p className="text-sm text-slate-400">Every location against its peers, plus what needs attention today.</p>
+          <p className="text-sm text-slate-400">Every location against its peers, plus what needs attention today.{live ? ' Spend and leads live from Meta.' : ''}</p>
         </div>
-        <RangeSelect currentPreset={range.preset} currentSince={range.since} currentUntil={range.until} />
+        <RangeSelect currentPreset={range.preset} currentSince={range.since} currentUntil={range.until} allowLive live={live} />
       </div>
 
-      <ScorecardFilters brands={brands} current={{ brand, coach }} />
+      <ScorecardFilters brands={brands} coaches={coaches} current={{ brand, coach }} />
 
-      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
         <StatTile label="Spend" value={fmtUsd(scorecard.totals.spend, 0)} sub={brand || coach ? 'filtered view' : 'all locations'} />
-        <StatTile label="Leads" value={fmtInt(scorecard.totals.results)} />
+        <StatTile label="Leads" value={fmtInt(scorecard.totals.results)} sub="per each client's lead source" />
         <StatTile
           label="CPL"
           value={fmtUsd(scorecard.totals.cpl)}
           tone={cplTone}
           sub={scorecard.agencyMedianCpl !== null ? `${fmtSignedPct(cplVsMedian)} vs agency median ${fmtUsd(scorecard.agencyMedianCpl)}` : 'no agency median yet'}
         />
+        <StatTile label="Bookings" value={fmtInt(scorecard.totals.bookings)} sub={`${scorecard.totals.bookingsClients} GHL-connected location${scorecard.totals.bookingsClients === 1 ? '' : 's'}`} />
+        <StatTile label="Cost / booking" value={fmtUsd(scorecard.totals.cpb)} sub="GHL-connected spend ÷ bookings" />
         <StatTile label="CTR" value={fmtPct(scorecard.totals.ctr)} />
         <StatTile label="Locations with data" value={`${withData} / ${scorecard.rows.length}`} tone={withData < scorecard.rows.length ? 'warn' : 'neutral'} sub="spend > $0 in range" />
         <StatTile label="High alerts" value={String(highAlerts)} tone={highAlerts > 0 ? 'bad' : 'good'} sub={`${alerts.alerts.length} open in total`} />
@@ -92,7 +99,7 @@ export default async function MarketerOverviewPage({ searchParams }: { searchPar
         )}
       </div>
 
-      <ScorecardTable rows={scorecard.rows} totals={scorecard.totals} agencyMedianCpl={scorecard.agencyMedianCpl} />
+      <ScorecardTable rows={scorecard.rows} totals={scorecard.totals} agencyMedianCpl={scorecard.agencyMedianCpl} live={live} />
 
       {scorecard.unattributed.campaigns > 0 && (
         <p className="text-xs text-slate-500">

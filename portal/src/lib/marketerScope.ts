@@ -10,12 +10,13 @@
 // entity sync (and on scope edits) makes attribution a plain SQL join.
 import { query, pool } from './db';
 import { getAdminClientMetaScope, matchesCampaignFilter } from './meta';
-import { namePrefixGroup } from './grouping';
+import { brandGroup } from './grouping';
 import { parseOfferFromCampaignName } from './offers';
 
 export interface MarketerClient {
   id: string;
   name: string;
+  active: boolean;
   isRollup: boolean;
   adAccountIds: string[];        // resolved (empty in DB => every agency account)
   campaignFilter: string;
@@ -28,21 +29,33 @@ export interface MarketerClient {
   geocodeError: string | null;
   sortOrder: number;
   brand: string;
+  // Where this client's Leads KPI comes from (same setting as its dashboard).
+  leadsSource: 'meta' | 'sheet' | 'ghl';
+  sheetId: string;
+  sheetTab: string;
+  // GHL bookings source (token itself is never loaded here — see scorecard.ts).
+  hasGhlToken: boolean;
+  ghlLocationId: string;
+  ghlLeadsTag: string;
+  bookingCalendar: { name: string; platform: string; link: string } | null;
 }
 
 export interface MarketerScope {
-  clients: MarketerClient[];
+  clients: MarketerClient[];           // active only, unless loaded with includeInactive
   locationClients: MarketerClient[];   // active, not rollup
-  rollups: MarketerClient[];
+  rollups: MarketerClient[];           // active rollups
   accountIds: string[];
   accountNameById: Map<string, string>;
   clientById: Map<string, MarketerClient>;
 }
 
 interface ClientDbRow {
-  id: string; name: string; is_rollup: boolean; ad_account_ids: string[] | null; campaign_filter: string;
+  id: string; name: string; active: boolean; is_rollup: boolean; ad_account_ids: string[] | null; campaign_filter: string;
   marketing_type: string; offer: string; coach_name: string; location_address: string;
   location_lat: number | null; location_lng: number | null; geocode_error: string | null; sort_order: number;
+  has_ghl_token: boolean; ghl_location_id: string; ghl_leads_tag: string;
+  booking_calendar_name: string; booking_platform: string; booking_calendar_link: string;
+  leads_source: string; sheet_id: string; sheet_tab: string;
 }
 
 async function loadAgencyAccounts(): Promise<{ ids: string[]; nameById: Map<string, string> }> {
@@ -58,14 +71,23 @@ async function loadAgencyAccounts(): Promise<{ ids: string[]; nameById: Map<stri
   return { ids: Array.from(ids), nameById };
 }
 
-export async function loadMarketerScope(): Promise<MarketerScope> {
+/**
+ * Every active client (default) or every client ever (includeInactive —
+ * the asset library's "all campaigns ever run" view and attribution).
+ * locationClients / rollups are always the ACTIVE subsets.
+ */
+export async function loadMarketerScope(opts: { includeInactive?: boolean } = {}): Promise<MarketerScope> {
   const [{ ids: agencyIds, nameById }, rows] = await Promise.all([
     loadAgencyAccounts(),
     query<ClientDbRow>(
-      `SELECT id, name, is_rollup, ad_account_ids, campaign_filter, marketing_type, offer, coach_name,
-              location_address, location_lat, location_lng, geocode_error, sort_order
-       FROM clients WHERE active = true
-       ORDER BY sort_order ASC, name ASC`
+      `SELECT id, name, active, is_rollup, ad_account_ids, campaign_filter, marketing_type, offer, coach_name,
+              location_address, location_lat, location_lng, geocode_error, sort_order,
+              (length(ghl_token_enc) > 0) AS has_ghl_token, ghl_location_id, ghl_leads_tag,
+              booking_calendar_name, booking_platform, booking_calendar_link,
+              leads_source, sheet_id, sheet_tab
+       FROM clients WHERE ($1::boolean OR active = true)
+       ORDER BY active DESC, sort_order ASC, name ASC`,
+      [!!opts.includeInactive]
     ),
   ]);
 
@@ -75,6 +97,7 @@ export async function loadMarketerScope(): Promise<MarketerScope> {
     clients.push({
       id: r.id,
       name: r.name,
+      active: !!r.active,
       isRollup: !!r.is_rollup,
       adAccountIds: scope.accountIds,
       campaignFilter: scope.campaignFilter,
@@ -86,15 +109,24 @@ export async function loadMarketerScope(): Promise<MarketerScope> {
       lng: r.location_lng === null ? null : Number(r.location_lng),
       geocodeError: r.geocode_error,
       sortOrder: Number(r.sort_order ?? 999),
-      brand: namePrefixGroup(r.name),
+      brand: brandGroup(r.name),
+      leadsSource: r.leads_source === 'ghl' || r.leads_source === 'sheet' ? r.leads_source : 'meta',
+      sheetId: r.sheet_id || '',
+      sheetTab: r.sheet_tab || '',
+      hasGhlToken: !!r.has_ghl_token,
+      ghlLocationId: r.ghl_location_id || '',
+      ghlLeadsTag: r.ghl_leads_tag || '',
+      bookingCalendar: r.booking_calendar_name
+        ? { name: r.booking_calendar_name, platform: r.booking_platform || '', link: r.booking_calendar_link || '' }
+        : null,
     });
   }
 
   const accountIds = Array.from(new Set(clients.flatMap(c => c.adAccountIds)));
   return {
     clients,
-    locationClients: clients.filter(c => !c.isRollup),
-    rollups: clients.filter(c => c.isRollup),
+    locationClients: clients.filter(c => c.active && !c.isRollup),
+    rollups: clients.filter(c => c.active && c.isRollup),
     accountIds,
     accountNameById: nameById,
     clientById: new Map(clients.map(c => [c.id, c])),
@@ -124,7 +156,9 @@ function matchSpecificity(name: string, campaignFilter: string): number {
  * thousand campaigns x ~90 clients is trivial in memory.
  */
 export async function refreshCampaignAttribution(accountId?: string): Promise<{ accounts: number; rows: number }> {
-  const scope = await loadMarketerScope();
+  // Inactive clients are attributed too (the asset library's "all campaigns
+  // ever run" view needs their names); active clients always win is_primary.
+  const scope = await loadMarketerScope({ includeInactive: true });
   const accountIds = accountId ? [accountId] : scope.accountIds;
   let total = 0;
 
@@ -135,22 +169,21 @@ export async function refreshCampaignAttribution(accountId?: string): Promise<{ 
       [acct]
     );
 
-    // Offer tokens for campaigns synced before the parser existed (the
-    // entity sync only stamps rows it touches). Cheap, and it means the
-    // marketer pages show real offers right after deploy instead of after
-    // the next full entity refresh.
+    // Re-derive offer tokens from names (the entity sync only stamps rows it
+    // touches, and the parser's vocabulary grows). Only rows whose parsed
+    // value differs are written; manual overrides live in
+    // campaign_offer_overrides and are untouched.
     const tokenIds: string[] = [];
     const tokenVals: string[] = [];
     for (const c of campaigns) {
-      if (c.offer_token) continue;
       const t = parseOfferFromCampaignName(c.name || '');
-      if (t) { tokenIds.push(c.entity_id); tokenVals.push(t); }
+      if (t && t !== c.offer_token) { tokenIds.push(c.entity_id); tokenVals.push(t); }
     }
     for (let i = 0; i < tokenIds.length; i += 2000) {
       await query(
         `UPDATE meta_entities m SET offer_token = t.offer_token
          FROM unnest($2::text[], $3::text[]) AS t(entity_id, offer_token)
-         WHERE m.account_id = $1 AND m.level = 'campaign' AND m.entity_id = t.entity_id AND m.offer_token IS NULL`,
+         WHERE m.account_id = $1 AND m.level = 'campaign' AND m.entity_id = t.entity_id`,
         [acct, tokenIds.slice(i, i + 2000), tokenVals.slice(i, i + 2000)]
       );
     }
@@ -162,13 +195,14 @@ export async function refreshCampaignAttribution(accountId?: string): Promise<{ 
     for (const camp of campaigns) {
       const matches = clientsOnAccount.filter(c => matchesCampaignFilter(camp.name, c.campaignFilter, acct));
       if (matches.length === 0) continue;
-      // Primary = most specific non-rollup match; ties broken by the
-      // narrowest account scope, then name, for determinism.
+      // Primary = active before inactive, then the most specific non-rollup
+      // match; ties broken by the narrowest account scope, then name.
       const candidates = matches.filter(c => !c.isRollup);
       let primaryId: string | null = null;
       if (candidates.length > 0) {
         candidates.sort((a, b) =>
-          matchSpecificity(camp.name, b.campaignFilter) - matchSpecificity(camp.name, a.campaignFilter)
+          Number(b.active) - Number(a.active)
+          || matchSpecificity(camp.name, b.campaignFilter) - matchSpecificity(camp.name, a.campaignFilter)
           || a.adAccountIds.length - b.adAccountIds.length
           || a.name.localeCompare(b.name));
         primaryId = candidates[0].id;

@@ -4,8 +4,10 @@ import { useMemo, useState } from 'react';
 import type { ScorecardRow } from '@/lib/marketer/scorecard';
 import { fmtInt, fmtPct, fmtSignedPct, fmtUsd } from './format';
 
-type SortKey = 'name' | 'offer' | 'spend' | 'results' | 'cpl' | 'delta' | 'ctr' | 'active' | 'dataThrough';
+type SortKey = 'name' | 'offer' | 'spend' | 'results' | 'cpl' | 'bookings' | 'cpb' | 'delta' | 'ctr' | 'active' | 'dataThrough';
 type Dir = 'asc' | 'desc';
+
+const pillBase = 'inline-block text-[10px] px-1.5 py-0.5 rounded-full border whitespace-nowrap align-middle';
 
 // Delta-vs-peers pill. Thresholds mirror the CPL spike alert's posture:
 // red only once a location is clearly worse than its peers, so the table
@@ -31,6 +33,37 @@ function DeltaPill({ row }: { row: ScorecardRow }) {
       {fmtSignedPct(d)}
     </span>
   );
+}
+
+// Where the Leads number comes from — the client's own dashboard setting.
+function LeadsSourcePill({ row }: { row: ScorecardRow }) {
+  const label = row.leadsSource === 'ghl' ? 'GHL' : row.leadsSource === 'sheet' ? 'Sheet' : 'Meta';
+  const failed = !!row.leadsError;
+  const cls = failed
+    ? 'text-red-300 border-red-500/30 bg-red-500/10'
+    : row.leadsSource === 'ghl'
+      ? 'text-violet-300 border-violet-500/30 bg-violet-500/10'
+      : row.leadsSource === 'sheet'
+        ? 'text-emerald-300 border-emerald-500/30 bg-emerald-500/10'
+        : 'text-sky-300 border-sky-500/30 bg-sky-500/10';
+  const title = failed
+    ? `${label} leads unavailable (${row.leadsError}); showing Meta results instead`
+    : row.leadsSource === 'meta'
+      ? 'Meta results (leads) for the attributed campaigns'
+      : `${label}-sourced leads, same rule as the client dashboard · Meta results: ${fmtInt(row.metaResults)}`;
+  return <span className={`${pillBase} ${cls}`} title={title}>{failed ? `${label}!` : label}</span>;
+}
+
+// Which calendar the bookings come from (marketing sheet mapping).
+function CalendarPill({ row }: { row: ScorecardRow }) {
+  const cal = row.bookingCalendar;
+  if (!cal) return <span className={`${pillBase} text-slate-400 border-slate-700 bg-slate-800`} title="No calendar mapped in the booking-calendar sheet; bookings counted from GHL contact tags">GHL</span>;
+  const inner = (
+    <span className={`${pillBase} text-amber-200 border-amber-500/30 bg-amber-500/10`} title={`${cal.name}${cal.platform ? ` · ${cal.platform}` : ''}`}>
+      {cal.name.length > 22 ? `${cal.name.slice(0, 21)}…` : cal.name}{cal.platform && cal.platform.toUpperCase() !== 'GHL' ? ` · ${cal.platform}` : ''}
+    </span>
+  );
+  return cal.link ? <a href={cal.link} target="_blank" rel="noreferrer" className="hover:opacity-80">{inner}</a> : inner;
 }
 
 function MapMark({ row }: { row: ScorecardRow }) {
@@ -60,10 +93,11 @@ function cmpNullable(a: number | null, b: number | null, dir: Dir): number {
   return dir === 'desc' ? b - a : a - b;
 }
 
-export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
+export default function ScorecardTable({ rows, totals, agencyMedianCpl, live }: {
   rows: ScorecardRow[];
-  totals: { spend: number; results: number; impressions: number; clicks: number; cpl: number | null; ctr: number | null };
+  totals: { spend: number; results: number; impressions: number; clicks: number; cpl: number | null; ctr: number | null; bookings: number; cpb: number | null; bookingsClients: number };
   agencyMedianCpl: number | null;
+  live?: boolean;
 }) {
   // Default = the server's order (worst delta first, then unjudged by spend).
   const [sort, setSort] = useState<{ key: SortKey; dir: Dir }>({ key: 'delta', dir: 'desc' });
@@ -86,6 +120,8 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
         case 'spend': return s * (a.spend - b.spend);
         case 'results': return s * (a.results - b.results) || b.spend - a.spend;
         case 'cpl': return cmpNullable(a.cpl, b.cpl, dir) || b.spend - a.spend;
+        case 'bookings': return cmpNullable(a.bookings, b.bookings, dir) || b.spend - a.spend;
+        case 'cpb': return cmpNullable(a.cpb, b.cpb, dir) || b.spend - a.spend;
         case 'ctr': return cmpNullable(a.ctr, b.ctr, dir) || b.spend - a.spend;
         case 'active': return s * ((a.activeCampaigns + a.activeAdsets) - (b.activeCampaigns + b.activeAdsets)) || b.spend - a.spend;
         case 'dataThrough': return cmpNullable(a.dataThrough ? Date.parse(a.dataThrough) : null, b.dataThrough ? Date.parse(b.dataThrough) : null, dir);
@@ -106,9 +142,12 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
   return (
     <div className="bg-slate-900/60 border border-slate-800 rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-white">Location scorecard</h2>
+        <h2 className="text-sm font-semibold text-white flex items-center gap-2">
+          Location scorecard
+          {live && <span className={`${pillBase} text-emerald-300 border-emerald-500/30 bg-emerald-500/10`} title="Spend/leads pulled from Meta just now instead of the nightly cache">LIVE</span>}
+        </h2>
         <span className="text-[11px] text-slate-500">
-          {rows.length} locations · {judgedCount} judged (≥$100 and ≥3 leads) · agency median CPL {fmtUsd(agencyMedianCpl)}
+          {rows.length} locations · {judgedCount} judged (≥$100 and ≥3 leads) · agency median CPL {fmtUsd(agencyMedianCpl)} · bookings from {totals.bookingsClients} GHL-connected location{totals.bookingsClients === 1 ? '' : 's'}
         </span>
       </div>
       <div className="overflow-x-auto">
@@ -121,6 +160,8 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
               <SortHeader label="Leads" k="results" sort={sort} onSort={onSort} className="text-right" />
               <SortHeader label="CPL" k="cpl" sort={sort} onSort={onSort} className="text-right" />
               <SortHeader label="vs peers" k="delta" sort={sort} onSort={onSort} className="text-right" />
+              <SortHeader label="Bookings" k="bookings" sort={sort} onSort={onSort} className="text-right" />
+              <SortHeader label="Cost / booking" k="cpb" sort={sort} onSort={onSort} className="text-right" />
               <SortHeader label="CTR" k="ctr" sort={sort} onSort={onSort} className="text-right" />
               <SortHeader label="Active" k="active" sort={sort} onSort={onSort} className="text-right" />
               <SortHeader label="Data through" k="dataThrough" sort={sort} onSort={onSort} />
@@ -129,7 +170,7 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
           </thead>
           <tbody className="divide-y divide-slate-800/60">
             {sorted.length === 0 && (
-              <tr><td colSpan={10} className="px-4 py-8 text-center text-sm text-slate-500">No locations match these filters.</td></tr>
+              <tr><td colSpan={12} className="px-4 py-8 text-center text-sm text-slate-500">No locations match these filters.</td></tr>
             )}
             {sorted.map(r => {
               const muted = !r.judged;
@@ -141,7 +182,7 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
                       <a href={`/marketer/assets?client=${encodeURIComponent(r.clientId)}`} className={`font-medium hover:text-blue-200 ${muted ? 'text-slate-400' : 'text-white'}`} title="Open this location's assets">
                         {r.name}
                       </a>
-                      <span className="text-[10px] px-1.5 py-0.5 rounded-full border border-slate-700 bg-slate-800 text-slate-300">{r.brand}</span>
+                      <span className={`${pillBase} border-slate-700 bg-slate-800 text-slate-300`}>{r.brand}</span>
                     </div>
                     <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-2">
                       <span className="truncate">{r.coach || 'no coach'}</span>
@@ -153,14 +194,30 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
                     {extra > 0 && <span className="text-slate-500" title={r.offers.slice(1).join(', ')}> +{extra}</span>}
                   </td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">{fmtUsd(r.spend, 0)}</td>
-                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtInt(r.results)}</td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                    <span className="inline-flex items-center gap-1.5 justify-end">
+                      <span>{fmtInt(r.results)}</span>
+                      <LeadsSourcePill row={r} />
+                    </span>
+                  </td>
                   <td className={`px-3 py-2 text-right whitespace-nowrap font-medium ${muted ? '' : 'text-white'}`}>{fmtUsd(r.cpl)}</td>
                   <td className="px-3 py-2 text-right"><DeltaPill row={r} /></td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">
+                    {r.bookings === null ? (
+                      <span className="text-slate-600" title={r.bookingsError ? `Bookings unavailable: ${r.bookingsError}` : 'No GHL connection for this client'}>{r.bookingsError ? '!' : '—'}</span>
+                    ) : (
+                      <span className="inline-flex items-center gap-1.5 justify-end">
+                        <span>{fmtInt(r.bookings)}</span>
+                        <CalendarPill row={r} />
+                      </span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 text-right whitespace-nowrap">{fmtUsd(r.cpb)}</td>
                   <td className="px-3 py-2 text-right whitespace-nowrap">{fmtPct(r.ctr)}</td>
                   <td className="px-3 py-2 text-right whitespace-nowrap" title="active campaigns / active ad sets">{r.activeCampaigns} / {r.activeAdsets}</td>
                   <td className="px-3 py-2 whitespace-nowrap">
                     <span className="font-mono">{r.dataThrough ?? '—'}</span>
-                    {r.syncStale && <span className="ml-1.5 text-[10px] px-1.5 py-0.5 rounded-full border text-amber-300 border-amber-500/30 bg-amber-500/10">stale</span>}
+                    {r.syncStale && <span className={`ml-1.5 ${pillBase} text-amber-300 border-amber-500/30 bg-amber-500/10`}>stale</span>}
                   </td>
                   <td className="px-3 py-2 text-center"><MapMark row={r} /></td>
                 </tr>
@@ -176,6 +233,8 @@ export default function ScorecardTable({ rows, totals, agencyMedianCpl }: {
                 <td className="px-3 py-2 text-right whitespace-nowrap">{fmtInt(totals.results)}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">{fmtUsd(totals.cpl)}</td>
                 <td className="px-3 py-2"></td>
+                <td className="px-3 py-2 text-right whitespace-nowrap">{fmtInt(totals.bookings)}</td>
+                <td className="px-3 py-2 text-right whitespace-nowrap" title="spend of GHL-connected locations / their bookings">{fmtUsd(totals.cpb)}</td>
                 <td className="px-3 py-2 text-right whitespace-nowrap">{fmtPct(totals.ctr)}</td>
                 <td colSpan={3}></td>
               </tr>

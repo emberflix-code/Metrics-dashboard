@@ -66,6 +66,26 @@ export function geocoderName(): 'google' | 'nominatim' {
   return GOOGLE_KEY() ? 'google' : 'nominatim';
 }
 
+const COUNTRY_NAME: Record<string, string> = { US: 'United States', CA: 'Canada' };
+
+/**
+ * Geocodes a postal code for a country (Meta zip keys look like "US:33602").
+ * US zips resolve fine as free text. Canadian forward sortation areas
+ * ("V3V") do NOT — free text finds nothing and Nominatim's structured
+ * postalcode search returned wrong cities (H9A → Toronto instead of
+ * Montreal, checked 2026-09-24) — so callers pass a city-level `query`
+ * taken from Meta's own adgeolocationmeta ("Surrey, British Columbia,
+ * Canada") for anything non-US, and this only handles the postal string.
+ */
+export async function geocodePostalCode(code: string, countryCode: string): Promise<GeocodeResult | null> {
+  const cc = (countryCode || 'US').toUpperCase();
+  const c = code.trim().toUpperCase();
+  if (!c) return null;
+  if (GOOGLE_KEY()) return geocodeGoogle(`${c}, ${COUNTRY_NAME[cc] || cc}`);
+  if (cc !== 'US') return null;
+  return geocodeNominatim(`${c}, ${COUNTRY_NAME[cc] || cc}`);
+}
+
 /** Geocodes one free-text address/place string exactly as given. Null when nothing matched; throws on provider errors. */
 export async function geocodeAddress(q: string): Promise<GeocodeResult | null> {
   const s = q.replace(/\s+/g, ' ').trim();
@@ -157,6 +177,11 @@ export async function geocodePendingClients(opts: { clientId?: string; limit?: n
  * geo_key_cache, geocoding the ones not seen before. Returns a map keyed
  * by `${kind}:${key}`; null value = looked up before, no match.
  */
+// A cached miss is retried after this long (the resolver improves over
+// time — e.g. Canadian postal prefixes failed until the structured lookup
+// existed — and OSM data changes).
+const GEO_KEY_RETRY_MS = 24 * 3600_000;
+
 export async function resolveGeoKeys(items: { kind: string; key: string; query: string }[]): Promise<Map<string, { lat: number; lng: number } | null>> {
   const out = new Map<string, { lat: number; lng: number } | null>();
   const uniq = new Map<string, { kind: string; key: string; query: string }>();
@@ -165,20 +190,29 @@ export async function resolveGeoKeys(items: { kind: string; key: string; query: 
 
   const kinds = Array.from(uniq.values()).map(i => i.kind);
   const keys = Array.from(uniq.values()).map(i => i.key);
-  const cached = await query<{ kind: string; key: string; lat: number | null; lng: number | null; error: string | null }>(
-    `SELECT c.kind, c.key, c.lat, c.lng, c.error
+  const cached = await query<{ kind: string; key: string; lat: number | null; lng: number | null; error: string | null; resolved_at: string | null }>(
+    `SELECT c.kind, c.key, c.lat, c.lng, c.error, c.resolved_at::text
      FROM geo_key_cache c
      JOIN unnest($1::text[], $2::text[]) AS t(kind, key) ON t.kind = c.kind AND t.key = c.key`,
     [kinds, keys]
   );
   for (const c of cached) {
-    out.set(`${c.kind}:${c.key}`, c.lat !== null && c.lng !== null ? { lat: Number(c.lat), lng: Number(c.lng) } : null);
+    const hasCoords = c.lat !== null && c.lng !== null;
+    const stale = !hasCoords && (!c.resolved_at || Date.now() - Date.parse(c.resolved_at) > GEO_KEY_RETRY_MS);
+    if (stale) continue; // fall through to a fresh attempt below
+    out.set(`${c.kind}:${c.key}`, hasCoords ? { lat: Number(c.lat), lng: Number(c.lng) } : null);
   }
 
   for (const [k, it] of Array.from(uniq.entries())) {
     if (out.has(k)) continue;
     try {
-      const hit = await geocodeAddress(it.query);
+      // Meta zip keys are "<CC>:<code>". US zips go through the postal
+      // resolver; everything else uses the caller's city-level query
+      // (from Meta's adgeolocationmeta) since postal prefixes don't geocode.
+      const zipMatch = it.kind === 'zip' ? it.key.match(/^([A-Z]{2}):(.+)$/i) : null;
+      let hit: GeocodeResult | null = null;
+      if (zipMatch && zipMatch[1].toUpperCase() === 'US') hit = await geocodePostalCode(zipMatch[2], 'US');
+      if (!hit && it.query && !/^[A-Z0-9]{3,10}, [A-Z]{2}$/i.test(it.query)) hit = await geocodeAddress(it.query);
       out.set(k, hit ? { lat: hit.lat, lng: hit.lng } : null);
       await query(
         `INSERT INTO geo_key_cache (kind, key, query, lat, lng, source, resolved_at, error)

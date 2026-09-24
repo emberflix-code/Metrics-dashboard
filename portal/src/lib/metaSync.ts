@@ -2280,6 +2280,49 @@ async function fetchIdsBatched<T extends { id?: string }>(ids: string[], fields:
 // ── Targeting (ad set geo) ──────────────────────────────────────────────
 interface AdsetTargetingResp { id?: string; targeting?: unknown; daily_budget?: string; lifetime_budget?: string; start_time?: string; end_time?: string }
 
+interface GeoMetaEntry { name?: string; primaryCity?: string; region?: string; countryCode?: string; countryName?: string; lat?: number | null; lng?: number | null }
+
+// GET /search?type=adgeolocationmeta&zips=[..]&cities=[..]&places=[..]&regions=[..]
+// Returns Meta's own metadata for targeting keys: a zip's primary city and
+// region, a city's region, a place's coordinates. Batched (50 keys per
+// kind per call); failures degrade to an empty map, never fail the sync.
+async function fetchGeoMeta(token: string, keys: { kind: string; key: string }[], deadline?: number): Promise<Map<string, GeoMetaEntry>> {
+  const out = new Map<string, GeoMetaEntry>();
+  const PARAM: Record<string, string> = { zip: 'zips', city: 'cities', place: 'places', region: 'regions', geo_market: 'geo_markets' };
+  const byKind = new Map<string, string[]>();
+  for (const k of keys) {
+    const p = PARAM[k.kind];
+    if (!p) continue;
+    const arr = byKind.get(k.kind) ?? [];
+    if (!arr.includes(k.key)) arr.push(k.key);
+    byKind.set(k.kind, arr);
+  }
+  for (const [kind, all] of Array.from(byKind.entries())) {
+    for (let i = 0; i < all.length; i += 50) {
+      if (deadline !== undefined && Date.now() > deadline) return out;
+      const batch = all.slice(i, i + 50);
+      try {
+        const u = new URL(`${GRAPH}/search`);
+        u.searchParams.set('type', 'adgeolocationmeta');
+        u.searchParams.set(PARAM[kind], JSON.stringify(batch));
+        u.searchParams.set('access_token', token);
+        const json = await fetchGraphJson<{ data?: Record<string, Record<string, { key?: string; name?: string; primary_city?: string; region?: string; country_code?: string; country_name?: string; latitude?: number; longitude?: number }>> }>(u, deadline);
+        for (const group of Object.values(json.data ?? {})) {
+          for (const [key, v] of Object.entries(group ?? {})) {
+            out.set(`${kind}:${key}`, {
+              name: v.name, primaryCity: v.primary_city, region: v.region, countryCode: v.country_code, countryName: v.country_name,
+              lat: typeof v.latitude === 'number' ? v.latitude : null, lng: typeof v.longitude === 'number' ? v.longitude : null,
+            });
+          }
+        }
+      } catch (err) {
+        console.error('[META-SYNC-ERR]', JSON.stringify({ step: 'adgeolocationmeta', kind, count: batch.length, error: err instanceof Error ? err.message : String(err) }));
+      }
+    }
+  }
+  return out;
+}
+
 export async function syncAdsetTargeting(accountId: string, token: string, budgetMs: number = TARGETING_BUDGET_MS): Promise<{ fetched: number; geoRows: number; skipped: number }> {
   const deadline = Date.now() + budgetMs;
   // Priority: live ad sets always (targeting can be edited without a status
@@ -2318,16 +2361,34 @@ export async function syncAdsetTargeting(accountId: string, token: string, budge
   // Extract geo rows first so the key-resolution pass can run once for the
   // whole batch (geo_key_cache makes repeat keys free).
   const geoByAdset = new Map<string, ReturnType<typeof extractGeoRows>>();
-  const keyQueries: { kind: string; key: string; query: string }[] = [];
+  const keyed: { kind: string; key: string; query: string | null }[] = [];
   for (const r of rows) {
     if (!r.id) continue;
     const geo = extractGeoRows(r.targeting);
     geoByAdset.set(r.id, geo);
     for (const g of geo) {
       if (g.lat !== null || !g.key) continue;
-      const q = geoKeyQuery(g);
-      if (q) keyQueries.push({ kind: g.kind, key: g.key, query: q });
+      keyed.push({ kind: g.kind, key: g.key, query: geoKeyQuery(g) });
     }
+  }
+  // Meta's own geolocation metadata fills in what the targeting spec
+  // omits: a postal area's primary city + region (Canadian "V3V" only
+  // geocodes as "Surrey, British Columbia, Canada"), a city's region, and a
+  // place's coordinates.
+  const metaGeo = await fetchGeoMeta(token, keyed.map(k => ({ kind: k.kind, key: k.key })), deadline);
+  const placeCoords = new Map<string, { lat: number; lng: number }>();
+  const keyQueries: { kind: string; key: string; query: string }[] = [];
+  for (const k of keyed) {
+    const m = metaGeo.get(`${k.kind}:${k.key}`);
+    if (m?.lat !== undefined && m?.lng !== undefined && m.lat !== null && m.lng !== null) { placeCoords.set(`${k.kind}:${k.key}`, { lat: m.lat, lng: m.lng }); continue; }
+    let q = k.query;
+    if (m) {
+      const country = m.countryName || m.countryCode || '';
+      if (k.kind === 'zip' && m.primaryCity) q = [m.primaryCity, m.region, country].filter(Boolean).join(', ');
+      else if (k.kind === 'city' && m.name) q = [m.name, m.region, country].filter(Boolean).join(', ');
+      else if (k.kind === 'region' && m.name) q = [m.name, country].filter(Boolean).join(', ');
+    }
+    if (q) keyQueries.push({ kind: k.kind, key: k.key, query: q });
   }
   let resolved = new Map<string, { lat: number; lng: number } | null>();
   try {
@@ -2335,6 +2396,7 @@ export async function syncAdsetTargeting(accountId: string, token: string, budge
   } catch (err) {
     console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'syncAdsetTargeting:resolveGeoKeys', error: err instanceof Error ? err.message : String(err) }));
   }
+  for (const [k, v] of Array.from(placeCoords.entries())) resolved.set(k, v);
 
   let geoRows = 0;
   for (const batch of chunkArrayGeneric(rows.filter(r => !!r.id), DB_BATCH_SIZE)) {

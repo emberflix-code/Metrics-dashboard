@@ -17,6 +17,7 @@
 import { query } from './db';
 import { syncAccount } from './metaSync';
 import { geocodePendingClients } from './geocode';
+import { syncBookingCalendars } from './bookingCalendars';
 
 const RUN_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 const PAUSE_BETWEEN_ACCOUNTS_MS = 20_000; // same deliberate pacing as the manual backfill queue, to avoid Meta rate limits
@@ -127,6 +128,13 @@ async function runDailySync() {
     if (g.geocoded || g.failed || g.skipped) console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:geocode', ...g }));
   } catch (err) {
     console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:geocodeError', error: err instanceof Error ? err.message : String(err) }));
+  }
+  // Marketer module: booking-calendar mapping from the marketing sheet.
+  try {
+    const r = await syncBookingCalendars();
+    console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:bookingCalendars', updated: r.updated, unmatched: r.unmatched.length, ambiguous: r.ambiguous.length }));
+  } catch (err) {
+    console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:bookingCalendarsError', error: err instanceof Error ? err.message : String(err) }));
   }
 
   for (const accountId of accountIds) {

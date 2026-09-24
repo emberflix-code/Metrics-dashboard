@@ -51,10 +51,12 @@ const thNum = `${thCls} text-right`;
 const tdCls = 'px-2 py-1.5 text-slate-300 align-top';
 const tdNum = `${tdCls} text-right tabular-nums`;
 
-export default function AssetDetailDrawer({ kind, assetKey, range, onClose }: {
+export default function AssetDetailDrawer({ kind, assetKey, range, includeInactive = false, onClose }: {
   kind: AssetKind;
   assetKey: string;
   range: { preset: string; since: string; until: string };
+  /** Mirrors the table's "include inactive clients" toggle so the detail resolves the same scope. */
+  includeInactive?: boolean;
   onClose: () => void;
 }) {
   const [data, setData] = useState<AssetDetail | null>(null);
@@ -78,6 +80,7 @@ export default function AssetDetailDrawer({ kind, assetKey, range, onClose }: {
     setError(null);
     const qs = new URLSearchParams({ preset: range.preset });
     if (range.preset === 'custom') { qs.set('since', range.since); qs.set('until', range.until); }
+    if (includeInactive) qs.set('inactive', '1');
     fetch(`/api/marketer/assets/${kind}/${encodeURIComponent(assetKey)}?${qs}`, { signal: ctrl.signal, cache: 'no-store' })
       .then(async r => {
         if (r.status === 404) throw new Error('No data for this asset in the selected range.');
@@ -87,7 +90,7 @@ export default function AssetDetailDrawer({ kind, assetKey, range, onClose }: {
       .then(setData)
       .catch(err => { if (err?.name !== 'AbortError') setError(err?.message || 'Failed to load'); });
     return () => ctrl.abort();
-  }, [kind, assetKey, range.preset, range.since, range.until]);
+  }, [kind, assetKey, range.preset, range.since, range.until, includeInactive]);
 
   // Weekly CPL (left axis) + CTR (right axis). Rebuilt whenever the data or
   // the library arrives; destroyed on unmount so the canvas isn't reused.

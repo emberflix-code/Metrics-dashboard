@@ -17,14 +17,28 @@ export default async function MarketerAssetsPage({ searchParams }: { searchParam
   const range = resolveDateRange({ preset: first(searchParams.preset), since: first(searchParams.since), until: first(searchParams.until) }, '30');
   const q = parseAssetLibraryParams(searchParams, range);
 
-  const [initial, scope] = await Promise.all([queryAssetLibrary(q), loadMarketerScope()]);
-  const offers = await listOffers(scope.accountIds);
+  // Filter options always carry every client ever with an `active` flag, so
+  // the "include inactive" checkbox can widen/narrow the dropdowns without a
+  // server round-trip. The QUERY itself only widens when the URL says so.
+  const [initial, scope] = await Promise.all([queryAssetLibrary(q), loadMarketerScope({ includeInactive: true })]);
+
+  const activeAccountIds = Array.from(new Set(scope.clients.filter(c => c.active).flatMap(c => c.adAccountIds)));
+  const allAccountIds = scope.accountIds;
+  const activeAccountSet = new Set(activeAccountIds);
+  // Offers for the default (active) scope, plus the wider list when inactive
+  // clients bring in accounts of their own — reused when they don't.
+  const offersActive = await listOffers(activeAccountIds);
+  const offersAll = allAccountIds.length === activeAccountIds.length ? offersActive : await listOffers(allAccountIds);
 
   const options: AssetLibraryOptions = {
-    clients: scope.locationClients.map(c => ({ id: c.id, name: c.name, brand: c.brand })),
-    brands: Array.from(new Set(scope.locationClients.map(c => c.brand).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
-    accounts: scope.accountIds.map(id => ({ id, name: scope.accountNameById.get(id) || id })).sort((a, b) => a.name.localeCompare(b.name)),
-    offers: offers.map(o => ({ token: o.token, campaignCount: o.campaignCount })),
+    clients: scope.clients
+      .filter(c => !c.isRollup)
+      .map(c => ({ id: c.id, name: c.name, brand: c.brand, active: c.active })),
+    accounts: allAccountIds
+      .map(id => ({ id, name: scope.accountNameById.get(id) || id, active: activeAccountSet.has(id) }))
+      .sort((a, b) => a.name.localeCompare(b.name)),
+    offers: offersActive.map(o => ({ token: o.token, campaignCount: o.campaignCount })),
+    offersAll: offersAll.map(o => ({ token: o.token, campaignCount: o.campaignCount })),
   };
 
   return (

@@ -43,11 +43,23 @@ const OFFER_ALIASES: Record<string, string> = {
   'free1daypass': 'Free1DayPass',
   '1daypass': 'Free1DayPass',
   '1monthfree': '1MonthFree',
+  'onemonthfree': '1MonthFree',
   'joinget2monthsfree': '2MonthsFree',
   '2monthsfree': '2MonthsFree',
+  '2monthfree': '2MonthsFree',
   '6weekchallenge': '6WeekChallenge',
   '6wc': '6WeekChallenge',
+  '6-wc': '6WeekChallenge',
+  'free6wc': '6WeekChallenge',
+  'free6-wc': '6WeekChallenge',
+  'free6weekchallenge': '6WeekChallenge',
   '6wcback2school': '6WC Back2School',
+  'free14-daykeyfob': '14DayKeyFob',
+  'free14daykeyfob': '14DayKeyFob',
+  '14-daykeyfob': '14DayKeyFob',
+  'free7-daypass': 'Free7DayPass',
+  '30daysfree': '30 Days Free',
+  '30-daysfree': '30 Days Free',
   'presale': 'PreSale',
   'refreshsale': 'RefreshSale',
   'refreshspecial': 'RefreshSale',
@@ -56,24 +68,79 @@ const OFFER_ALIASES: Record<string, string> = {
   'grandopening': 'GrandOpeningOffer',
 };
 
-/** Normalizes a raw offer spelling to its canonical token, or returns the trimmed raw string when unknown. */
+// The N-week-challenge family is spelled a dozen ways across accounts
+// ("6-WC Non Free", "Non Free 6WC", "Non-Free 6-WC", "6-Week Challenge Non
+// Free", "Free 6-WC", "6WC"...). Two real offers: the free challenge and
+// the paid ("non free") one, per length.
+function normalizeChallenge(t: string): string | null {
+  const m = t.match(/(\d{1,2})\s*-?\s*(?:w(?:ee)?k\s*-?\s*c(?:hallenge)?|wc)\b/i);
+  if (!m) return null;
+  const weeks = m[1];
+  const paid = /non\s*-?\s*free/i.test(t);
+  if (weeks === '6' && !paid) return '6WeekChallenge';
+  return paid ? `${weeks}WC Non Free` : `${weeks}WC Free`;
+}
+
+/** Normalizes a raw offer spelling to its canonical token, or returns the whitespace-collapsed raw string when unknown. */
 export function normalizeOffer(raw: string): string {
-  const t = raw.trim();
+  const t = raw.replace(/\s+/g, ' ').trim();
   if (!t) return '';
   const k = t.toLowerCase().replace(/\s+/g, '').replace(/off$/i, 'off');
-  return OFFER_ALIASES[k] ?? t.replace(/OFF$/i, 'Off');
+  if (OFFER_ALIASES[k]) return OFFER_ALIASES[k];
+  const challenge = normalizeChallenge(t);
+  if (challenge) return challenge;
+  return t.replace(/OFF$/i, 'Off');
+}
+
+// Segment words that describe the campaign type, not the club or the offer.
+const TYPE_SEGMENT = /^(instant form|conversion|conversions|lead form|leads?|traffic|messages|engagement|awareness|sales|retargeting)$/i;
+// "9/8", "9/22", "10/3/26", "7/29 (men only)"
+const DATE_SEGMENT = /^\d{1,2}\/\d{1,2}(\/\d{2,4})?\b/;
+const COPY_SEGMENT = /^copy(\s*\d+)?$/i;
+
+/** Splits a campaign name on " - " (also en/em dashes), trimming each segment. */
+export function campaignNameSegments(name: string): string[] {
+  return name.split(/\s+[-–—]\s+/).map(s => s.trim()).filter(Boolean);
 }
 
 /**
- * Offer token from a campaign name following the "<prefix> - <offer> - #<club>"
- * convention. Null when the name has no "#<number>" structure at all.
+ * Generic agency convention: "GMN - <club/client name> - <Offer> - <M/D>"
+ * (optionally with a theme segment after the offer, e.g. "… - Free 6-WC -
+ * Fall Slimdown - 9/13", and Meta's "- Copy" suffix). Requires the trailing
+ * date so unrelated dash-separated names aren't mis-read as offers.
+ * Returns the club and offer segments, or null.
+ */
+export function parseGenericCampaignName(name: string): { club: string; offer: string } | null {
+  let seg = campaignNameSegments(name);
+  while (seg.length && COPY_SEGMENT.test(seg[seg.length - 1])) seg.pop();
+  if (seg.length < 4) return null;                     // GMN, club, offer, date at minimum
+  if (!DATE_SEGMENT.test(seg[seg.length - 1])) return null;
+  seg = seg.slice(0, -1);
+  if (/^gmn\b/i.test(seg[0])) seg = seg.slice(1);
+  seg = seg.filter(s => !TYPE_SEGMENT.test(s));
+  if (seg.length < 2) return null;
+  return { club: seg[0], offer: seg[1] };
+}
+
+/**
+ * Offer token from a campaign name. Two conventions:
+ *  1. Omega: "<prefix> - <Offer> - #<club number> - City, ST"
+ *  2. Generic: "GMN - <club> - <Offer> - <M/D>"
+ * Null when neither structure is present.
  */
 export function parseOfferFromCampaignName(name: string): string | null {
   const m = name.match(/-\s*([^#]+?)\s*-\s*#\d+/);
-  if (!m) return null;
-  const raw = m[1].trim().replace(/^(Instant Form|Conversion)\s*-\s*/i, '');
-  if (!raw) return null;
-  return normalizeOffer(raw);
+  if (m) {
+    const raw = m[1].trim().replace(/^(Instant Form|Conversion)\s*-\s*/i, '');
+    return raw ? normalizeOffer(raw) : null;
+  }
+  const g = parseGenericCampaignName(name);
+  return g ? normalizeOffer(g.offer) || null : null;
+}
+
+/** Club / client name segment from the generic convention ("GMN - Kelowna Centuria, BC - …" -> "Kelowna Centuria, BC"), or null. */
+export function parseClubNameFromCampaignName(name: string): string | null {
+  return parseGenericCampaignName(name)?.club ?? null;
 }
 
 /** Offer token declared in an AD name ("… UGC - Free7DayPass - …" / "… Dynamic - X - Free7DayPass - …"), or ''. */

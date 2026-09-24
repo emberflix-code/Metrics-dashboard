@@ -8,11 +8,14 @@ import AssetDetailDrawer from './AssetDetailDrawer';
 
 // ── types ────────────────────────────────────────────────────────────────
 
+// Every client/account ever, flagged `active`, so the "include inactive"
+// toggle can widen the dropdowns client-side. `offers` is the active-scope
+// list, `offersAll` the wider one used while the toggle is on.
 export interface AssetLibraryOptions {
-  clients: { id: string; name: string; brand: string }[];
-  brands: string[];
-  accounts: { id: string; name: string }[];
+  clients: { id: string; name: string; brand: string; active: boolean }[];
+  accounts: { id: string; name: string; active: boolean }[];
   offers: { token: string; campaignCount: number }[];
+  offersAll: { token: string; campaignCount: number }[];
 }
 
 export interface AssetLibraryInitial {
@@ -39,6 +42,8 @@ interface Filters {
   theme: string;
   ugc: string;
   onlyActive: boolean;
+  /** "Include inactive clients" — every client/campaign ever run (URL: inactive=1). */
+  inactive: boolean;
 }
 
 const KIND_TABS: { kind: AssetKind; label: string }[] = [
@@ -87,6 +92,7 @@ function filtersFromParams(sp: URLSearchParams): Filters {
     theme: sp.get('theme') || '',
     ugc: sp.get('ugc') || '',
     onlyActive: sp.get('onlyActive') === '1',
+    inactive: sp.get('inactive') === '1',
   };
 }
 
@@ -113,6 +119,7 @@ function paramsFromFilters(f: Filters, range: { preset: string; since: string; u
     if (f.ugc) p.set('ugc', f.ugc);
   }
   if (f.onlyActive) p.set('onlyActive', '1');
+  if (f.inactive) p.set('inactive', '1');
   return p;
 }
 
@@ -166,12 +173,13 @@ function OfferMultiSelect({ options, value, onChange }: { options: { token: stri
   );
 }
 
-function ClientSearchSelect({ options, value, onChange }: { options: { id: string; name: string; brand: string }[]; value: string; onChange: (v: string) => void }) {
+function ClientSearchSelect({ options, value, onChange }: { options: { id: string; name: string; brand: string; active: boolean }[]; value: string; onChange: (v: string) => void }) {
   const [open, setOpen] = useState(false);
   const [text, setText] = useState('');
   const close = useCallback(() => setOpen(false), []);
   const ref = useDismiss(open, close);
   const selected = options.find(o => o.id === value);
+  const label = (o: { name: string; active: boolean }) => (o.active ? o.name : `${o.name} (inactive)`);
   const filtered = useMemo(() => {
     const t = text.trim().toLowerCase();
     return (t ? options.filter(o => o.name.toLowerCase().includes(t)) : options).slice(0, 80);
@@ -180,7 +188,7 @@ function ClientSearchSelect({ options, value, onChange }: { options: { id: strin
     <div ref={ref} className="relative">
       <input
         type="text"
-        value={open ? text : (selected?.name ?? '')}
+        value={open ? text : (selected ? label(selected) : '')}
         placeholder="All clients"
         onFocus={() => { setOpen(true); setText(''); }}
         onChange={e => setText(e.target.value)}
@@ -194,8 +202,8 @@ function ClientSearchSelect({ options, value, onChange }: { options: { id: strin
           <button type="button" onClick={() => { onChange(''); setOpen(false); }} className="w-full text-left text-sm text-slate-400 hover:bg-slate-800 px-2 py-1.5 rounded">All clients</button>
           {filtered.map(o => (
             <button key={o.id} type="button" onClick={() => { onChange(o.id); setOpen(false); }}
-              className={`w-full text-left text-sm px-2 py-1.5 rounded hover:bg-slate-800 ${o.id === value ? 'text-blue-300' : 'text-slate-200'}`}>
-              {o.name}
+              className={`w-full text-left text-sm px-2 py-1.5 rounded hover:bg-slate-800 ${o.id === value ? 'text-blue-300' : o.active ? 'text-slate-200' : 'text-slate-400'}`}>
+              {label(o)}
             </button>
           ))}
           {filtered.length === 0 && <p className="text-xs text-slate-500 px-2 py-1.5">No match</p>}
@@ -323,6 +331,23 @@ export default function AssetLibrary({ initial, range, options }: {
 
   const isCreative = filters.kind === 'creative';
 
+  // Dropdown contents follow the "include inactive" toggle. Brands derive
+  // from whichever client set is visible so a brand that only ever had
+  // inactive clients appears exactly when it can match something.
+  const visibleClients = useMemo(
+    () => (filters.inactive ? options.clients : options.clients.filter(c => c.active)),
+    [options.clients, filters.inactive]
+  );
+  const visibleAccounts = useMemo(
+    () => (filters.inactive ? options.accounts : options.accounts.filter(a => a.active)),
+    [options.accounts, filters.inactive]
+  );
+  const visibleBrands = useMemo(
+    () => Array.from(new Set(visibleClients.map(c => c.brand).filter(Boolean))).sort((a, b) => a.localeCompare(b)),
+    [visibleClients]
+  );
+  const visibleOffers = filters.inactive ? options.offersAll : options.offers;
+
   // Any filter change: mirror it into the URL (no server round-trip — the
   // API is the data path) and refetch. The first render already has the
   // server's page for this exact URL, so it's skipped.
@@ -367,6 +392,17 @@ export default function AssetLibrary({ initial, range, options }: {
   const update = useCallback((patch: Partial<Filters>, opts?: { keepPage?: boolean }) => {
     setFilters(f => ({ ...f, ...patch, page: opts?.keepPage ? (patch.page ?? f.page) : 1 }));
   }, []);
+
+  // Turning the toggle off drops a selected client/account that is no
+  // longer in the dropdown, so the URL never carries an invisible filter.
+  const setInactive = (inactive: boolean) => {
+    const patch: Partial<Filters> = { inactive };
+    if (!inactive) {
+      if (filters.client && !options.clients.some(c => c.id === filters.client && c.active)) patch.client = '';
+      if (filters.account && !options.accounts.some(a => a.id === filters.account && a.active)) patch.account = '';
+    }
+    update(patch);
+  };
 
   const setKind = (kind: AssetKind) => {
     if (kind === filters.kind) return;
@@ -420,15 +456,15 @@ export default function AssetLibrary({ initial, range, options }: {
 
       {/* Filter bar */}
       <div className="flex flex-wrap items-center gap-2">
-        <OfferMultiSelect options={options.offers} value={filters.offer} onChange={v => update({ offer: v })} />
-        <ClientSearchSelect options={options.clients} value={filters.client} onChange={v => update({ client: v })} />
+        <OfferMultiSelect options={visibleOffers} value={filters.offer} onChange={v => update({ offer: v })} />
+        <ClientSearchSelect options={visibleClients} value={filters.client} onChange={v => update({ client: v })} />
         <select value={filters.brand} onChange={e => update({ brand: e.target.value })} className={inputCls}>
           <option value="">All brands</option>
-          {options.brands.map(b => <option key={b} value={b}>{b}</option>)}
+          {visibleBrands.map(b => <option key={b} value={b}>{b}</option>)}
         </select>
         <select value={filters.account} onChange={e => update({ account: e.target.value })} className={`${inputCls} max-w-[220px]`}>
           <option value="">All accounts</option>
-          {options.accounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
+          {visibleAccounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.id}){a.active ? '' : ' (inactive)'}</option>)}
         </select>
         <div className="flex items-center gap-1">
           <span className="text-xs text-slate-500">Min spend $</span>
@@ -459,6 +495,13 @@ export default function AssetLibrary({ initial, range, options }: {
           <input type="checkbox" checked={filters.onlyActive} onChange={e => update({ onlyActive: e.target.checked })} className="accent-blue-500" />
           Only in active ads
         </label>
+        <label
+          className="flex items-center gap-2 text-sm text-slate-300 cursor-pointer select-none"
+          title="Widens the library to every client the agency has ever had (active or not) and every campaign they ran. The date range above still applies — pick a custom range (e.g. from 2023) to see full history."
+        >
+          <input type="checkbox" checked={filters.inactive} onChange={e => setInactive(e.target.checked)} className="accent-amber-500" />
+          Include inactive clients <span className="text-slate-500">(all campaigns ever run)</span>
+        </label>
         <input type="search" value={qInput} onChange={e => setQInput(e.target.value)}
           placeholder={isCreative ? 'Search campaign name / key…' : 'Search text…'} className={`${inputCls} w-56 ml-auto`} />
         <a href={exportHref} className="px-3 py-2 text-sm font-medium rounded-lg border border-slate-700 hover:border-slate-500 text-slate-200 hover:text-white transition-colors">
@@ -471,6 +514,7 @@ export default function AssetLibrary({ initial, range, options }: {
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Spend (filtered)</p>
           <p className="text-xl font-semibold text-white mt-1">{fmtUsd(totals.spend, 0)}</p>
+          {filters.inactive && <p className="text-xs text-amber-300/80 mt-0.5">incl. inactive</p>}
         </div>
         <div className="bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-3">
           <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Leads</p>
@@ -571,6 +615,7 @@ export default function AssetLibrary({ initial, range, options }: {
           kind={filters.kind}
           assetKey={selected.key}
           range={range}
+          includeInactive={filters.inactive}
           onClose={() => setSelected(null)}
         />
       )}

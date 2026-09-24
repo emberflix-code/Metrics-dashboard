@@ -12,6 +12,6 @@ export async function GET(req: NextRequest) {
   const range = resolveDateRange({ preset: sp.get('preset') || undefined, since: sp.get('since') || undefined, until: sp.get('until') || undefined }, '30');
   const groupBy = sp.get('groupBy') === 'brand' ? 'brand' : 'client';
   const minSpend = Math.max(0, Number(sp.get('minSpend')) || 0);
-  const result = await buildOfferMatrix({ since: range.since, until: range.until, brand: sp.get('brand') || undefined, groupBy, minSpend });
+  const result = await buildOfferMatrix({ since: range.since, until: range.until, brand: sp.get('brand') || undefined, groupBy, minSpend, live: sp.get('live') === '1' });
   return NextResponse.json(result, NO_STORE);
 }
