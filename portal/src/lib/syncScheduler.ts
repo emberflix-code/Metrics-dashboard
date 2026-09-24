@@ -16,6 +16,7 @@
 // finished yet, one more backfill-chunk's worth of progress per run.
 import { query } from './db';
 import { syncAccount } from './metaSync';
+import { geocodePendingClients } from './geocode';
 
 const RUN_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 const PAUSE_BETWEEN_ACCOUNTS_MS = 20_000; // same deliberate pacing as the manual backfill queue, to avoid Meta rate limits
@@ -118,6 +119,15 @@ async function runDailySync() {
   }
 
   console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:accounts', count: accountIds.length, accountIds }));
+
+  // Marketer module: geocode any club whose address is new or changed
+  // since the last run (normally zero rows; seconds when there are some).
+  try {
+    const g = await geocodePendingClients();
+    if (g.geocoded || g.failed || g.skipped) console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:geocode', ...g }));
+  } catch (err) {
+    console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:geocodeError', error: err instanceof Error ? err.message : String(err) }));
+  }
 
   for (const accountId of accountIds) {
     try {

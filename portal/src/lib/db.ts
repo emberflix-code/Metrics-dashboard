@@ -529,6 +529,193 @@ pool.query(`CREATE INDEX IF NOT EXISTS idx_client_heartbeat_events_client_time O
 // off by default so every other client is unaffected.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_creative_tagging BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// ── Marketer module (migrations 031-033) ─────────────────────────────────
+// A third role, `marketer`, sees every active client at once (targeting
+// overlap map, cross-account asset library, alerts) without admin write
+// access. users.role has a CHECK constraint from 001_init.sql, so the
+// constraint itself has to be replaced — ADD COLUMN IF NOT EXISTS-style
+// idempotency doesn't exist for constraints, hence the DROP+ADD pair.
+(async () => {
+  try {
+    await pool.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`);
+    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'client', 'marketer'))`);
+  } catch { /* surfaced by the login path if it ever fails */ }
+})();
+
+// Rollup clients (Alloy Ops, AF Regional Omega, Omega - *, Anytime Fitness
+// Corporate) share ad accounts with the per-location clients and have no
+// street address. The marketer location layer (map pins, scorecard rows)
+// must skip them, and an explicit flag beats a name heuristic.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS is_rollup BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
+// Offer token parsed from the campaign name at entity-sync time (see
+// src/lib/offers.ts) — e.g. "GMN - Instant Form - Join40%Off - #1303 -
+// Tampa, FL" -> "Join40%Off". Null when the name has no recognizable
+// structure (non-Omega naming). Only meaningful on level='campaign' rows.
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS offer_token TEXT`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_entities_offer ON meta_entities (account_id, level, offer_token)`).catch(() => {});
+
+// Manual per-campaign offer override (marketer UI) for campaigns whose name
+// doesn't parse or parses wrong. Wins over the parsed offer_token.
+pool.query(`CREATE TABLE IF NOT EXISTS campaign_offer_overrides (
+  account_id   TEXT NOT NULL,
+  campaign_id  TEXT NOT NULL,
+  offer        TEXT NOT NULL,
+  set_by       UUID,
+  set_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (account_id, campaign_id)
+)`).catch(() => {});
+
+// Persisted campaign -> client attribution, recomputed after every entity
+// sync and whenever a client's scope changes (see
+// src/lib/marketerScope.ts refreshCampaignAttribution). One row per
+// (campaign, client) whose campaign_filter matches; is_primary marks the
+// single non-rollup client the marketer location layer attributes the
+// campaign to (most specific filter keyword wins).
+pool.query(`CREATE TABLE IF NOT EXISTS marketer_campaign_client (
+  account_id   TEXT NOT NULL,
+  campaign_id  TEXT NOT NULL,
+  client_id    UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  is_primary   BOOLEAN NOT NULL DEFAULT false,
+  computed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (account_id, campaign_id, client_id)
+)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_mcc_client ON marketer_campaign_client (client_id)`).catch(() => {});
+
+// Phase 1 — ad set targeting + geocoded club locations (migration 032).
+// `targeting` is Meta's raw ad set targeting spec (geo_locations,
+// custom_locations with lat/lng/radius, age/gender/interests...). Fetched
+// in a separate batched `?ids=` step (syncAdsetTargeting), never in the
+// 500-row entity list call — the JSON is 1-6 KB per ad set.
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS targeting JSONB`).catch(() => {});
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS targeting_fetched_at TIMESTAMPTZ`).catch(() => {});
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS daily_budget BIGINT`).catch(() => {});
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS lifetime_budget BIGINT`).catch(() => {});
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS start_time TIMESTAMPTZ`).catch(() => {});
+pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS end_time TIMESTAMPTZ`).catch(() => {});
+// Watermark for the ad-set-level daily insights the targeting step keeps
+// for the last ~90 days (syncInsights itself is campaign-only — see the
+// comment there; the overlap tool needs per-ad-set spend to know which
+// circles are actually live). Rows land in meta_daily_insights level='adset'.
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS adset_insights_until TEXT`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS ad_insights_until TEXT`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_topup_until TEXT`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS targeting_synced_at TIMESTAMPTZ`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_synced_at TIMESTAMPTZ`).catch(() => {});
+
+// Normalized geo rows extracted from `targeting` so overlap queries are
+// plain SQL: one row per included/excluded location. custom_location rows
+// carry a real center+radius; city/zip rows get an approximate radius and
+// a lat/lng resolved through geo_key_cache (Meta's spec has no coordinates
+// for keyed locations); region/country rows have no circle ("broad").
+pool.query(`CREATE TABLE IF NOT EXISTS meta_adset_geo (
+  account_id      TEXT NOT NULL,
+  adset_id        TEXT NOT NULL,
+  seq             INT NOT NULL,
+  kind            TEXT NOT NULL,
+  key             TEXT,
+  name            TEXT,
+  region          TEXT,
+  country         TEXT,
+  lat             DOUBLE PRECISION,
+  lng             DOUBLE PRECISION,
+  radius_km       DOUBLE PRECISION,
+  approx          BOOLEAN NOT NULL DEFAULT false,
+  excluded        BOOLEAN NOT NULL DEFAULT false,
+  location_types  TEXT[],
+  PRIMARY KEY (account_id, adset_id, seq)
+)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_adset_geo_adset ON meta_adset_geo (account_id, adset_id)`).catch(() => {});
+
+pool.query(`CREATE TABLE IF NOT EXISTS geo_key_cache (
+  kind         TEXT NOT NULL,
+  key          TEXT NOT NULL,
+  query        TEXT NOT NULL,
+  lat          DOUBLE PRECISION,
+  lng          DOUBLE PRECISION,
+  source       TEXT,
+  resolved_at  TIMESTAMPTZ,
+  error        TEXT,
+  PRIMARY KEY (kind, key)
+)`).catch(() => {});
+
+// Club coordinates geocoded from clients.location_address (Google when
+// GOOGLE_MAPS_API_KEY is set, else Nominatim). geocode_query remembers the
+// exact address string that was geocoded so an edited address re-geocodes.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS location_lat DOUBLE PRECISION`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS location_lng DOUBLE PRECISION`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS geocoded_at TIMESTAMPTZ`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS geocode_source TEXT`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS geocode_query TEXT`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS geocode_error TEXT`).catch(() => {});
+
+// Phase 2 — ad copy + per-variant copy performance (migration 033).
+// meta_creative_assets.body/title are last-writer-wins samples shared by
+// every ad using an asset, so they can't be shown per ad. This is the real
+// per-ad copy: every body/title/description variant (DCO asset_feed_spec)
+// or the single static variant (object_story_spec).
+pool.query(`CREATE TABLE IF NOT EXISTS meta_ad_copy (
+  account_id                TEXT NOT NULL,
+  ad_id                     TEXT NOT NULL,
+  campaign_id               TEXT,
+  adset_id                  TEXT,
+  creative_id               TEXT,
+  is_dco                    BOOLEAN NOT NULL DEFAULT false,
+  bodies                    JSONB NOT NULL DEFAULT '[]',
+  titles                    JSONB NOT NULL DEFAULT '[]',
+  descriptions              JSONB NOT NULL DEFAULT '[]',
+  link_urls                 JSONB NOT NULL DEFAULT '[]',
+  cta_types                 TEXT[] NOT NULL DEFAULT '{}',
+  primary_body_hash         TEXT,
+  primary_title_hash        TEXT,
+  primary_description_hash  TEXT,
+  fetched_at                TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (account_id, ad_id)
+)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_ad_copy_body ON meta_ad_copy (primary_body_hash)`).catch(() => {});
+
+// Global copy-text dictionary keyed by sha1 of the whitespace-normalized
+// text, so the identical body reused across accounts/ads is one row.
+pool.query(`CREATE TABLE IF NOT EXISTS meta_copy_texts (
+  kind        TEXT NOT NULL,
+  text_hash   TEXT NOT NULL,
+  text        TEXT NOT NULL,
+  first_seen  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_seen   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (kind, text_hash)
+)`).catch(() => {});
+
+// Mirrors meta_asset_breakdown_daily for Meta's body_asset / title_asset /
+// description_asset breakdowns (kind = 'body' | 'title' | 'description').
+pool.query(`CREATE TABLE IF NOT EXISTS meta_copy_breakdown_daily (
+  account_id     TEXT NOT NULL,
+  kind           TEXT NOT NULL,
+  text_hash      TEXT NOT NULL,
+  ad_id          TEXT NOT NULL,
+  date           DATE NOT NULL,
+  spend          NUMERIC(12,2) NOT NULL DEFAULT 0,
+  impressions    BIGINT NOT NULL DEFAULT 0,
+  link_clicks    BIGINT NOT NULL DEFAULT 0,
+  results        BIGINT NOT NULL DEFAULT 0,
+  reach          BIGINT,
+  campaign_name  TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (account_id, kind, text_hash, ad_id, date)
+)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_copy_breakdown_range ON meta_copy_breakdown_daily (account_id, date)`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_copy_breakdown_ad ON meta_copy_breakdown_daily (account_id, ad_id)`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_newest_synced TEXT`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_earliest_synced TEXT`).catch(() => {});
+pool.query(`ALTER TABLE agency_meta_sync_state ADD COLUMN IF NOT EXISTS copy_backfill_complete BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+pool.query(`CREATE INDEX IF NOT EXISTS idx_meta_asset_breakdown_daily_asset ON meta_asset_breakdown_daily (account_id, asset_key, date)`).catch(() => {});
+
+// Phase 3 — alert dismissals (marketer UI).
+pool.query(`CREATE TABLE IF NOT EXISTS marketer_alert_dismissals (
+  alert_key     TEXT PRIMARY KEY,
+  dismissed_by  UUID,
+  dismissed_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  snooze_until  TIMESTAMPTZ
+)`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]

@@ -7,5 +7,6 @@ export default async function RootPage() {
 
   if (!session) redirect('/login');
   if (session.user.role === 'admin') redirect('/admin');
+  if (session.user.role === 'marketer') redirect('/marketer');
   redirect('/dashboard');
 }

@@ -5,7 +5,7 @@ import { encode } from 'next-auth/jwt';
 interface UserRow {
   id: string;
   email: string;
-  role: 'admin' | 'client';
+  role: 'admin' | 'client' | 'marketer';
   client_id: string | null;
 }
 
@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     `SELECT u.id, u.email, u.role, cu.client_id
      FROM users u
      LEFT JOIN client_users cu ON cu.user_id = u.id
-     WHERE u.auto_login_token = $1 AND u.role IN ('client', 'admin')
+     WHERE u.auto_login_token = $1 AND u.role IN ('client', 'admin', 'marketer')
      LIMIT 1`,
     [token]
   );

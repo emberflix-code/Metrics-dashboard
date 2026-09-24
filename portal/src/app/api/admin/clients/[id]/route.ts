@@ -4,6 +4,8 @@ import { authOptions } from '@/lib/auth';
 import { query } from '@/lib/db';
 import { encrypt } from '@/lib/crypto';
 import { verifyGhlLocationAccess } from '@/lib/ghl';
+import { refreshCampaignAttribution } from '@/lib/marketerScope';
+import { geocodePendingClients } from '@/lib/geocode';
 import bcrypt from 'bcryptjs';
 
 const VALID_LEADS_SOURCES = new Set(['meta', 'sheet', 'ghl']);
@@ -21,6 +23,16 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   const [client] = await query('SELECT id FROM clients WHERE id = $1', [params.id]);
   if (!client) return NextResponse.json({ error: 'Client not found' }, { status: 404 });
+
+  // Marketer module: anything that changes which campaigns this client
+  // "owns" invalidates the persisted campaign -> client attribution
+  // (see lib/marketerScope.ts). Recomputed after the writes below.
+  const scopeChanged = body.campaign_filter !== undefined || body.ad_account_ids !== undefined
+    || body.active !== undefined || body.is_rollup !== undefined;
+
+  if (body.is_rollup !== undefined) {
+    await query('UPDATE clients SET is_rollup = $1 WHERE id = $2', [!!body.is_rollup, params.id]);
+  }
 
   if (body.campaign_filter !== undefined) {
     await query('UPDATE clients SET campaign_filter = $1 WHERE id = $2', [body.campaign_filter.trim(), params.id]);
@@ -91,6 +103,10 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (body.location_address !== undefined) {
     await query('UPDATE clients SET location_address = $1 WHERE id = $2', [String(body.location_address).trim(), params.id]);
+    // Best-effort re-geocode for the marketer map; geocode_query mismatch
+    // makes geocodePendingClients pick this client up. Failure is recorded
+    // on clients.geocode_error, never surfaced as a PATCH error.
+    geocodePendingClients({ clientId: params.id }).catch(() => {});
   }
 
   if (body.sort_order !== undefined) {
@@ -298,6 +314,13 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
        WHERE id IN (SELECT user_id FROM client_users WHERE client_id = $2)`,
       [hash, params.id]
     );
+  }
+
+  if (scopeChanged) {
+    // Fire-and-forget: walks every scoped account's campaigns (a few
+    // seconds on Omega) — not worth blocking the admin form on.
+    refreshCampaignAttribution().catch(err =>
+      console.error('[MARKETER]', JSON.stringify({ step: 'attribution:refresh', clientId: params.id, error: err instanceof Error ? err.message : String(err) })));
   }
 
   return NextResponse.json({ ok: true });

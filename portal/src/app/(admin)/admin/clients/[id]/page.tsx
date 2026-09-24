@@ -14,6 +14,7 @@ import HideAdsetAdTabsToggle from './HideAdsetAdTabsToggle';
 import EnablePageImageFallbackToggle from './EnablePageImageFallbackToggle';
 import ShowMetaLeadNamesToggle from './ShowMetaLeadNamesToggle';
 import ActiveToggle from './ActiveToggle';
+import IsRollupToggle from './IsRollupToggle';
 import SheetConfigForm from './SheetConfigForm';
 import GhlConfigForm from './GhlConfigForm';
 import CpaConfigForm from './CpaConfigForm';
@@ -66,6 +67,11 @@ interface ClientDetail {
   meta_kpi_sheet_id: string;
   meta_kpi_sheet_tab: string;
   show_meta_kpi_sheet: boolean;
+  is_rollup: boolean;
+  location_address: string;
+  location_lat: number | null;
+  location_lng: number | null;
+  geocode_error: string | null;
 }
 
 interface RetainerRow {
@@ -112,6 +118,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            c.enable_cross_account_creative_tagging, c.show_theme_breakdown, c.show_insights, c.hide_adset_ad_tabs,
            c.enable_page_image_fallback, c.show_meta_lead_names,
            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet,
+           c.is_rollup, c.location_address, c.location_lat, c.location_lng, c.geocode_error,
            c.created_at, u.email, u.auto_login_token
     FROM clients c
     JOIN client_users cu ON cu.client_id = c.id
@@ -261,6 +268,24 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
           <div className="mt-4 pt-4 border-t border-slate-800">
             <ActiveToggle clientId={client.id} current={client.active ?? true} />
           </div>
+          <div className="mt-4 pt-4 border-t border-slate-800">
+            <IsRollupToggle clientId={client.id} current={client.is_rollup ?? false} />
+          </div>
+          {!client.is_rollup && (
+            <div className="mt-4 pt-4 border-t border-slate-800 text-xs text-slate-400">
+              <span className="text-slate-500 uppercase tracking-wider text-[10px] font-semibold">Location</span>{' '}
+              {client.location_address
+                ? <>
+                    <span className="text-slate-300">{client.location_address}</span>
+                    {client.location_lat !== null && client.location_lng !== null
+                      ? <span className="ml-2 text-emerald-400">geocoded ({Number(client.location_lat).toFixed(4)}, {Number(client.location_lng).toFixed(4)})</span>
+                      : client.geocode_error
+                        ? <span className="ml-2 text-red-400">geocode failed: {client.geocode_error}</span>
+                        : <span className="ml-2 text-amber-400">not geocoded yet</span>}
+                  </>
+                : <span className="text-amber-400">no address on file — set via the marketing sheet sync or the client PATCH</span>}
+            </div>
+          )}
         </div>
 
         {/* Ad Account Assignment */}

@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getServerSession } from 'next-auth';
+import { authOptions } from '@/lib/auth';
 import { getClientDbScope } from '@/lib/meta';
 import { query } from '@/lib/db';
 
@@ -13,12 +15,25 @@ import { query } from '@/lib/db';
 // (same as any other fetch from DashboardClient.tsx) — no separate
 // token/signature scheme needed, just the same accountId-scoping check
 // every other DB-backed route already does.
+//
+// Admin / marketer sessions (the /marketer asset library) have no
+// client_users row, so their scope is every agency account instead.
+async function allowedAccountIds(): Promise<string[]> {
+  const session = await getServerSession(authOptions);
+  if (!session) throw new Error('Unauthorized');
+  if (session.user.role === 'admin' || session.user.role === 'marketer') {
+    const rows = await query<{ account_ids: string[] | null }>(`SELECT account_ids FROM agency_bm_connections`);
+    return Array.from(new Set(rows.flatMap(r => r.account_ids || [])));
+  }
+  return (await getClientDbScope()).accountIds;
+}
+
 export async function GET(
   _req: NextRequest,
   { params }: { params: { accountId: string; assetKey: string } }
 ) {
   try {
-    const { accountIds } = await getClientDbScope();
+    const accountIds = await allowedAccountIds();
     const accountId = decodeURIComponent(params.accountId).replace(/^act_/i, '');
     const assetKey = decodeURIComponent(params.assetKey);
     if (!accountIds.includes(accountId)) {

@@ -24,7 +24,9 @@ const VALID_UGC_STATUSES = new Set(['ugc', 'non-ugc']);
 
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
-  const isAdmin = session?.user.role === 'admin' || !!session?.user.impersonatedBy;
+  // Marketers tag from the cross-account asset library (/marketer/assets) —
+  // same write, same phash-cluster expansion, so they're allowed here too.
+  const isAdmin = session?.user.role === 'admin' || session?.user.role === 'marketer' || !!session?.user.impersonatedBy;
   if (!session || !isAdmin) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

@@ -4,6 +4,11 @@ import { resolveResultsFromActions } from './meta';
 import { computePhash } from './phash';
 import { fetchMetaKpiSheetRows, type MetaKpiSheetRow } from './metaKpiSheet';
 import { SheetError } from './sheets';
+import { parseOfferFromCampaignName } from './offers';
+import { refreshCampaignAttribution } from './marketerScope';
+import { extractGeoRows, geoKeyQuery } from './targetingGeo';
+import { resolveGeoKeys } from './geocode';
+import { extractCopy, copyHash, normalizeCopyText, type CopyKind } from './adCopy';
 
 // Session-free Meta → Postgres sync for the DB-backed dashboard cache.
 // Mirrors getClientConnection()'s token resolution but without a session —
@@ -427,21 +432,25 @@ export async function syncEntities(accountId: string, token: string): Promise<nu
       const statuses = batch.map(r => r.effective_status || 'UNKNOWN');
       const createdTimes = batch.map(r => lvl.level === 'campaign' ? (r.created_time || null) : null);
       const optimizationGoals = batch.map(r => lvl.level === 'adset' ? (r.optimization_goal || null) : null);
+      // Marketer module: offer token parsed from the campaign name (pure
+      // string work, see lib/offers.ts). Null for non-convention names.
+      const offerTokens = batch.map(r => lvl.level === 'campaign' ? parseOfferFromCampaignName(r.name || '') : null);
 
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:start', level: lvl.level, batchNum, batchSize: batch.length }));
       await query(
-        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time, optimization_goal, updated_at)
-         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time::timestamptz, optimization_goal, now()
-         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[])
-           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time, optimization_goal)
+        `INSERT INTO meta_entities (account_id, level, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time, optimization_goal, offer_token, updated_at)
+         SELECT $1, $2, entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time::timestamptz, optimization_goal, offer_token, now()
+         FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[])
+           AS t(entity_id, name, campaign_id, campaign_name, adset_id, adset_name, effective_status, created_time, optimization_goal, offer_token)
          ON CONFLICT (account_id, level, entity_id) DO UPDATE SET
            name = EXCLUDED.name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
            adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name,
            effective_status = EXCLUDED.effective_status,
            created_time = COALESCE(EXCLUDED.created_time, meta_entities.created_time),
            optimization_goal = COALESCE(EXCLUDED.optimization_goal, meta_entities.optimization_goal),
+           offer_token = COALESCE(EXCLUDED.offer_token, meta_entities.offer_token),
            updated_at = now()`,
-        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses, createdTimes, optimizationGoals]
+        [accountId, lvl.level, entityIds, names, campaignIds, campaignNames, adsetIds, adsetNames, statuses, createdTimes, optimizationGoals, offerTokens]
       );
       console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:upsert:done', level: lvl.level, batchNum }));
       upserted += batch.length;
@@ -449,6 +458,14 @@ export async function syncEntities(accountId: string, token: string): Promise<nu
   }
   console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncEntities:done', upserted }));
   invalidateResultsRules(accountId);
+  // Marketer module: campaign -> client attribution depends on the campaign
+  // names just written. Best-effort — a failure here must never fail the
+  // entity sync itself.
+  try {
+    await refreshCampaignAttribution(accountId);
+  } catch (err) {
+    console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'attribution', error: err instanceof Error ? err.message : String(err) }));
+  }
   return upserted;
 }
 
@@ -691,7 +708,12 @@ async function fetchInsightsChunkWithRowCapFallback(accountId: string, token: st
 // succeed). Mirrors fetchInsightsChunkWithRowCapFallback's shape/behavior
 // exactly, just with a different fields list and a `breakdown` dimension
 // instead of `level`.
-async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: string, breakdown: 'image_asset' | 'video_asset', since: string, until: string, campaignIds: string[], deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
+// Marketer module widened this from image/video to the copy-variant
+// breakdowns (body_asset / title_asset / description_asset) — same
+// endpoint, same row-cap behavior, just a different dimension.
+type BreakdownKind = 'image_asset' | 'video_asset' | 'body_asset' | 'title_asset' | 'description_asset';
+
+async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: string, breakdown: BreakdownKind, since: string, until: string, campaignIds: string[], deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
   const out: BreakdownRow[] = [];
   let hadGaps = false;
   const batches = chunkArray(campaignIds, CAMPAIGN_BATCH_SIZE);
@@ -748,7 +770,7 @@ async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: s
 // as its row-cap defense. On AF Regional Omega, 94% of campaigns (7,737/8,198) are
 // ARCHIVED, so this isn't a minor edge case — most historical months' breakdown data
 // was silently unreachable until this existed.
-async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: string, breakdown: 'image_asset' | 'video_asset', since: string, until: string, deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
+async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: string, breakdown: BreakdownKind, since: string, until: string, deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
   const out: BreakdownRow[] = [];
   let hadGaps = false;
   if (deadline !== undefined && Date.now() > deadline) return { rows: out, hadGaps: true };
@@ -797,6 +819,16 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
 
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
+  const written = await persistInsightRows(accountId, level, rows);
+  return { written, hadGaps };
+}
+
+// Dedupes + batch-upserts raw insight rows into meta_daily_insights. Split
+// out of syncInsightsChunk so the marketer module's recent ad-set/ad pull
+// (syncRecentInsightsLevel, unfiltered windows rather than campaign
+// batches) writes through the exact same path — same results rule, same
+// collapse-on-collision, same columns.
+async function persistInsightRows(accountId: string, level: 'campaign' | 'adset' | 'ad', rows: InsightRow[]): Promise<number> {
   const resultsRules = await getResultsRules(accountId);
 
   interface Prepared {
@@ -869,7 +901,7 @@ async function syncInsightsChunk(accountId: string, token: string, level: 'campa
     );
   }
 
-  return { written: prepared.length, hadGaps };
+  return prepared.length;
 }
 
 interface SyncState {
@@ -1196,6 +1228,10 @@ interface BreakdownRow {
   // lookup never succeeds for it (deleted/old ads) — see the upsert after
   // the breakdown write below.
   image_asset?: { hash?: string; url?: string }; video_asset?: { video_id?: string; thumbnail_url?: string };
+  // Copy-variant breakdowns (marketer module): Meta returns the variant's
+  // text plus an asset id; we key on a hash of the text so the same copy
+  // reused across ads/accounts collapses to one row.
+  body_asset?: { id?: string; text?: string }; title_asset?: { id?: string; text?: string }; description_asset?: { id?: string; text?: string };
 }
 
 async function syncCreatives(
@@ -2143,6 +2179,548 @@ async function syncCreatives(
   }
 }
 
+// ── Marketer module sync steps ──────────────────────────────────────────
+// Three additional, independent steps feeding /marketer (see migrations
+// 031-033): ad set targeting + recent ad-set/ad insights (targeting overlap
+// map), per-ad copy (asset library), and per-copy-variant breakdowns.
+// Each has its own wall-clock budget and try/catch in syncAccount, exactly
+// like entities/insights/creatives, so a slow one can't starve the others.
+const TARGETING_BUDGET_MS = 60_000;
+const TARGETING_ONLY_BUDGET_MS = 10 * 60_000;
+const COPY_BUDGET_MS = 60_000;
+const COPY_BREAKDOWN_BUDGET_MS = 90_000;
+const COPY_ONLY_BUDGET_MS = 10 * 60_000;
+// Per the 2026-09-23 decision: active entities + the last 90 days of spend.
+// Older copy performance is low value and each extra breakdown kind is
+// another full pass over an account's campaigns.
+const MARKETER_HISTORY_DAYS = 90;
+const RECENT_INSIGHTS_WINDOW_DAYS = 7;
+const IDS_BATCH_START = 25;
+
+// One Graph request with the same transient/rate-limit classification as
+// fetchMetaWithRetry, but for endpoints whose response isn't a paged
+// `{data: []}` list (the `?ids=` batch endpoint returns an object keyed by
+// id). Throws RowCapError on Meta's "reduce the amount of data" reply so
+// callers can shrink the batch.
+async function fetchGraphJson<T>(url: URL, deadline?: number): Promise<T> {
+  const MAX_ATTEMPTS = 6;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    if (deadline !== undefined && Date.now() > deadline && attempt > 0) break;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    let json: { error?: { message?: string; code?: number; error_subcode?: number; error_user_title?: string } } | undefined;
+    try {
+      const res = await fetch(url.toString(), { signal: controller.signal });
+      json = await res.json();
+    } catch (e) {
+      lastErr = e;
+      clearTimeout(timer);
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+    const err = json?.error;
+    if (!err) return json as T;
+    const scrubbed = url.toString().replace(/access_token=[^&]+/, 'access_token=REDACTED');
+    console.error('[META-SYNC-ERR]', JSON.stringify({ url: scrubbed.slice(0, 300), error: err }));
+    const isRowCap = (err.error_subcode !== undefined && TOO_MUCH_DATA_SUBCODES.has(err.error_subcode)) || (err.code === 1 && TOO_MUCH_DATA_MESSAGE.test(err.message || ''));
+    if (isRowCap) throw new RowCapError(err.message || 'Too many rows');
+    const title = (err.error_user_title || '').toLowerCase();
+    const rateLimited = err.code === 17 || err.code === 4 || err.code === 80004;
+    const transient = err.code === 1 || err.code === 2 || rateLimited || title.includes('unknown error') || title.includes('temporarily');
+    lastErr = new Error(err.message || 'Meta API error');
+    if (!transient) throw lastErr;
+    await new Promise(r => setTimeout(r, rateLimited ? 20_000 * (attempt + 1) : 800 * (attempt + 1)));
+  }
+  throw lastErr instanceof Error ? lastErr : new Error('Meta API error');
+}
+
+// `GET /?ids=a,b,c&fields=...` — one round-trip per batch (Meta caps at 50
+// ids; we start at 25 because targeting / creative specs are large). Any
+// error halves the batch: a row cap because the payload is too big, and
+// the "unsupported get request" Meta returns for the WHOLE batch when one
+// id is deleted/inaccessible — halving isolates the bad id, which is then
+// skipped at batch size 1. Returns the objects that came back, in no
+// particular order.
+async function fetchIdsBatched<T extends { id?: string }>(ids: string[], fields: string, token: string, deadline?: number, startBatch = IDS_BATCH_START): Promise<{ rows: T[]; skipped: string[] }> {
+  const rows: T[] = [];
+  const skipped: string[] = [];
+  let batchSize = Math.max(1, Math.min(50, startBatch));
+  let i = 0;
+  while (i < ids.length) {
+    if (deadline !== undefined && Date.now() > deadline) break;
+    const batch = ids.slice(i, i + batchSize);
+    const u = new URL(`${GRAPH}/`);
+    u.searchParams.set('ids', batch.join(','));
+    u.searchParams.set('fields', fields);
+    u.searchParams.set('access_token', token);
+    try {
+      const json = await fetchGraphJson<Record<string, T & { error?: unknown }>>(u, deadline);
+      for (const id of batch) {
+        const obj = json[id];
+        if (obj && !obj.error) rows.push({ ...obj, id: obj.id ?? id });
+        else skipped.push(id);
+      }
+      i += batch.length;
+      // Recover batch size gradually after a halving.
+      if (batchSize < startBatch) batchSize = Math.min(startBatch, batchSize * 2);
+    } catch (err) {
+      if (batchSize > 1) { batchSize = Math.max(1, Math.floor(batchSize / 2)); continue; }
+      console.error('[META-SYNC-ERR]', JSON.stringify({ step: 'fetchIdsBatched:skip', id: batch[0], error: err instanceof Error ? err.message : String(err) }));
+      skipped.push(batch[0]);
+      i += 1;
+    }
+    await new Promise(r => setTimeout(r, 150));
+  }
+  return { rows, skipped };
+}
+
+// ── Targeting (ad set geo) ──────────────────────────────────────────────
+interface AdsetTargetingResp { id?: string; targeting?: unknown; daily_budget?: string; lifetime_budget?: string; start_time?: string; end_time?: string }
+
+export async function syncAdsetTargeting(accountId: string, token: string, budgetMs: number = TARGETING_BUDGET_MS): Promise<{ fetched: number; geoRows: number; skipped: number }> {
+  const deadline = Date.now() + budgetMs;
+  // Priority: live ad sets always (targeting can be edited without a status
+  // change), paused ones weekly, archived/deleted only when they had spend
+  // in the last 90 days and were never fetched. Anything older is never
+  // fetched — Omega alone has ~19k archived ad sets nobody will optimize.
+  const candidates = await query<{ entity_id: string }>(
+    `SELECT e.entity_id
+     FROM meta_entities e
+     WHERE e.account_id = $1 AND e.level = 'adset' AND (
+       e.effective_status IN ('ACTIVE', 'WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS', 'PREAPPROVED')
+       OR (e.effective_status IN ('PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED')
+           AND (e.targeting_fetched_at IS NULL OR e.targeting_fetched_at < now() - interval '7 days'))
+       OR (e.targeting_fetched_at IS NULL AND EXISTS (
+             SELECT 1 FROM meta_daily_insights d
+             WHERE d.account_id = e.account_id AND d.level = 'adset' AND d.entity_id = e.entity_id
+               AND d.date >= current_date - $2::int AND d.spend > 0))
+     )
+     ORDER BY CASE WHEN e.effective_status = 'ACTIVE' THEN 0
+                   WHEN e.effective_status IN ('WITH_ISSUES', 'PENDING_REVIEW', 'IN_PROCESS', 'PREAPPROVED') THEN 1
+                   WHEN e.effective_status IN ('PAUSED', 'CAMPAIGN_PAUSED', 'ADSET_PAUSED') THEN 2 ELSE 3 END,
+              e.targeting_fetched_at ASC NULLS FIRST
+     LIMIT 4000`,
+    [accountId, MARKETER_HISTORY_DAYS]
+  );
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAdsetTargeting:candidates', count: candidates.length }));
+  if (candidates.length === 0) return { fetched: 0, geoRows: 0, skipped: 0 };
+
+  const { rows, skipped } = await fetchIdsBatched<AdsetTargetingResp>(
+    candidates.map(c => c.entity_id),
+    'id,targeting,daily_budget,lifetime_budget,start_time,end_time',
+    token, deadline
+  );
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAdsetTargeting:fetched', rows: rows.length, skipped: skipped.length }));
+
+  // Extract geo rows first so the key-resolution pass can run once for the
+  // whole batch (geo_key_cache makes repeat keys free).
+  const geoByAdset = new Map<string, ReturnType<typeof extractGeoRows>>();
+  const keyQueries: { kind: string; key: string; query: string }[] = [];
+  for (const r of rows) {
+    if (!r.id) continue;
+    const geo = extractGeoRows(r.targeting);
+    geoByAdset.set(r.id, geo);
+    for (const g of geo) {
+      if (g.lat !== null || !g.key) continue;
+      const q = geoKeyQuery(g);
+      if (q) keyQueries.push({ kind: g.kind, key: g.key, query: q });
+    }
+  }
+  let resolved = new Map<string, { lat: number; lng: number } | null>();
+  try {
+    resolved = await resolveGeoKeys(keyQueries);
+  } catch (err) {
+    console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'syncAdsetTargeting:resolveGeoKeys', error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  let geoRows = 0;
+  for (const batch of chunkArrayGeneric(rows.filter(r => !!r.id), DB_BATCH_SIZE)) {
+    const ids = batch.map(r => r.id!);
+    await query(
+      `UPDATE meta_entities m SET
+         targeting = t.targeting::jsonb, targeting_fetched_at = now(),
+         daily_budget = t.daily_budget::bigint, lifetime_budget = t.lifetime_budget::bigint,
+         start_time = t.start_time::timestamptz, end_time = t.end_time::timestamptz, updated_at = now()
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[])
+         AS t(entity_id, targeting, daily_budget, lifetime_budget, start_time, end_time)
+       WHERE m.account_id = $1 AND m.level = 'adset' AND m.entity_id = t.entity_id`,
+      [
+        accountId, ids,
+        batch.map(r => JSON.stringify(r.targeting ?? null)),
+        batch.map(r => r.daily_budget ?? null), batch.map(r => r.lifetime_budget ?? null),
+        batch.map(r => r.start_time ?? null), batch.map(r => r.end_time ?? null),
+      ]
+    );
+
+    const adsetIds: string[] = []; const seqs: number[] = []; const kinds: string[] = []; const keys: (string | null)[] = [];
+    const names: (string | null)[] = []; const regions: (string | null)[] = []; const countries: (string | null)[] = [];
+    const lats: (number | null)[] = []; const lngs: (number | null)[] = []; const radii: (number | null)[] = [];
+    const approx: boolean[] = []; const excluded: boolean[] = []; const locTypes: (string | null)[] = [];
+    for (const id of ids) {
+      for (const g of geoByAdset.get(id) || []) {
+        let lat = g.lat, lng = g.lng;
+        if (lat === null && g.key) {
+          const hit = resolved.get(`${g.kind}:${g.key}`);
+          if (hit) { lat = hit.lat; lng = hit.lng; }
+        }
+        adsetIds.push(id); seqs.push(g.seq); kinds.push(g.kind); keys.push(g.key); names.push(g.name);
+        regions.push(g.region); countries.push(g.country); lats.push(lat); lngs.push(lng); radii.push(g.radiusKm);
+        approx.push(g.approx); excluded.push(g.excluded); locTypes.push(g.locationTypes ? g.locationTypes.join(',') : null);
+      }
+    }
+    await query(`DELETE FROM meta_adset_geo WHERE account_id = $1 AND adset_id = ANY($2)`, [accountId, ids]);
+    if (adsetIds.length > 0) {
+      await query(
+        `INSERT INTO meta_adset_geo (account_id, adset_id, seq, kind, key, name, region, country, lat, lng, radius_km, approx, excluded, location_types)
+         SELECT $1, adset_id, seq, kind, key, name, region, country, lat, lng, radius_km, approx, excluded,
+                CASE WHEN location_types IS NULL THEN NULL ELSE string_to_array(location_types, ',') END
+         FROM unnest($2::text[], $3::int[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::float8[], $10::float8[], $11::float8[], $12::boolean[], $13::boolean[], $14::text[])
+           AS t(adset_id, seq, kind, key, name, region, country, lat, lng, radius_km, approx, excluded, location_types)`,
+        [accountId, adsetIds, seqs, kinds, keys, names, regions, countries, lats, lngs, radii, approx, excluded, locTypes]
+      );
+      geoRows += adsetIds.length;
+    }
+  }
+  await query(`UPDATE agency_meta_sync_state SET targeting_synced_at = now(), updated_at = now() WHERE account_id = $1`, [accountId]).catch(() => {});
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAdsetTargeting:done', fetched: rows.length, geoRows }));
+  return { fetched: rows.length, geoRows, skipped: skipped.length };
+}
+
+// ── Recent ad-set / ad daily insights (last 90 days) ────────────────────
+// syncInsights is campaign-only (see the comment there — adset/ad rows
+// tripled the API volume for tabs nobody reads). The marketer module needs
+// per-ad-set spend (which circles are live, how much money overlaps) and
+// per-ad spend (static ads' copy performance), but only for the recent
+// window, so this pulls unfiltered `level=adset|ad` windows and halves a
+// window by date on a row cap — no campaign batching, hence far fewer
+// calls than the campaign-batched path would need for the same rows.
+async function fetchRecentInsightsWindow(accountId: string, token: string, level: 'adset' | 'ad', since: string, until: string, deadline?: number): Promise<{ rows: InsightRow[]; hadGaps: boolean }> {
+  if (deadline !== undefined && Date.now() > deadline) return { rows: [], hadGaps: true };
+  try {
+    const u = new URL(`${GRAPH}/act_${accountId}/insights`);
+    u.searchParams.set('level', level);
+    u.searchParams.set('fields', level === 'adset'
+      ? 'adset_id,adset_name,campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions'
+      : 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions');
+    u.searchParams.set('time_range', JSON.stringify({ since, until }));
+    u.searchParams.set('time_increment', '1');
+    u.searchParams.set('limit', '500');
+    u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
+    u.searchParams.set('access_token', token);
+    return { rows: await fetchMetaWithRetry<InsightRow>(u, true, deadline), hadGaps: false };
+  } catch (err) {
+    if (err instanceof RowCapError && daysBetween(since, until) > 0) {
+      const mid = addDays(since, Math.floor(daysBetween(since, until) / 2));
+      const a = await fetchRecentInsightsWindow(accountId, token, level, since, mid, deadline);
+      const b = await fetchRecentInsightsWindow(accountId, token, level, addDays(mid, 1), until, deadline);
+      return { rows: [...a.rows, ...b.rows], hadGaps: a.hadGaps || b.hadGaps };
+    }
+    console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'recentInsights', level, since, until, error: err instanceof Error ? err.message : String(err) }));
+    return { rows: [], hadGaps: true };
+  }
+}
+
+export async function syncRecentInsightsLevel(accountId: string, token: string, level: 'adset' | 'ad', yesterday: string, deadline?: number): Promise<{ windows: number; rows: number; complete: boolean }> {
+  const column = level === 'adset' ? 'adset_insights_until' : 'ad_insights_until';
+  const [state] = await query<{ until: string | null }>(`SELECT ${column} AS until FROM agency_meta_sync_state WHERE account_id = $1`, [accountId]);
+  const floor = addDays(yesterday, -MARKETER_HISTORY_DAYS);
+  // Re-pull the trailing 7 days every run (attribution windows keep
+  // mutating recent days) — same posture as syncInsights' top-up.
+  const resumeFrom = state?.until && daysBetween(floor, state.until) > 0 ? addDays(state.until, -RECENT_INSIGHTS_WINDOW_DAYS) : floor;
+  const since = daysBetween(floor, resumeFrom) > 0 ? resumeFrom : floor;
+  if (daysBetween(since, yesterday) < 0) return { windows: 0, rows: 0, complete: true };
+
+  const windows = chunkRange(since, yesterday, RECENT_INSIGHTS_WINDOW_DAYS);
+  let rowsWritten = 0;
+  for (const w of windows) {
+    if (deadline !== undefined && Date.now() > deadline) {
+      console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'recentInsights:budget', level, stoppedBefore: w.since }));
+      return { windows: windows.indexOf(w), rows: rowsWritten, complete: false };
+    }
+    const { rows, hadGaps } = await fetchRecentInsightsWindow(accountId, token, level, w.since, w.until, deadline);
+    rowsWritten += await persistInsightRows(accountId, level, rows);
+    if (hadGaps) return { windows: windows.indexOf(w), rows: rowsWritten, complete: false };
+    // Watermark advances per completed window (ascending), so a budget cut
+    // resumes from the next window instead of re-pulling everything.
+    await query(`UPDATE agency_meta_sync_state SET ${column} = $2, updated_at = now() WHERE account_id = $1`, [accountId, w.until]);
+  }
+  return { windows: windows.length, rows: rowsWritten, complete: true };
+}
+
+// ── Ad copy (asset library) ─────────────────────────────────────────────
+interface AdCopyResp { id?: string; campaign?: { id?: string }; adset?: { id?: string }; creative?: { id?: string; asset_feed_spec?: unknown; object_story_spec?: unknown; body?: string; title?: string } }
+
+export async function syncAdCopy(accountId: string, token: string, budgetMs: number = COPY_BUDGET_MS): Promise<{ fetched: number; skipped: number }> {
+  const deadline = Date.now() + budgetMs;
+  // Candidates: ACTIVE ads without copy first, then ads with recent spend
+  // (DCO breakdown rows or ad-level rows) without copy, then ACTIVE ads
+  // whose copy is over a week old (creatives get swapped under a running
+  // ad). Never archived ads without recent spend.
+  const candidates = await query<{ entity_id: string }>(
+    `SELECT e.entity_id
+     FROM meta_entities e
+     LEFT JOIN meta_ad_copy c ON c.account_id = e.account_id AND c.ad_id = e.entity_id
+     WHERE e.account_id = $1 AND e.level = 'ad' AND (
+       (c.ad_id IS NULL AND (
+          e.effective_status = 'ACTIVE'
+          OR EXISTS (SELECT 1 FROM meta_asset_breakdown_daily b WHERE b.account_id = e.account_id AND b.ad_id = e.entity_id AND b.date >= current_date - $2::int AND b.spend > 0)
+          OR EXISTS (SELECT 1 FROM meta_daily_insights d WHERE d.account_id = e.account_id AND d.level = 'ad' AND d.entity_id = e.entity_id AND d.date >= current_date - $2::int AND d.spend > 0)
+       ))
+       OR (c.ad_id IS NOT NULL AND e.effective_status = 'ACTIVE' AND c.fetched_at < now() - interval '7 days')
+     )
+     ORDER BY CASE WHEN c.ad_id IS NULL AND e.effective_status = 'ACTIVE' THEN 0 WHEN c.ad_id IS NULL THEN 1 ELSE 2 END, e.updated_at DESC
+     LIMIT 2500`,
+    [accountId, MARKETER_HISTORY_DAYS]
+  );
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAdCopy:candidates', count: candidates.length }));
+  if (candidates.length === 0) return { fetched: 0, skipped: 0 };
+
+  const { rows, skipped } = await fetchIdsBatched<AdCopyResp>(
+    candidates.map(c => c.entity_id),
+    'id,campaign{id},adset{id},creative{id,asset_feed_spec{bodies,titles,descriptions,link_urls,call_to_action_types},object_story_spec,body,title}',
+    token, deadline
+  );
+
+  const texts = new Map<string, { kind: CopyKind; hash: string; text: string }>();
+  for (const batch of chunkArrayGeneric(rows.filter(r => !!r.id), DB_BATCH_SIZE)) {
+    const extracted = batch.map(r => extractCopy(r.creative));
+    for (const ex of extracted) {
+      for (const v of ex.bodies) texts.set(`body:${v.hash}`, { kind: 'body', hash: v.hash, text: v.text });
+      for (const v of ex.titles) texts.set(`title:${v.hash}`, { kind: 'title', hash: v.hash, text: v.text });
+      for (const v of ex.descriptions) texts.set(`description:${v.hash}`, { kind: 'description', hash: v.hash, text: v.text });
+    }
+    await query(
+      `INSERT INTO meta_ad_copy (account_id, ad_id, campaign_id, adset_id, creative_id, is_dco, bodies, titles, descriptions, link_urls, cta_types,
+                                 primary_body_hash, primary_title_hash, primary_description_hash, fetched_at)
+       SELECT $1, ad_id, campaign_id, adset_id, creative_id, is_dco, bodies::jsonb, titles::jsonb, descriptions::jsonb, link_urls::jsonb,
+              CASE WHEN cta_types = '' THEN '{}'::text[] ELSE string_to_array(cta_types, ',') END,
+              NULLIF(pb, ''), NULLIF(pt, ''), NULLIF(pd, ''), now()
+       FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::boolean[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[], $13::text[], $14::text[])
+         AS t(ad_id, campaign_id, adset_id, creative_id, is_dco, bodies, titles, descriptions, link_urls, cta_types, pb, pt, pd)
+       ON CONFLICT (account_id, ad_id) DO UPDATE SET
+         campaign_id = EXCLUDED.campaign_id, adset_id = EXCLUDED.adset_id, creative_id = EXCLUDED.creative_id, is_dco = EXCLUDED.is_dco,
+         bodies = EXCLUDED.bodies, titles = EXCLUDED.titles, descriptions = EXCLUDED.descriptions, link_urls = EXCLUDED.link_urls, cta_types = EXCLUDED.cta_types,
+         primary_body_hash = EXCLUDED.primary_body_hash, primary_title_hash = EXCLUDED.primary_title_hash, primary_description_hash = EXCLUDED.primary_description_hash,
+         fetched_at = now()`,
+      [
+        accountId,
+        batch.map(r => r.id!), batch.map(r => r.campaign?.id ?? null), batch.map(r => r.adset?.id ?? null), batch.map(r => r.creative?.id ?? null),
+        extracted.map(e => e.isDco),
+        extracted.map(e => JSON.stringify(e.bodies)), extracted.map(e => JSON.stringify(e.titles)), extracted.map(e => JSON.stringify(e.descriptions)),
+        extracted.map(e => JSON.stringify(e.linkUrls)), extracted.map(e => e.ctaTypes.join(',')),
+        extracted.map(e => e.bodies[0]?.hash ?? ''), extracted.map(e => e.titles[0]?.hash ?? ''), extracted.map(e => e.descriptions[0]?.hash ?? ''),
+      ]
+    );
+  }
+  await upsertCopyTexts(Array.from(texts.values()));
+  await query(`UPDATE agency_meta_sync_state SET copy_synced_at = now(), updated_at = now() WHERE account_id = $1`, [accountId]).catch(() => {});
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAdCopy:done', fetched: rows.length, skipped: skipped.length, texts: texts.size }));
+  return { fetched: rows.length, skipped: skipped.length };
+}
+
+async function upsertCopyTexts(items: { kind: CopyKind; hash: string; text: string }[]): Promise<void> {
+  for (const batch of chunkArrayGeneric(items, DB_BATCH_SIZE)) {
+    await query(
+      `INSERT INTO meta_copy_texts (kind, text_hash, text, first_seen, last_seen)
+       SELECT kind, text_hash, text, now(), now() FROM unnest($1::text[], $2::text[], $3::text[]) AS t(kind, text_hash, text)
+       ON CONFLICT (kind, text_hash) DO UPDATE SET last_seen = now()`,
+      [batch.map(b => b.kind), batch.map(b => b.hash), batch.map(b => b.text)]
+    );
+  }
+}
+
+// ── Copy-variant breakdowns (body_asset / title_asset / description_asset) ─
+const COPY_BREAKDOWN_KINDS: { breakdown: BreakdownKind; kind: CopyKind }[] = [
+  { breakdown: 'body_asset', kind: 'body' },
+  { breakdown: 'title_asset', kind: 'title' },
+  { breakdown: 'description_asset', kind: 'description' },
+];
+
+export async function syncCopyBreakdowns(accountId: string, token: string, yesterday: string, budgetMs: number = COPY_BREAKDOWN_BUDGET_MS): Promise<void> {
+  const start = Date.now();
+  const deadline = start + budgetMs;
+  const floorDate = addDays(yesterday, -MARKETER_HISTORY_DAYS);
+  const resultsRules = await getResultsRules(accountId);
+
+  const runRange = async (range: { since: string; until: string; kind: 'topup' | 'backfill' }): Promise<{ persisted: string | null; reachedSince: boolean }> => {
+    const chunksAscending = chunkRange(range.since, range.until, CHUNK_DAYS);
+    const chunks = range.kind === 'backfill' ? [...chunksAscending].reverse() : chunksAscending;
+    if (chunks.length === 0) return { persisted: null, reachedSince: false };
+    const completed = new Array(chunks.length).fill(false);
+    const gapped = new Array(chunks.length).fill(false);
+    const kindsRemaining = new Array(chunks.length).fill(COPY_BREAKDOWN_KINDS.length);
+    let persistedIdx = -1;
+    let persistedValue: string | null = null;
+    const persistUpTo = async (idx: number) => {
+      if (idx <= persistedIdx) return;
+      persistedIdx = idx;
+      if (range.kind === 'backfill') {
+        persistedValue = chunks[idx].since;
+        await query(`UPDATE agency_meta_sync_state SET copy_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, persistedValue]);
+      } else {
+        // Top-up persists per completed prefix chunk too (mirrors
+        // runRangeToCompletion's last_success_until) — the first run's
+        // top-up spans the whole 90-day floor and rarely fits one budget,
+        // so without this it restarted from the floor every run.
+        persistedValue = chunks[idx].until;
+        await query(`UPDATE agency_meta_sync_state SET copy_topup_until = $2, updated_at = now() WHERE account_id = $1`, [accountId, persistedValue]);
+      }
+    };
+
+    // Same archived-campaign quirk as the image/video breakdowns: a
+    // filtered request silently drops ARCHIVED campaigns' ads, so those
+    // come from an unfiltered pass with already-covered ads removed.
+    const allRangeCampaignIds = await campaignIdsForAccount(accountId, { since: range.since, until: range.until });
+    const archivedCampaignIdSet = new Set(
+      (await query<{ entity_id: string }>(`SELECT entity_id FROM meta_entities WHERE account_id = $1 AND level = 'campaign' AND effective_status = 'ARCHIVED'`, [accountId])).map(r => r.entity_id)
+    );
+    const rangeCampaignIds = allRangeCampaignIds.filter(id => !archivedCampaignIdSet.has(id));
+
+    const units: { breakdown: BreakdownKind; kind: CopyKind; chunkIdx: number; chunk: { since: string; until: string } }[] = [];
+    for (let i = 0; i < chunks.length; i++) for (const k of COPY_BREAKDOWN_KINDS) units.push({ ...k, chunkIdx: i, chunk: chunks[i] });
+
+    await runPooled(units, SYNC_CONCURRENCY, async ({ breakdown, kind, chunkIdx, chunk }) => {
+      const { rows, hadGaps } = await fetchBreakdownChunkWithRowCapFallback(accountId, token, breakdown, chunk.since, chunk.until, rangeCampaignIds, deadline);
+      if (hadGaps) gapped[chunkIdx] = true;
+      if (archivedCampaignIdSet.size > 0) {
+        const archived = await fetchArchivedBreakdownChunkUnfiltered(accountId, token, breakdown, chunk.since, chunk.until, deadline);
+        const covered = new Set(rows.map(r => r.ad_id).filter(Boolean));
+        rows.push(...archived.rows.filter(r => r.ad_id && !covered.has(r.ad_id)));
+        if (archived.hadGaps) gapped[chunkIdx] = true;
+      }
+
+      interface Prepared { hash: string; text: string; adId: string; date: string; spend: number; impressions: number; linkClicks: number; results: number; reach: number; campaignName: string }
+      const byKey = new Map<string, Prepared>();
+      for (const r of rows) {
+        const asset = breakdown === 'body_asset' ? r.body_asset : breakdown === 'title_asset' ? r.title_asset : r.description_asset;
+        const text = asset?.text ? normalizeCopyText(asset.text) : '';
+        if (!text || !r.ad_id || !r.date_start) continue;
+        const hash = copyHash(text);
+        const key = `${hash}|${r.ad_id}|${r.date_start}`;
+        const spend = parseFloat(r.spend || '0') || 0;
+        const impressions = parseInt(r.impressions || '0', 10) || 0;
+        const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
+        const campaignName = r.campaign_name || '';
+        const results = resultsRules
+          ? resultsUnderRule(r.actions, resultsRules.byAd.get(r.ad_id) || 'lead')
+          : resolveResultsFromActions(r.actions, campaignName);
+        const reach = parseInt(r.reach || '0', 10) || 0;
+        const ex = byKey.get(key);
+        if (ex) { ex.spend += spend; ex.impressions += impressions; ex.linkClicks += linkClicks; ex.results += results; ex.reach = Math.max(ex.reach, reach); }
+        else byKey.set(key, { hash, text, adId: r.ad_id, date: r.date_start, spend, impressions, linkClicks, results, reach, campaignName });
+      }
+      const prepared = Array.from(byKey.values());
+      const textsByHash = new Map<string, string>();
+      for (const p of prepared) textsByHash.set(p.hash, p.text);
+      await upsertCopyTexts(Array.from(textsByHash.entries()).map(([hash, text]) => ({ kind, hash, text })));
+      for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
+        await query(
+          `INSERT INTO meta_copy_breakdown_daily (account_id, kind, text_hash, ad_id, date, spend, impressions, link_clicks, results, reach, campaign_name)
+           SELECT $1, $2, text_hash, ad_id, date::date, spend, impressions, link_clicks, results, reach, campaign_name
+           FROM unnest($3::text[], $4::text[], $5::text[], $6::numeric[], $7::bigint[], $8::bigint[], $9::bigint[], $10::bigint[], $11::text[])
+             AS t(text_hash, ad_id, date, spend, impressions, link_clicks, results, reach, campaign_name)
+           ON CONFLICT (account_id, kind, text_hash, ad_id, date) DO UPDATE SET
+             spend = EXCLUDED.spend, impressions = EXCLUDED.impressions, link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results,
+             reach = EXCLUDED.reach, campaign_name = EXCLUDED.campaign_name`,
+          [accountId, kind, batch.map(p => p.hash), batch.map(p => p.adId), batch.map(p => p.date), batch.map(p => p.spend), batch.map(p => p.impressions), batch.map(p => p.linkClicks), batch.map(p => p.results), batch.map(p => p.reach), batch.map(p => p.campaignName)]
+        );
+      }
+
+      kindsRemaining[chunkIdx]--;
+      if (kindsRemaining[chunkIdx] === 0) {
+        completed[chunkIdx] = true;
+        let cursor = persistedIdx + 1;
+        while (cursor < completed.length && completed[cursor] && !gapped[cursor]) cursor++;
+        if (cursor > persistedIdx + 1) await persistUpTo(cursor - 1);
+      }
+    }, deadline);
+    return { persisted: persistedValue, reachedSince: chunks.length > 0 && completed.every(c => c) && gapped.every(g => !g) };
+  };
+
+  const [state] = await query<{ copy_earliest_synced: string | null; copy_newest_synced: string | null; copy_backfill_complete: boolean; copy_topup_until: string | null }>(
+    `SELECT copy_earliest_synced, copy_newest_synced, copy_backfill_complete, copy_topup_until FROM agency_meta_sync_state WHERE account_id = $1`, [accountId]
+  );
+  let earliest = state?.copy_earliest_synced ?? null;
+  let newest = state?.copy_newest_synced ?? null;
+  let complete = state?.copy_backfill_complete ?? false;
+  // The floor moves forward a day at a time; a backfill that finished
+  // against an older floor stays complete (the walk only ever needs to
+  // reach the CURRENT floor).
+  if (complete && earliest && daysBetween(earliest, floorDate) > 0) earliest = floorDate;
+  let topUpDone = false;
+  let guard = 8;
+  while (guard-- > 0) {
+    const ranges = buildSyncRanges(floorDate, yesterday, state?.copy_topup_until ?? null, newest, earliest, complete);
+    const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
+    const backfill = ranges.find(r => r.kind === 'backfill');
+    if (!topUp && !backfill) break;
+    if (topUp) {
+      topUpDone = true;
+      await runRange(topUp); // watermark (copy_topup_until) advances per completed chunk inside
+    }
+    if (!backfill) continue;
+    if (Date.now() > deadline) break;
+    const result = await runRange(backfill);
+    if (result.persisted) earliest = result.persisted;
+    if (result.reachedSince) {
+      newest = backfill.since === floorDate ? floorDate : addDays(backfill.since, -1);
+      await query(`UPDATE agency_meta_sync_state SET copy_newest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, newest]);
+      if (backfill.since === floorDate) {
+        complete = true; earliest = floorDate;
+        await query(`UPDATE agency_meta_sync_state SET copy_backfill_complete = true, copy_earliest_synced = $2, updated_at = now() WHERE account_id = $1`, [accountId, floorDate]);
+      }
+    } else {
+      break;
+    }
+  }
+  console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncCopyBreakdowns:done', ms: Date.now() - start, complete, newest, earliest }));
+}
+
+// Targeting-only run (admin/marketer backfill button): targeting + recent
+// ad-set and ad insights with the whole 10-minute budget.
+export async function syncAccountTargetingOnly(accountId: string): Promise<{ error: string | null; fetched?: number }> {
+  const claimed = await claimSync(accountId);
+  if (!claimed) return { error: 'Sync already in progress' };
+  try {
+    const token = await tokenForAccountId(accountId);
+    const yesterday = await yesterdayForAccount(accountId, token);
+    const deadline = Date.now() + TARGETING_ONLY_BUDGET_MS;
+    // Insights first: the targeting candidate query uses recent ad-set
+    // spend to decide which archived ad sets are still worth fetching.
+    await syncRecentInsightsLevel(accountId, token, 'adset', yesterday, deadline);
+    await syncRecentInsightsLevel(accountId, token, 'ad', yesterday, deadline);
+    const r = await syncAdsetTargeting(accountId, token, Math.max(30_000, deadline - Date.now()));
+    await finishSync(accountId, { success: true });
+    return { error: null, fetched: r.fetched };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Targeting sync failed';
+    await finishSync(accountId, { success: false, error: message });
+    return { error: message };
+  }
+}
+
+// Copy-only run: per-ad copy + copy-variant breakdowns with the whole budget.
+export async function syncAccountCopyOnly(accountId: string): Promise<{ error: string | null }> {
+  const claimed = await claimSync(accountId);
+  if (!claimed) return { error: 'Sync already in progress' };
+  try {
+    const token = await tokenForAccountId(accountId);
+    const yesterday = await yesterdayForAccount(accountId, token);
+    const start = Date.now();
+    await syncAdCopy(accountId, token, Math.floor(COPY_ONLY_BUDGET_MS * 0.3));
+    await syncCopyBreakdowns(accountId, token, yesterday, Math.max(60_000, start + COPY_ONLY_BUDGET_MS - Date.now()));
+    await finishSync(accountId, { success: true });
+    return { error: null };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Copy sync failed';
+    await finishSync(accountId, { success: false, error: message });
+    return { error: message };
+  }
+}
+
 // ── Public entry points ──────────────────────────────────────────────────
 export async function syncAccount(accountId: string): Promise<SyncAccountResult> {
   const claimed = await claimSync(accountId);
@@ -2177,6 +2755,19 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'entities', error: firstError }));
     }
 
+    // Marketer module: ad set targeting + recent ad-set/ad daily rows.
+    // Needs the entity rows above; independent of insights/creatives.
+    try {
+      const yesterday = await yesterdayForAccount(accountId, token);
+      const deadline = Date.now() + TARGETING_BUDGET_MS;
+      await syncRecentInsightsLevel(accountId, token, 'adset', yesterday, deadline);
+      await syncRecentInsightsLevel(accountId, token, 'ad', yesterday, deadline);
+      await syncAdsetTargeting(accountId, token, Math.max(20_000, deadline - Date.now()));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Targeting sync failed';
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'targeting', error: message }));
+    }
+
     console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'syncAccount:insights:start' }));
     try {
       const result = await syncInsights(accountId, token);
@@ -2201,6 +2792,21 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
     } catch (err: unknown) {
       firstError = firstError ?? (err instanceof Error ? err.message : 'Creatives sync failed');
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'creatives', error: firstError }));
+    }
+
+    // Marketer module: per-ad copy, then copy-variant breakdowns. Failures
+    // here are logged but never fail the run — the core dashboards don't
+    // read these tables.
+    try {
+      await syncAdCopy(accountId, token);
+    } catch (err: unknown) {
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'copy', error: err instanceof Error ? err.message : String(err) }));
+    }
+    try {
+      const yesterday = await yesterdayForAccount(accountId, token);
+      await syncCopyBreakdowns(accountId, token, yesterday);
+    } catch (err: unknown) {
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'copyBreakdowns', error: err instanceof Error ? err.message : String(err) }));
     }
 
     await finishSync(accountId, { success: !firstError, error: firstError ?? undefined });
