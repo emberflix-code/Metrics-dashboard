@@ -2,6 +2,7 @@ import { query } from './db';
 import { decrypt } from './crypto';
 import { resolveResultsFromActions } from './meta';
 import { computePhash } from './phash';
+import sharp from 'sharp';
 import { fetchMetaKpiSheetRows, type MetaKpiSheetRow } from './metaKpiSheet';
 import { SheetError } from './sheets';
 import { parseOfferFromCampaignName } from './offers';
@@ -72,6 +73,17 @@ const THUMBNAIL_BYTES_BACKFILL_BUDGET_MS = 120_000;
 // to pick up the rare case where Meta's underlying creative image changes
 // under a still-running ad.
 const THUMBNAIL_BYTES_STALE_DAYS = 30;
+// Meta's own link-preview/creative thumbnail URLs (link_data.picture, a
+// video's poster `picture` field) are frequently tiny — 64x64 for images,
+// 160-360px for video posters — because they're built for Ads Manager's
+// list view, not for a full-size crop. deriveAssets() has no way to know
+// this in advance (Meta doesn't expose width/height on those fields), so
+// this block re-resolves anything that comes back narrower than this via
+// adimages (images) or /{video}/thumbnails (videos), the same fix
+// _preview_upgrade.ts applies as a one-off backfill — folded in here so a
+// newly-synced creative never lands low-res in the first place instead of
+// needing that script re-run periodically.
+const THUMBNAIL_MIN_WIDTH = 600;
 
 export interface SyncAccountResult {
   accountId: string;
@@ -1218,6 +1230,66 @@ function deriveAssets(adId: string, creative: AdCreativeResp['creative']): Asset
   }];
 }
 
+// Re-resolves a low-res asset's thumbnail URL to the largest copy Meta
+// actually has — images via adimages (returns the original upload),
+// videos via /{id}/thumbnails (picks the widest frame Meta offers,
+// falling back to the plain `picture` field for a cross-account video
+// where /thumbnails 403s). Returns null when Meta has nothing larger than
+// what's already stored, so the caller keeps the original URL. Same
+// sources _preview_upgrade.ts uses for its one-off backfill.
+//
+// thumb:/creative: keys (DCO/Advantage+ ads whose top-level creative
+// exposes no image_hash — see the asset_feed_spec promotion comment a few
+// hundred lines below, same root cause) can't be looked up by hash at
+// all, so this walks a representative ad_id back to its creative and
+// pulls the real hash from asset_feed_spec.images[] instead, then
+// re-runs the image: lookup with that recovered hash. Only reachable
+// here for OLD rows written before that promotion existed — a currently
+// syncing ad now gets promoted to image:<hash> before this function is
+// ever called for it (see thumbOnlyCreativeIds below).
+async function resolveFullResThumbnail(
+  accountId: string, token: string, assetKey: string, currentWidth: number
+): Promise<string | null> {
+  if (assetKey.startsWith('image:')) {
+    const hash = assetKey.slice(6);
+    const u = `${GRAPH}/act_${accountId}/adimages?fields=hash,url,width&hashes=${encodeURIComponent(JSON.stringify([hash]))}&access_token=${token}`;
+    const json = await (await fetch(u)).json() as { data?: { hash?: string; url?: string; width?: number }[]; error?: unknown };
+    const hit = json.data?.find(d => d.hash === hash);
+    if (hit?.url && (hit.width || 0) > currentWidth) return hit.url;
+    return null;
+  }
+  if (assetKey.startsWith('video:')) {
+    const videoId = assetKey.slice(6);
+    const t = await (await fetch(`${GRAPH}/${videoId}/thumbnails?fields=uri,width&access_token=${token}`)).json() as { data?: { uri?: string; width?: number }[]; error?: unknown };
+    let best: { uri: string; width: number } | null = null;
+    for (const th of t.data || []) if (th.uri && (th.width || 0) > (best?.width || 0)) best = { uri: th.uri, width: th.width || 0 };
+    if (best && best.width > currentWidth) return best.uri;
+    return null;
+  }
+  if (assetKey.startsWith('thumb:') || assetKey.startsWith('creative:')) {
+    // meta_creative_asset_ad_map, not meta_asset_breakdown_daily — the
+    // breakdown table only has a row once an ad has recorded DCO
+    // breakdown spend in some synced window, while the ad-map is written
+    // for every asset deriveAssets() ever produces (see the ad-map upsert
+    // further down in this file), so it's the one guaranteed to have this
+    // asset's ad_id even for a low/no-spend or older ad.
+    const adRow = await query<{ ad_id: string }>(
+      `SELECT ad_id FROM meta_creative_asset_ad_map WHERE account_id = $1 AND asset_key = $2 LIMIT 1`,
+      [accountId, assetKey]
+    );
+    const adId = adRow[0]?.ad_id;
+    if (!adId) return null;
+    const adJson = await (await fetch(`${GRAPH}/${adId}?fields=creative{id}&access_token=${token}`)).json() as { creative?: { id?: string }; error?: unknown };
+    const creativeId = adJson.creative?.id;
+    if (!creativeId) return null;
+    const feedJson = await (await fetch(`${GRAPH}/${creativeId}?fields=asset_feed_spec&access_token=${token}`)).json() as { asset_feed_spec?: { images?: { hash?: string }[] } };
+    const hash = feedJson.asset_feed_spec?.images?.[0]?.hash;
+    if (!hash || !/^[a-f0-9]{20,}$/i.test(hash)) return null;
+    return resolveFullResThumbnail(accountId, token, `image:${hash}`, currentWidth);
+  }
+  return null;
+}
+
 interface BreakdownRow {
   ad_id?: string; date_start?: string; spend?: string; impressions?: string; inline_link_clicks?: string; reach?: string;
   campaign_name?: string;
@@ -1432,6 +1504,18 @@ async function syncCreatives(
   // asset_feed_spec.images[], identical to the thumb: case above — same
   // root cause (DCO's real image data lives only in asset_feed_spec), same
   // fix, just a different pre-promotion assetKey prefix to catch.
+  //
+  // A `thumb:`/`creative:` asset can also turn out to be a video, not an
+  // image: an Advantage+ Placements ad whose asset_feed_spec has no
+  // `images[]` at all, only `videos[]` — deriveAssets never sees
+  // object_story_spec.video_data.video_id for these (that field is unset;
+  // the real video only exists inside asset_feed_spec), so it falls
+  // through to the thumbnail_url branch and gets stored as a tiny video
+  // poster frame mislabeled type='image'. Confirmed on Omega: a low-res
+  // "image" row's stored thumbnail_url was byte-identical to
+  // asset_feed_spec.videos[0].thumbnail_url. Checked after images[] so an
+  // asset_feed_spec that legitimately has both never gets demoted to
+  // video — images[] is the more common/intentional case.
   const creativeIdByAdId = new Map<string, string>();
   for (const ad of ads) if (ad.id && ad.creative?.id) creativeIdByAdId.set(ad.id, ad.creative.id);
   const thumbOnlyCreativeIds = new Set<string>();
@@ -1446,39 +1530,58 @@ async function syncCreatives(
   // hash) already wrote a "thumb:..."/"creative:..." row + ad-map entries
   // for these ads. Promoting assetKey in-memory here does NOT touch that
   // old row, so without explicit cleanup the same ad ends up double-mapped
-  // to both the stale key and the new image:<hash> key (double-counted
-  // spend/leads, and the dashboard groups by whichever row it meets first
-  // — the stale one, in practice). Collected here and deleted after the
-  // new rows are written below.
+  // to both the stale key and the new image:<hash>/video:<id> key
+  // (double-counted spend/leads, and the dashboard groups by whichever row
+  // it meets first — the stale one, in practice). Collected here and
+  // deleted after the new rows are written below.
   const promotedFromKeys = new Set<string>();
   if (thumbOnlyCreativeIds.size > 0) {
-    const hashByCreativeId = new Map<string, string>();
+    const promotionByCreativeId = new Map<string, { kind: 'image'; hash: string } | { kind: 'video'; videoId: string; thumbnail: string | null }>();
     await Promise.all(Array.from(thumbOnlyCreativeIds).map(async cid => {
       try {
-        const u = `${GRAPH}/${cid}?fields=asset_feed_spec&access_token=${token}`;
+        const u = `${GRAPH}/${cid}?fields=asset_feed_spec{images,videos}&access_token=${token}`;
         const res = await fetch(u);
-        const json = await res.json() as { asset_feed_spec?: { images?: { hash?: string }[] } };
+        const json = await res.json() as { asset_feed_spec?: { images?: { hash?: string }[]; videos?: { video_id?: string; thumbnail_url?: string }[] } };
         const firstHash = json.asset_feed_spec?.images?.[0]?.hash;
-        if (firstHash && /^[a-f0-9]{20,}$/i.test(firstHash)) hashByCreativeId.set(cid, firstHash);
+        if (firstHash && /^[a-f0-9]{20,}$/i.test(firstHash)) {
+          promotionByCreativeId.set(cid, { kind: 'image', hash: firstHash });
+          return;
+        }
+        const firstVideo = json.asset_feed_spec?.videos?.[0];
+        if (firstVideo?.video_id) {
+          promotionByCreativeId.set(cid, { kind: 'video', videoId: firstVideo.video_id, thumbnail: firstVideo.thumbnail_url || null });
+        }
       } catch { /* leave those ads' assets as thumb:/creative: */ }
     }));
-    if (hashByCreativeId.size > 0) {
+    if (promotionByCreativeId.size > 0) {
       for (const [adId, derivedList] of Array.from(derivedByAdId.entries())) {
         const cid = creativeIdByAdId.get(adId);
-        const hash = cid ? hashByCreativeId.get(cid) : undefined;
-        if (!hash) continue;
+        const promotion = cid ? promotionByCreativeId.get(cid) : undefined;
+        if (!promotion) continue;
         for (const d of derivedList) {
           if (d.assetKey.startsWith('thumb:') || d.assetKey.startsWith('creative:')) {
             promotedFromKeys.add(d.assetKey);
-            d.assetKey = `image:${hash}`;
-            // thumb: rows were already type 'image' (CASE 4), so this was a
-            // no-op for them; creative: rows are type 'unknown' at their
-            // deriveAssets source (the last-resort fallback) and must be
-            // corrected here too, or they'd upsert as type='unknown' with a
-            // real image hash/thumbnail — wrong type breaks anything that
-            // branches on `.type === 'image'` downstream (e.g. the
-            // phash-eligibility check a few dozen lines below).
-            d.type = 'image';
+            if (promotion.kind === 'image') {
+              d.assetKey = `image:${promotion.hash}`;
+              // thumb: rows were already type 'image' (CASE 4), so this was a
+              // no-op for them; creative: rows are type 'unknown' at their
+              // deriveAssets source (the last-resort fallback) and must be
+              // corrected here too, or they'd upsert as type='unknown' with a
+              // real image hash/thumbnail — wrong type breaks anything that
+              // branches on `.type === 'image'` downstream (e.g. the
+              // phash-eligibility check a few dozen lines below).
+              d.type = 'image';
+            } else {
+              d.assetKey = `video:${promotion.videoId}`;
+              d.type = 'video';
+              d.videoId = promotion.videoId;
+              // Keep whatever thumbnail deriveAssets already found unless
+              // asset_feed_spec offers one — the video-enrichment pass and
+              // the width-check in the thumbnail-bytes backfill below both
+              // upgrade this to a full-res /thumbnails frame regardless, so
+              // this only matters for the gap between now and that pass.
+              if (promotion.thumbnail) d.thumbnail = promotion.thumbnail;
+            }
           }
         }
       }
@@ -1871,10 +1974,35 @@ async function syncCreatives(
     for (const row of thumbnailBytesCandidates) {
       if (Date.now() > thumbnailBytesDeadline) break;
       try {
-        const res = await fetch(row.thumbnail);
+        let sourceUrl = row.thumbnail;
+        const res = await fetch(sourceUrl);
         if (!res.ok) continue;
-        const bytes = Buffer.from(await res.arrayBuffer());
-        const contentType = res.headers.get('content-type') || 'image/jpeg';
+        let bytes = Buffer.from(await res.arrayBuffer());
+        let contentType = res.headers.get('content-type') || 'image/jpeg';
+
+        // If what we just downloaded is narrower than THUMBNAIL_MIN_WIDTH,
+        // it's almost certainly Meta's small list-view preview (see
+        // THUMBNAIL_MIN_WIDTH's comment) rather than a genuinely tiny ad
+        // creative — try to swap in the largest copy Meta has before this
+        // row's bytes get persisted, so a freshly-synced creative doesn't
+        // land low-res the way it did before this check existed.
+        const width = (await sharp(bytes).metadata().catch(() => null))?.width || 0;
+        if (width > 0 && width < THUMBNAIL_MIN_WIDTH) {
+          const larger = await resolveFullResThumbnail(accountId, token, row.asset_key, width).catch(() => null);
+          if (larger) {
+            const res2 = await fetch(larger);
+            if (res2.ok) {
+              const bytes2 = Buffer.from(await res2.arrayBuffer());
+              const width2 = (await sharp(bytes2).metadata().catch(() => null))?.width || 0;
+              if (width2 > width) {
+                sourceUrl = larger;
+                bytes = bytes2;
+                contentType = res2.headers.get('content-type') || contentType;
+              }
+            }
+          }
+        }
+
         // Compute a phash for videos too, from the downloaded poster/thumbnail
         // frame — hashes the poster IMAGE, not the video stream itself, so
         // this only merges two video uploads when Meta auto-selected a
@@ -1885,10 +2013,10 @@ async function syncCreatives(
         const hash = await computePhash(bytes);
         await query(
           `UPDATE meta_creative_assets
-           SET thumbnail_bytes = $3, thumbnail_content_type = $4, thumbnail_bytes_fetched_at = now(),
-               phash = COALESCE($5, phash)
+           SET thumbnail = $3, thumbnail_bytes = $4, thumbnail_content_type = $5, thumbnail_bytes_fetched_at = now(),
+               phash = COALESCE($6, phash)
            WHERE account_id = $1 AND asset_key = $2`,
-          [accountId, row.asset_key, bytes, contentType, hash]
+          [accountId, row.asset_key, sourceUrl, bytes, contentType, hash]
         );
       } catch { /* leave bytes/phash as-is, retried next sync */ }
     }
