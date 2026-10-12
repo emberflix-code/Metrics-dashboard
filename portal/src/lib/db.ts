@@ -726,6 +726,23 @@ pool.query(`CREATE TABLE IF NOT EXISTS marketer_alert_dismissals (
   snooze_until  TIMESTAMPTZ
 )`).catch(() => {});
 
+// Shared reports (migration 035): a standalone HTML report (e.g. the Omega
+// Flash Sale review) served at /report/<token> to anyone holding the link.
+// The token belongs to the report alone — unlike users.auto_login_token it
+// never signs anyone in, so sharing it exposes that one page and nothing else.
+pool.query(`CREATE TABLE IF NOT EXISTS shared_reports (
+  id          SERIAL PRIMARY KEY,
+  client_id   UUID REFERENCES clients(id) ON DELETE CASCADE,
+  slug        TEXT NOT NULL,
+  title       TEXT NOT NULL,
+  html        TEXT NOT NULL,
+  token       TEXT NOT NULL UNIQUE,
+  revoked_at  TIMESTAMPTZ,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (client_id, slug)
+)`).catch(() => {});
+
 export async function query<T = Record<string, unknown>>(
   sql: string,
   params?: unknown[]
