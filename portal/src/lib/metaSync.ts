@@ -1504,6 +1504,34 @@ async function syncCreatives(
   adsUrl.searchParams.set('access_token', token);
   const ads = await fetchMetaWithRetry<AdCreativeResp>(adsUrl);
 
+  // Zero-cost pass: meta_asset_breakdown_daily already carries the correct
+  // (asset_key, ad_id) pair with real Meta-reported spend for every DCO
+  // candidate — no Graph API call needed to recover it, just a direct SQL
+  // insert, as long as the asset_key already has a meta_creative_assets row
+  // (from the breakdown-orphan thumbnail backfill or this same ad's other
+  // assets resolving below). Found 2026-10-13: the ad_id-level backfill
+  // below only catches an ad with ZERO ad-map rows at all — a DCO ad that
+  // already resolved e.g. 1 of its 6 candidate images keeps its other 5
+  // invisible forever, since `m.ad_id IS NULL` is false the moment even one
+  // asset resolves. Confirmed account-wide: 70,882 (asset_key, ad_id) pairs
+  // missing this way across 10 accounts, ~$1.49M spend, mostly 6-asset DCO
+  // ads. weight=1 per row matches the existing derivation convention (a
+  // non-carousel ad with N mapped assets already carries weight=1.0 on
+  // EACH, not a 1/N split), so this reproduces exactly what the API-walking
+  // path below would have written had it reached these ads. Unindexed-join
+  // cost only (no external call), so no time budget needed — runs to
+  // completion every sync.
+  await query(
+    `INSERT INTO meta_creative_asset_ad_map (account_id, asset_key, ad_id, weight)
+     SELECT DISTINCT bd.account_id, bd.asset_key, bd.ad_id, 1
+     FROM meta_asset_breakdown_daily bd
+     JOIN meta_creative_assets a ON a.account_id = bd.account_id AND a.asset_key = bd.asset_key
+     LEFT JOIN meta_creative_asset_ad_map m ON m.account_id = bd.account_id AND m.asset_key = bd.asset_key AND m.ad_id = bd.ad_id
+     WHERE bd.account_id = $1 AND m.asset_key IS NULL
+     ON CONFLICT (account_id, asset_key, ad_id) DO NOTHING`,
+    [accountId]
+  );
+
   // Backfill pass: the ACTIVE/PAUSED/CAMPAIGN_PAUSED/ADSET_PAUSED filter
   // above misses ads that are now DELETED/ARCHIVED — on a long-running
   // account (Omega: running since 2023) that's most of its history, so
@@ -1521,13 +1549,19 @@ async function syncCreatives(
   // insights too) for the same run's budget. The LEFT JOIN naturally
   // shrinks on its own each sync as resolved ads gain a map entry, so a
   // small bite every run converges over time without ever dominating one.
+  // ORDER BY spend DESC (added 2026-10-13, alongside the zero-cost pass
+  // above): the un-ordered LIMIT let the same un-resolvable ad_ids occupy
+  // every run's window — the same "dead items starve good ones" pattern
+  // already fixed once for the orphaned-image-hash backfill.
   const AD_METADATA_BACKFILL_LIMIT = 500;
   const AD_METADATA_BACKFILL_BUDGET_MS = 45_000;
   const oldAdIdRows = await query<{ ad_id: string }>(
-    `SELECT DISTINCT bd.ad_id
+    `SELECT bd.ad_id, SUM(bd.spend) total_spend
      FROM meta_asset_breakdown_daily bd
      LEFT JOIN meta_creative_asset_ad_map m ON m.account_id = bd.account_id AND m.ad_id = bd.ad_id
      WHERE bd.account_id = $1 AND m.ad_id IS NULL
+     GROUP BY bd.ad_id
+     ORDER BY total_spend DESC
      LIMIT ${AD_METADATA_BACKFILL_LIMIT}`,
     [accountId]
   );
@@ -2457,6 +2491,17 @@ async function syncCreatives(
 // like entities/insights/creatives, so a slow one can't starve the others.
 const TARGETING_BUDGET_MS = 60_000;
 const TARGETING_ONLY_BUDGET_MS = 10 * 60_000;
+// Ad-level recent insights get their own budget, separate from
+// TARGETING_BUDGET_MS below — found 2026-10-13: both 'adset' and 'ad'
+// syncRecentInsightsLevel calls shared that one 60s window ahead of
+// syncAdsetTargeting, so on a large account 'adset' alone could burn the
+// whole budget and leave 'ad' no time to advance its watermark at all.
+// Confirmed in prod: Alloy BM2's ad-level data sat 53+ days stale while
+// campaign-level insights stayed current, because Creatives v3 (ad-level
+// dependent) isn't part of the marketer-module features this budget was
+// originally sized for. Runs first, before the shared-budget block, so it
+// can never be starved by the others.
+const AD_LEVEL_INSIGHTS_BUDGET_MS = 90_000;
 const COPY_BUDGET_MS = 60_000;
 // 4 min: at 90s a large account (Alloy BM2) advanced ~one 3-day chunk per daily run and never caught up.
 const COPY_BREAKDOWN_BUDGET_MS = 4 * 60_000;
@@ -3164,13 +3209,24 @@ export async function syncAccount(accountId: string): Promise<SyncAccountResult>
       console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'entities', error: firstError }));
     }
 
-    // Marketer module: ad set targeting + recent ad-set/ad daily rows.
-    // Needs the entity rows above; independent of insights/creatives.
+    // Ad-level recent insights: runs first with its own dedicated budget —
+    // Creatives v3's static route depends on it (unlike adset-level, which
+    // only ever fed the marketer module) — see AD_LEVEL_INSIGHTS_BUDGET_MS.
+    try {
+      const yesterday = await yesterdayForAccount(accountId, token);
+      const deadline = Date.now() + AD_LEVEL_INSIGHTS_BUDGET_MS;
+      await syncRecentInsightsLevel(accountId, token, 'ad', yesterday, deadline);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : 'Ad-level insights sync failed';
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, step: 'adLevelInsights', error: message }));
+    }
+
+    // Marketer module: ad set targeting + recent ad-set daily rows. Needs
+    // the entity rows above; independent of insights/creatives.
     try {
       const yesterday = await yesterdayForAccount(accountId, token);
       const deadline = Date.now() + TARGETING_BUDGET_MS;
       await syncRecentInsightsLevel(accountId, token, 'adset', yesterday, deadline);
-      await syncRecentInsightsLevel(accountId, token, 'ad', yesterday, deadline);
       await syncAdsetTargeting(accountId, token, Math.max(20_000, deadline - Date.now()));
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : 'Targeting sync failed';
