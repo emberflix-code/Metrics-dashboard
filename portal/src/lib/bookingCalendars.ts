@@ -70,6 +70,13 @@ export function locationKey(name: string): string {
   return tokens.join('');
 }
 
+/** Trailing state abbreviation of a location name, if any ("Alloy Rochester, MI" -> "mi"). */
+export function locationState(name: string): string | null {
+  const tokens = name.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim().split(/\s+/);
+  const last = tokens[tokens.length - 1];
+  return tokens.length > 1 && STATES.has(last) ? last : null;
+}
+
 export interface CalendarSyncReport {
   matched: { client: string; location: string; calendar: string; platform: string }[];
   unmatched: string[];
@@ -101,6 +108,13 @@ export async function syncBookingCalendars(opts: { dry?: boolean } = {}): Promis
       // ("westlosangeles" vs "westla" won't match; "bonneylake" ⊂ "bonneylake" will).
       const loose = clients.filter(c => { const ck = locationKey(c.name); return ck.includes(k) || k.includes(ck); });
       candidates = loose;
+    }
+    if (candidates.length > 1) {
+      // Same city in two states ("Alloy Rochester, NY" vs "Alloy Rochester, MI"): the state
+      // is identity here, so keep only the client in the row's state when that leaves one.
+      const st = locationState(row.location);
+      const sameState = st ? candidates.filter(c => locationState(c.name) === st) : [];
+      if (sameState.length === 1) candidates = sameState;
     }
     if (candidates.length === 0) { report.unmatched.push(row.location); continue; }
     if (candidates.length > 1) { report.ambiguous.push({ location: row.location, candidates: candidates.map(c => c.name) }); continue; }
