@@ -493,6 +493,11 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_theme_breakdown BO
 // sees it until an admin enables it for them.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_insights BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
 
+// Per-client toggle for the "GMN Marketing Report" button + /dashboard/gmn-report
+// page (migration 036), which shows the month's published report snapshot from
+// client_monthly_reports. Off by default; the page 404s when it is off.
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS show_gmn_report BOOLEAN NOT NULL DEFAULT false`).catch(() => {});
+
 // Live "is this client on their dashboard right now" presence, backing the
 // admin Monitoring page's Live badge (see /admin/monitoring). DashboardClient.tsx
 // pings POST /api/heartbeat every ~30s while its tab is open and visible;
@@ -741,6 +746,22 @@ pool.query(`CREATE TABLE IF NOT EXISTS shared_reports (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   UNIQUE (client_id, slug)
+)`).catch(() => {});
+
+// GMN Marketing Report snapshots (migration 036): one row per client per month.
+// payload is built offline by the monthly report scripts (same numbers as the
+// client's slide deck — bookings come from a GHL calendar audit that is far too
+// slow for page load) and published with portal/_publish_monthly_report.ts.
+// Rows with published_at NULL are drafts and never shown.
+pool.query(`CREATE TABLE IF NOT EXISTS client_monthly_reports (
+  id            SERIAL PRIMARY KEY,
+  client_id     UUID NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  month         DATE NOT NULL,
+  payload       JSONB NOT NULL,
+  published_at  TIMESTAMPTZ,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (client_id, month)
 )`).catch(() => {});
 
 export async function query<T = Record<string, unknown>>(

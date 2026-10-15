@@ -107,6 +107,10 @@ interface Props {
   // period). Admin-togglable per client — see ShowInsightsToggle. Off by
   // default.
   showInsights?: boolean;
+  // Shows the "GMN Marketing Report" header button linking to
+  // /dashboard/gmn-report (published monthly report snapshots). Admin-togglable
+  // per client — see ShowGmnReportToggle. Off by default.
+  showGmnReport?: boolean;
   // When true, hides the Theme/UGC badges (client view) and edit dropdowns
   // (admin view) on every Creatives v2/v3 card — the rest of the card
   // (thumbnail, spend, leads, CPL, etc.) is unaffected. Off by default.
@@ -5157,7 +5161,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, hideCreativeTagging = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, showGmnReport = false, hideCreativeTagging = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _useSheetForLeads = useSheetForLeads;
@@ -5265,6 +5269,12 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                       Google Ads
                     </a>
                   </div>
+                )}
+                {/* GMN Marketing Report — only for clients with show_gmn_report on */}
+                {showGmnReport && (
+                  <a href="/dashboard/gmn-report" className="text-xs bg-blue-600 hover:bg-blue-500 text-white border border-blue-500 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
+                    <i data-lucide="presentation" className="w-3 h-3"></i><span>GMN Marketing Report</span>
+                  </a>
                 )}
                 {/* Export */}
                 <div className="relative">

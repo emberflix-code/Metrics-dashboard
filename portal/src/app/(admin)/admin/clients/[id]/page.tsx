@@ -10,6 +10,7 @@ import ShowCreativesV3Toggle from './ShowCreativesV3Toggle';
 import EnableCrossAccountCreativeTaggingToggle from './EnableCrossAccountCreativeTaggingToggle';
 import ShowThemeBreakdownToggle from './ShowThemeBreakdownToggle';
 import ShowInsightsToggle from './ShowInsightsToggle';
+import ShowGmnReportToggle from './ShowGmnReportToggle';
 import HideAdsetAdTabsToggle from './HideAdsetAdTabsToggle';
 import EnablePageImageFallbackToggle from './EnablePageImageFallbackToggle';
 import ShowMetaLeadNamesToggle from './ShowMetaLeadNamesToggle';
@@ -61,6 +62,7 @@ interface ClientDetail {
   enable_cross_account_creative_tagging: boolean;
   show_theme_breakdown: boolean;
   show_insights: boolean;
+  show_gmn_report: boolean;
   hide_adset_ad_tabs: boolean;
   enable_page_image_fallback: boolean;
   show_meta_lead_names: boolean;
@@ -115,7 +117,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
            c.ltv_value, c.show_ltv, c.active, c.show_creative_campaign_breakdown, c.show_creatives_v3,
-           c.enable_cross_account_creative_tagging, c.show_theme_breakdown, c.show_insights, c.hide_adset_ad_tabs,
+           c.enable_cross_account_creative_tagging, c.show_theme_breakdown, c.show_insights, c.show_gmn_report, c.hide_adset_ad_tabs,
            c.enable_page_image_fallback, c.show_meta_lead_names,
            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet,
            c.is_rollup, c.location_address, c.location_lat, c.location_lng, c.geocode_error,
@@ -127,6 +129,13 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   `, [params.id]);
 
   if (!client) redirect('/admin');
+
+  // Published GMN Marketing Report months (the table is created lazily in db.ts,
+  // so tolerate it not existing yet on a fresh database).
+  const gmnReportMonths = await query<{ month: string }>(
+    `SELECT to_char(month, 'YYYY-MM') AS month FROM client_monthly_reports
+     WHERE client_id = $1 AND published_at IS NOT NULL ORDER BY month DESC`, [params.id]
+  ).catch(() => [] as { month: string }[]);
 
   // Google's CSV export silently serves the default tab instead of erroring
   // when a configured tab name no longer exists (see lib/sheets.ts), so a
@@ -335,6 +344,9 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             </div>
             <div className="pt-4">
               <ShowInsightsToggle clientId={client.id} current={client.show_insights ?? false} />
+            </div>
+            <div className="pt-4">
+              <ShowGmnReportToggle clientId={client.id} current={client.show_gmn_report ?? false} publishedMonths={gmnReportMonths.map(r => r.month)} />
             </div>
             <div className="pt-4">
               <HideAdsetAdTabsToggle clientId={client.id} current={client.hide_adset_ad_tabs ?? false} />
