@@ -581,7 +581,7 @@ if offers_src:
             out[i] += 1
         return out
 
-    offers, mismatch = {}, []
+    offers, mismatch, location_offers = {}, [], {}
     for r in rows:
         per = od["locations"].get(r["name"], {})
         if abs(sum(v["spend"] for v in per.values()) - r["spend_c"]) > 0.01:
@@ -590,6 +590,11 @@ if offers_src:
         cal = r.get("calendar_count")
         lead_w = [per[n]["sheet_leads"] for n in names]
         shares = split_int(cal or 0, lead_w if sum(lead_w) > 0 else [per[n]["spend"] for n in names])
+        # this location's own offer rows (its bookings split the same way as the all-locations table)
+        location_offers[r["name"]] = sorted(
+            (metric_row(n, per[n]["spend"], per[n]["reach"], per[n]["impressions"], per[n]["link_clicks"], per[n]["sheet_leads"],
+                        b if cal is not None else None, per[n]["spend"]) for n, b in zip(names, shares)),
+            key=lambda x: -x["spend"])
         for n, b in zip(names, shares):
             o = offers.setdefault(n, {"spend": 0.0, "reach": 0, "imp": 0, "clk": 0, "leads": 0, "bookings": 0, "cpb_spend": 0.0, "has_bk": False})
             v = per[n]
@@ -622,6 +627,15 @@ if offers_src:
         "offers": offer_rows, "offersTotal": offers_total,
         "topCreatives": creatives.get("topCreatives", []),
         "creativesNote": creatives.get("note"),
+        # click-through per location: its row (same as the table), its offers, and its own top creatives
+        "locationDetails": {
+            lr["label"]: {
+                "row": lr,
+                "offers": location_offers.get(lr["label"], []),
+                "topCreatives": creatives.get("byLocation", {}).get(lr["label"], []),
+            } for lr in loc_rows
+        },
+        "locationCreativesNote": creatives.get("locationNote"),
         "notes": [
             "Spend, reach, impressions and link clicks: Meta (dashboard data). Reach adds each day's reach, so a person "
             "reached on several days is counted again.",

@@ -19,7 +19,7 @@ const [MONTH, OUT] = [process.argv[2] || '2026-09', process.argv[3] || 'alloy_to
 const [y, m] = MONTH.split('-').map(Number)
 const SINCE = `${MONTH}-01`, UNTIL = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)
 const ACCOUNTS = ['1007481743408819', '3023829647843614']
-const MIN_SPEND = 300, TOP_N = 10, FULL_T = 6, TOP_T = 6
+const MIN_SPEND = 300, LOC_MIN_SPEND = 100, TOP_N = 10, FULL_T = 6, TOP_T = 6
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 2 })
 
 const matches = (name: string, filter: string) => {
@@ -133,11 +133,33 @@ async function main() {
     ...finish(c.total),
     locations: Array.from(c.byLoc.entries()).map(([location, v]) => ({ location, ...finish(v) })).sort((a, b) => b.spend - a.spend),
   }))
+  // Per location: the same grouped creatives, ranked by that location's own CPL among creatives with ≥ LOC_MIN_SPEND spend and
+  // ≥1 lead there. The card shows the location's own version of the creative (e.g. its city-specific overlay): the member
+  // with the most spend at that location, preferring one with a stored thumbnail.
+  const byLocation: Record<string, any[]> = {}
+  const locNames = Array.from(new Set(creatives.flatMap(c => Array.from(c.byLoc.keys())))).filter(l => l !== '(unmatched campaign)')
+  for (const loc of locNames) {
+    const here = creatives.map(c => ({ c, v: c.byLoc.get(loc) })).filter(x => x.v && x.v.spend >= LOC_MIN_SPEND && x.v.leads > 0) as { c: typeof creatives[number]; v: Agg }[]
+    here.sort((a, b) => a.v.spend / a.v.leads - b.v.spend / b.v.leads)
+    byLocation[loc] = here.slice(0, TOP_N).map((x, i) => {
+      const local = [...x.c.members].filter(a => a.byLoc.has(loc)).sort((a, b) => b.byLoc.get(loc)!.spend - a.byLoc.get(loc)!.spend)
+      const canon = local.find(a => a.hasBytes) || local[0] || x.c.canon
+      return {
+        rank: i + 1, type: canon.type === 'video' ? 'video' : 'image', accountId: canon.accountId, assetKey: canon.assetKey,
+        videoId: canon.type === 'video' ? canon.videoId : null, sampleAdId: Array.from(canon.ads)[0] || null,
+        title: canon.title, body: canon.body ? canon.body.slice(0, 400) : null, variants: x.c.members.length,
+        ...finish(x.v), locations: [],
+      }
+    })
+  }
   const covered = creatives.reduce((s, c) => s + c.total.spend, 0)
   const note = `Top ${TOP_N} creatives by cost per lead among creatives with at least $${MIN_SPEND} spend in the month. The same image or ` +
     `video counts as one creative across all locations, even when its headline text differs. Leads here are Meta's per-creative ` +
     `leads (Meta credits some leads to an ad but not to one image or video, so they total less than the location table).`
-  writeFileSync(OUT, JSON.stringify({ month: MONTH, topCreatives, note }, null, 1))
+  const locationNote = `This location's top ${TOP_N} creatives by cost per lead, among creatives with at least $${LOC_MIN_SPEND} spend ` +
+    `and at least one lead at this location. Leads are Meta's per-creative leads.`
+  writeFileSync(OUT, JSON.stringify({ month: MONTH, topCreatives, note, byLocation, locationNote }, null, 1))
+  console.log(`per-location top creatives: ${locNames.length} locations, ${Object.values(byLocation).filter(v => v.length).length} with at least one ranked creative, median ${(() => { const n = Object.values(byLocation).map(v => v.length).sort((a, b) => a - b); return n[Math.floor(n.length / 2)] })()} per location`)
   // QA: contact sheet of up to 12 member thumbnails per ranked creative (env QA_DIR), to eyeball the grouping
   if (process.env.QA_DIR) {
     for (const c of ranked) {

@@ -70,7 +70,17 @@ export interface GmnReportPayload {
   offersTotal: GmnMetricRow;
   topCreatives: GmnCreative[];
   creativesNote?: string;
+  // Click-through per location (keyed by the location row's label): its row, its own offer breakdown and its top
+  // creatives (ranked by that location's CPL). Optional — older snapshots don't have it and the rows stay plain.
+  locationDetails?: Record<string, GmnLocationDetail>;
+  locationCreativesNote?: string;
   notes?: string[];
+}
+
+export interface GmnLocationDetail {
+  row: GmnMetricRow;
+  offers: GmnMetricRow[];
+  topCreatives: GmnCreative[];
 }
 
 export interface GmnReportMonth { month: string; label: string }

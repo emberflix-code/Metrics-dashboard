@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import type { GmnCreative, GmnMetricRow, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
+import { useEffect, useState } from 'react';
+import type { GmnCreative, GmnLocationDetail, GmnMetricRow, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
 
 interface Props {
@@ -15,6 +15,9 @@ interface Props {
 const ACCENT = 'text-[#E1E000]';
 
 export default function GmnReportClient({ clientName, months, selectedMonth, report }: Props) {
+  const [openLocation, setOpenLocation] = useState<string | null>(null);
+  const details = report?.locationDetails;
+  const openDetail = openLocation && details ? details[openLocation] : undefined;
   return (
     <div className="min-h-screen bg-[#2C2A29] text-slate-100">
       <header className="border-b border-white/10 bg-black/20">
@@ -52,7 +55,14 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
               <h2 className="text-2xl sm:text-3xl font-light mt-1">{report.title}</h2>
             </section>
             <Overview report={report} />
-            <MetricTable title="Meta Campaign Breakdown" firstCol="Location" rows={report.locations} total={report.locationsTotal} />
+            <MetricTable
+              title="Meta Campaign Breakdown"
+              subtitle={details ? 'Click a location to see its own offer breakdown and top creatives.' : undefined}
+              firstCol="Location"
+              rows={report.locations}
+              total={report.locationsTotal}
+              onRowClick={details ? label => { if (details[label]) setOpenLocation(label); } : undefined}
+            />
             <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={report.offers} total={report.offersTotal} />
             <TopCreatives creatives={report.topCreatives} note={report.creativesNote} />
             {report.notes && report.notes.length > 0 && (
@@ -63,6 +73,63 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
           </>
         )}
       </main>
+      {openLocation && openDetail && report && (
+        <LocationPanel
+          name={openLocation}
+          monthLabel={report.monthLabel}
+          detail={openDetail}
+          note={report.locationCreativesNote}
+          onClose={() => setOpenLocation(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// One location's own view: its numbers, its offer breakdown (bookings split across its offers by lead share, same as the
+// all-locations table) and its top creatives ranked by its own CPL.
+function LocationPanel({ name, monthLabel, detail, note, onClose }: {
+  name: string; monthLabel: string; detail: GmnLocationDetail; note?: string; onClose: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
+  }, [onClose]);
+  const r = detail.row;
+  const tiles: [string, string][] = [
+    ['Spend', fmtUsd(r.spend)], ['Leads', fmtInt(r.leads)], ['CPL', fmtUsd(r.cpl)],
+    ['Bookings', fmtInt(r.bookings)], ['CPB', fmtUsd(r.cpb)], ['CTR', fmtPct(r.ctr)],
+  ];
+  return (
+    <div className="fixed inset-0 z-50 bg-black/70 overflow-y-auto" onClick={onClose} role="dialog" aria-modal="true" aria-label={name}>
+      <div className="max-w-6xl mx-auto my-6 sm:my-10 px-4" onClick={e => e.stopPropagation()}>
+        <div className="bg-[#2C2A29] border border-white/15 rounded-2xl shadow-2xl">
+          <div className="flex items-start justify-between gap-4 px-5 sm:px-6 py-4 border-b border-white/10">
+            <div>
+              <p className={`text-xs font-semibold uppercase tracking-wider ${ACCENT}`}>{monthLabel}</p>
+              <h2 className="text-xl sm:text-2xl font-light mt-0.5">{name}</h2>
+            </div>
+            <button type="button" onClick={onClose} className="text-slate-300 hover:text-white text-sm border border-white/20 rounded-lg px-3 py-1.5">
+              Close
+            </button>
+          </div>
+          <div className="px-5 sm:px-6 py-6 space-y-10">
+            <div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
+              {tiles.map(([l, v]) => (
+                <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
+                  <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
+                  <p className="text-lg font-semibold mt-0.5 tabular-nums">{v}</p>
+                </div>
+              ))}
+            </div>
+            <TopCreatives creatives={detail.topCreatives} note={note} emptyText="No creative at this location reached $100 spend with at least one lead this month." />
+            <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={detail.offers} total={{ ...r, label: 'Total' }} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -102,10 +169,13 @@ const COLS: { key: keyof GmnMetricRow; label: string; fmt: (r: GmnMetricRow) => 
   { key: 'cpb', label: 'CPB', fmt: r => fmtUsd(r.cpb) },
 ];
 
-function MetricTable({ title, firstCol, rows, total }: { title: string; firstCol: string; rows: GmnMetricRow[]; total: GmnMetricRow }) {
+function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick }: {
+  title: string; subtitle?: string; firstCol: string; rows: GmnMetricRow[]; total: GmnMetricRow; onRowClick?: (label: string) => void;
+}) {
   return (
     <section>
-      <h3 className="text-xl font-light mb-4">{title}</h3>
+      <h3 className={`text-xl font-light ${subtitle ? 'mb-1' : 'mb-4'}`}>{title}</h3>
+      {subtitle && <p className="text-xs text-slate-400 mb-4">{subtitle}</p>}
       <div className="overflow-x-auto rounded-lg border border-white/40">
         <table className="w-full text-sm border-collapse min-w-[900px]">
           <thead>
@@ -118,7 +188,13 @@ function MetricTable({ title, firstCol, rows, total }: { title: string; firstCol
           <tbody>
             {rows.map((r, i) => (
               <tr key={r.label + i} className={i % 2 ? 'bg-[#4F5124]/60' : 'bg-black/10'}>
-                <td className="px-3 py-2 border border-white/15">{r.label}</td>
+                <td className="px-3 py-2 border border-white/15">
+                  {onRowClick ? (
+                    <button type="button" onClick={() => onRowClick(r.label)} className="text-left underline decoration-white/30 underline-offset-2 hover:text-[#E1E000] hover:decoration-[#E1E000]">
+                      {r.label}
+                    </button>
+                  ) : r.label}
+                </td>
                 {COLS.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/15 whitespace-nowrap">{c.fmt(r)}</td>)}
               </tr>
             ))}
@@ -133,12 +209,13 @@ function MetricTable({ title, firstCol, rows, total }: { title: string; firstCol
   );
 }
 
-function TopCreatives({ creatives, note }: { creatives: GmnCreative[]; note?: string }) {
-  if (!creatives.length) return null;
+function TopCreatives({ creatives, note, emptyText }: { creatives: GmnCreative[]; note?: string; emptyText?: string }) {
+  if (!creatives.length && !emptyText) return null;
   return (
     <section>
       <h3 className="text-xl font-light mb-1">Top 10 Creatives</h3>
       {note && <p className="text-xs text-slate-400 mb-4">{note}</p>}
+      {!creatives.length && <p className="text-sm text-slate-400">{emptyText}</p>}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {creatives.map(c => <CreativeCard key={c.rank} c={c} />)}
       </div>
@@ -181,7 +258,8 @@ function CreativeCard({ c }: { c: GmnCreative }) {
       <div className="p-4 flex-1 flex flex-col gap-3">
         <div>
           <p className="text-xs text-slate-400 uppercase tracking-wider">
-            {c.type === 'video' ? 'Video' : 'Image'} · {c.locations.length} location{c.locations.length === 1 ? '' : 's'}
+            {c.type === 'video' ? 'Video' : 'Image'}
+            {c.locations.length > 0 && ` · ${c.locations.length} location${c.locations.length === 1 ? '' : 's'}`}
             {c.variants > 1 ? ` · ${c.variants} variants` : ''}
           </p>
           {c.title && <p className="text-sm font-semibold mt-1">{c.title}</p>}
@@ -194,10 +272,12 @@ function CreativeCard({ c }: { c: GmnCreative }) {
             </div>
           ))}
         </div>
-        <button type="button" onClick={() => setOpen(o => !o)} className={`text-xs text-left ${ACCENT} hover:underline`}>
-          {open ? 'Hide' : 'Show'} locations ({c.locations.length})
-        </button>
-        {open && (
+        {c.locations.length > 0 && (
+          <button type="button" onClick={() => setOpen(o => !o)} className={`text-xs text-left ${ACCENT} hover:underline`}>
+            {open ? 'Hide' : 'Show'} locations ({c.locations.length})
+          </button>
+        )}
+        {open && c.locations.length > 0 && (
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
               <thead>
