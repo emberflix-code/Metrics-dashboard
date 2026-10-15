@@ -3,6 +3,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import type { GmnCreative, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
+import EnhancedView, { type BrandKey } from './EnhancedView';
 
 interface Props {
   clientName: string;
@@ -22,6 +23,17 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
   const openDetail = openLocation && details ? details[openLocation] : undefined;
   const openOfferDetail = openOffer && offerDetails ? offerDetails[openOffer] : undefined;
   const showLocation = details ? (label: string) => { if (details[label]) { setOpenOffer(null); setOpenLocation(label); } } : undefined;
+  const showOffer = offerDetails ? (label: string) => { if (offerDetails[label]) { setOpenLocation(null); setOpenOffer(label); } } : undefined;
+  // Classic (default) vs Enhanced (beta) view — remembered per browser; Classic stays exactly as before.
+  const [view, setView] = useState<'classic' | 'enhanced'>('classic');
+  useEffect(() => {
+    try { if (localStorage.getItem('gmn-report-view') === 'enhanced') setView('enhanced'); } catch { /* storage blocked */ }
+  }, []);
+  const pickView = (v: 'classic' | 'enhanced') => {
+    setView(v);
+    try { localStorage.setItem('gmn-report-view', v); } catch { /* storage blocked */ }
+  };
+  const brand: BrandKey | undefined = /^alloy/i.test(clientName) ? 'alloy' : undefined;
   return (
     <div className="min-h-screen bg-[#2C2A29] text-slate-100">
       <header className="border-b border-white/10 bg-black/20">
@@ -31,6 +43,20 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
             <h1 className="text-xl sm:text-2xl font-semibold mt-1">GMN Marketing Report</h1>
             <p className="text-sm text-slate-400">{clientName}</p>
           </div>
+          <div className="flex flex-wrap items-center gap-3">
+          {report && (
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-slate-400">View</span>
+              <div className="flex bg-black/30 border border-white/15 rounded-lg p-0.5" role="tablist" aria-label="Report view">
+                {(['classic', 'enhanced'] as const).map(v => (
+                  <button key={v} type="button" role="tab" aria-selected={view === v} onClick={() => pickView(v)}
+                    className={`text-xs px-3 py-1.5 rounded-md transition-colors ${view === v ? 'bg-[#E1E000] text-black font-semibold' : 'text-slate-300 hover:text-white'}`}>
+                    {v === 'classic' ? 'Classic' : 'Enhanced (beta)'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
           {months.length > 0 && (
             <label className="text-sm text-slate-300 flex items-center gap-2">
               Month
@@ -43,6 +69,7 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
               </select>
             </label>
           )}
+          </div>
         </div>
       </header>
 
@@ -52,6 +79,14 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
             <h2 className="text-lg font-semibold">No report published yet</h2>
             <p className="text-sm text-slate-400 mt-2">Your monthly marketing report will appear here once it is published.</p>
           </div>
+        ) : view === 'enhanced' ? (
+          <EnhancedView
+            report={report}
+            brand={brand}
+            onOpenLocation={showLocation}
+            onOpenOffer={showOffer}
+            renderCreative={c => <CreativeCard c={c} />}
+          />
         ) : (
           <>
             <section>
