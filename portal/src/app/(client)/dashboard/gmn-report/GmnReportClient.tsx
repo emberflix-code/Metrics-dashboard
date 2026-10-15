@@ -389,13 +389,12 @@ function CreativeCard({ c, onShowLocations }: { c: GmnCreative; onShowLocations?
         <span className={`absolute top-2 left-2 z-10 bg-black/70 rounded-full w-8 h-8 flex items-center justify-center font-semibold pointer-events-none ${ACCENT}`}>{c.rank}</span>
       </div>
       <div className="p-4 flex-1 flex flex-col gap-3">
-        <div className="min-h-[3rem]">
+        <div>
           <p className="text-xs text-slate-400 uppercase tracking-wider">
             {c.type === 'video' ? 'Video' : 'Image'}
             {c.locations.length > 0 && ` · ${c.locations.length} location${c.locations.length === 1 ? '' : 's'}`}
             {c.variants > 1 ? ` · ${c.variants} variants` : ''}
           </p>
-          <p className="text-sm font-semibold mt-1 truncate">{c.title || ' '}</p>
         </div>
         <div className="grid grid-cols-3 gap-2">
           {stats.map(([l, v]) => (
@@ -469,7 +468,7 @@ function CreativePanel({ c, monthLabel, brand, onClose, onLocation }: {
     </th>
   );
   return (
-    <Panel kicker={`${monthLabel} · Creative #${c.rank} · ${c.type === 'video' ? 'Video' : 'Image'}`} title={c.title || `Creative #${c.rank}`} onClose={onClose} brand={brand}>
+    <Panel kicker={`${monthLabel} · Creative #${c.rank} · ${c.type === 'video' ? 'Video' : 'Image'}`} title={`Creative #${c.rank}`} onClose={onClose} brand={brand}>
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         <div className="lg:col-span-2 relative bg-black rounded-xl overflow-hidden aspect-square border border-white/10">
           <CreativeMedia c={c} eager />

@@ -21,7 +21,7 @@ type Metric = 'cpl' | 'cpb' | 'bookRate' | 'ctr';
 const METRICS: Record<Metric, { label: string; better: 'low' | 'high'; fmt: (n: number | null) => string; of: (r: GmnMetricRow) => number | null }> = {
   cpl: { label: 'CPL', better: 'low', fmt: n => fmtUsd(n), of: r => r.cpl },
   cpb: { label: 'CPB', better: 'low', fmt: n => fmtUsd(n), of: r => r.cpb },
-  bookRate: { label: 'Booking rate', better: 'high', fmt: n => fmtPct(n, 0), of: r => (r.leads && r.bookings != null ? (r.bookings / r.leads) * 100 : null) },
+  bookRate: { label: 'Booking rate', better: 'high', fmt: n => fmtPct(n), of: r => (r.leads && r.bookings != null ? (r.bookings / r.leads) * 100 : null) },
   ctr: { label: 'CTR', better: 'high', fmt: n => fmtPct(n), of: r => r.ctr },
 };
 
@@ -107,12 +107,12 @@ function SectionTitle({ title, sub, right }: { title: string; sub?: string; righ
 function Hero({ report, bookRate }: { report: GmnReportPayload; bookRate: number | null }) {
   const T = report.locationsTotal;
   const big: [string, string, string][] = [
-    ['Ad spend', fmtUsd(T.spend, 0), `${fmtInt(report.overview.totalLocations)} locations · avg ${fmtUsd(report.overview.avgLocationSpend, 0)}`],
+    ['Ad spend', fmtUsd(T.spend), `${fmtInt(report.overview.totalLocations)} locations · avg ${fmtUsd(report.overview.avgLocationSpend)}`],
     ['Leads', fmtInt(T.leads), `CPL ${fmtUsd(T.cpl)}`],
     ['Bookings', fmtInt(T.bookings), `CPB ${fmtUsd(T.cpb)}`],
   ];
   const small: [string, string][] = [
-    ['Lead → booking', fmtPct(bookRate, 0)], ['CTR', fmtPct(T.ctr)], ['Link clicks', fmtInt(T.linkClicks)],
+    ['Lead → booking', fmtPct(bookRate)], ['CTR', fmtPct(T.ctr)], ['Link clicks', fmtInt(T.linkClicks)],
     ['Impressions', fmtInt(T.impressions)], ['Cost / click', fmtUsd(T.linkClicks ? T.spend / T.linkClicks : null)],
     ['CPM', fmtUsd(T.impressions ? (T.spend / T.impressions) * 1000 : null)],
   ];
@@ -146,8 +146,8 @@ function Funnel({ report }: { report: GmnReportPayload }) {
   const steps: [string, number, string][] = [
     ['Impressions', T.impressions, ''],
     ['Link clicks', T.linkClicks, `${fmtPct(T.ctr)} of impressions`],
-    ['Leads', T.leads ?? 0, T.linkClicks ? `${fmtPct(((T.leads ?? 0) / T.linkClicks) * 100, 1)} of clicks` : ''],
-    ['Bookings', T.bookings ?? 0, T.leads ? `${fmtPct(((T.bookings ?? 0) / T.leads) * 100, 0)} of leads` : ''],
+    ['Leads', T.leads ?? 0, T.linkClicks ? `${fmtPct(((T.leads ?? 0) / T.linkClicks) * 100)} of clicks` : ''],
+    ['Bookings', T.bookings ?? 0, T.leads ? `${fmtPct(((T.bookings ?? 0) / T.leads) * 100)} of leads` : ''],
   ];
   const max = Math.log10(Math.max(1, steps[0][1]));
   return (
@@ -174,18 +174,18 @@ function Spotlights({ report, onOpenLocation }: { report: GmnReportPayload; onOp
     const out: { tone: 'good' | 'warning' | 'info'; icon: string; title: string; value: string; who: string; detail: string; link?: string }[] = [];
     const pick = <T,>(xs: T[], f: (x: T) => number, dir: 1 | -1) => xs.reduce((b, x) => (b === undefined || dir * (f(x) - f(b)) < 0 ? x : b), undefined as T | undefined);
     const bestCpl = pick(L.filter(r => r.spend >= 500 && r.cpl != null), r => r.cpl!, 1);
-    if (bestCpl) out.push({ tone: 'good', icon: '▲', title: 'Most efficient location', value: fmtUsd(bestCpl.cpl), who: short(bestCpl.label), detail: `CPL on ${fmtUsd(bestCpl.spend, 0)} spend · ${fmtInt(bestCpl.leads)} leads`, link: bestCpl.label });
+    if (bestCpl) out.push({ tone: 'good', icon: '▲', title: 'Most efficient location', value: fmtUsd(bestCpl.cpl), who: short(bestCpl.label), detail: `CPL on ${fmtUsd(bestCpl.spend)} spend · ${fmtInt(bestCpl.leads)} leads`, link: bestCpl.label });
     const vol = pick(L.filter(r => r.leads != null), r => r.leads!, -1);
-    if (vol) out.push({ tone: 'info', icon: '◆', title: 'Lead volume leader', value: `${fmtInt(vol.leads)} leads`, who: short(vol.label), detail: `${fmtUsd(vol.spend, 0)} spend · CPL ${fmtUsd(vol.cpl)}`, link: vol.label });
+    if (vol) out.push({ tone: 'info', icon: '◆', title: 'Lead volume leader', value: `${fmtInt(vol.leads)} leads`, who: short(vol.label), detail: `${fmtUsd(vol.spend)} spend · CPL ${fmtUsd(vol.cpl)}`, link: vol.label });
     const br = pick(L.filter(r => (r.leads ?? 0) >= 20 && r.bookings != null), r => r.bookings! / r.leads!, -1);
-    if (br) out.push({ tone: 'good', icon: '▲', title: 'Best lead → booking rate', value: fmtPct((br.bookings! / br.leads!) * 100, 0), who: short(br.label), detail: `${fmtInt(br.bookings)} bookings from ${fmtInt(br.leads)} leads`, link: br.label });
+    if (br) out.push({ tone: 'good', icon: '▲', title: 'Best lead → booking rate', value: fmtPct((br.bookings! / br.leads!) * 100), who: short(br.label), detail: `${fmtInt(br.bookings)} bookings from ${fmtInt(br.leads)} leads`, link: br.label });
     const worst = pick(L.filter(r => r.spend >= 1000 && r.cpl != null), r => r.cpl!, -1);
-    if (worst) out.push({ tone: 'warning', icon: '!', title: 'Highest CPL at $1k+ spend', value: fmtUsd(worst.cpl), who: short(worst.label), detail: `${fmtUsd(worst.spend, 0)} spend for ${fmtInt(worst.leads)} leads — worth a creative/offer review`, link: worst.label });
+    if (worst) out.push({ tone: 'warning', icon: '!', title: 'Highest CPL at $1k+ spend', value: fmtUsd(worst.cpl), who: short(worst.label), detail: `${fmtUsd(worst.spend)} spend for ${fmtInt(worst.leads)} leads — worth a creative/offer review`, link: worst.label });
     const offers = report.offers.filter(o => (o.leads ?? 0) >= 20 && o.cpb != null);
     const bo = pick(offers, o => o.cpb!, 1);
     if (bo) out.push({ tone: 'good', icon: '▲', title: 'Best offer by cost per booking', value: fmtUsd(bo.cpb), who: bo.label, detail: `${fmtInt(bo.bookings)} bookings · CPL ${fmtUsd(bo.cpl)}` });
     const tc = report.topCreatives[0];
-    if (tc) out.push({ tone: 'info', icon: '★', title: 'Top creative', value: fmtUsd(tc.cpl), who: tc.title || (tc.type === 'video' ? 'Video creative' : 'Image creative'), detail: `CPL across ${tc.locations.length} locations · ${fmtUsd(tc.spend, 0)} spend` });
+    if (tc) out.push({ tone: 'info', icon: '★', title: 'Top creative', value: fmtUsd(tc.cpl), who: `Creative #${tc.rank} · ${tc.type === 'video' ? 'Video' : 'Image'}`, detail: `CPL across ${tc.locations.length} locations · ${fmtUsd(tc.spend)} spend` });
     return out;
   }, [report]);
   const toneCls = { good: 'text-[#0ca30c]', warning: 'text-[#fab219]', info: 'text-[#E1E000]' } as const;
@@ -342,14 +342,14 @@ function OfferMix({ report, onOpenOffer }: { report: GmnReportPayload; onOpenOff
         <div>
           <div className="flex h-9 rounded-lg overflow-hidden gap-[2px] bg-[#2C2A29]" role="img" aria-label="Spend share by offer">
             {segs.map(s => (
-              <div key={s.label} title={`${s.label}: ${fmtUsd(s.spend)} (${fmtPct((s.spend / total) * 100, 1)})`} style={{ width: `${(s.spend / total) * 100}%`, background: s.color }} className="min-w-[3px]" />
+              <div key={s.label} title={`${s.label}: ${fmtUsd(s.spend)} (${fmtPct((s.spend / total) * 100)})`} style={{ width: `${(s.spend / total) * 100}%`, background: s.color }} className="min-w-[3px]" />
             ))}
           </div>
           <div className="flex flex-wrap gap-x-5 gap-y-1 mt-3 text-xs">
             {segs.map(s => (
               <span key={s.label} className="text-slate-300">
                 <span className="inline-block w-2.5 h-2.5 rounded-sm mr-1.5 align-middle" style={{ background: s.color }} />
-                {s.label} <span className="text-slate-500 tabular-nums">{fmtPct((s.spend / total) * 100, 1)}</span>
+                {s.label} <span className="text-slate-500 tabular-nums">{fmtPct((s.spend / total) * 100)}</span>
               </span>
             ))}
           </div>
@@ -372,7 +372,7 @@ function OfferMix({ report, onOpenOffer }: { report: GmnReportPayload; onOpenOff
                   <td className="py-1.5 pr-2">
                     {onOpenOffer ? <button type="button" onClick={() => onOpenOffer(o.label)} className="text-left hover:text-[#E1E000] underline decoration-white/20 underline-offset-2">{o.label}</button> : o.label}
                   </td>
-                  <td className="py-1.5 text-right tabular-nums">{fmtUsd(o.spend, 0)}</td>
+                  <td className="py-1.5 text-right tabular-nums">{fmtUsd(o.spend)}</td>
                   <td className="py-1.5 text-right tabular-nums">{fmtInt(o.leads)}</td>
                   <td className="py-1.5 pl-4">
                     <div className="flex items-center gap-2">
@@ -418,7 +418,7 @@ const HCOLS: Col[] = [
   { key: 'cpl', label: 'CPL', fmt: r => fmtUsd(r.cpl), val: r => r.cpl, heat: 'low' },
   { key: 'bookings', label: 'Bookings', fmt: r => fmtInt(r.bookings), val: r => r.bookings },
   { key: 'cpb', label: 'CPB', fmt: r => fmtUsd(r.cpb), val: r => r.cpb, heat: 'low' },
-  { key: 'bookRate', label: 'Book rate', fmt: r => fmtPct(METRICS.bookRate.of(r), 0), val: r => METRICS.bookRate.of(r), heat: 'high' },
+  { key: 'bookRate', label: 'Book rate', fmt: r => fmtPct(METRICS.bookRate.of(r)), val: r => METRICS.bookRate.of(r), heat: 'high' },
 ];
 
 function HeatTable({ rows, total, month, onOpenLocation }: { rows: GmnMetricRow[]; total: GmnMetricRow; month: string; onOpenLocation?: (l: string) => void }) {
