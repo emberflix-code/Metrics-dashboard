@@ -74,7 +74,15 @@ export interface GmnReportPayload {
   // creatives (ranked by that location's CPL). Optional — older snapshots don't have it and the rows stay plain.
   locationDetails?: Record<string, GmnLocationDetail>;
   locationCreativesNote?: string;
+  // Click-through per offer (keyed by the offer row's label): the locations that ran it, each with its numbers for
+  // that offer. Optional — older snapshots don't have it and the offer rows stay plain.
+  offerDetails?: Record<string, GmnOfferDetail>;
   notes?: string[];
+}
+
+export interface GmnOfferDetail {
+  row: GmnMetricRow;
+  locations: GmnMetricRow[];  // label = location name
 }
 
 export interface GmnLocationDetail {

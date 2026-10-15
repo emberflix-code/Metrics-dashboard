@@ -1,7 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
-import type { GmnCreative, GmnLocationDetail, GmnMetricRow, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
+import { useEffect, useState, type ReactNode } from 'react';
+import type { GmnCreative, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
 
 interface Props {
@@ -16,8 +16,12 @@ const ACCENT = 'text-[#E1E000]';
 
 export default function GmnReportClient({ clientName, months, selectedMonth, report }: Props) {
   const [openLocation, setOpenLocation] = useState<string | null>(null);
+  const [openOffer, setOpenOffer] = useState<string | null>(null);
   const details = report?.locationDetails;
+  const offerDetails = report?.offerDetails;
   const openDetail = openLocation && details ? details[openLocation] : undefined;
+  const openOfferDetail = openOffer && offerDetails ? offerDetails[openOffer] : undefined;
+  const showLocation = details ? (label: string) => { if (details[label]) { setOpenOffer(null); setOpenLocation(label); } } : undefined;
   return (
     <div className="min-h-screen bg-[#2C2A29] text-slate-100">
       <header className="border-b border-white/10 bg-black/20">
@@ -61,9 +65,16 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
               firstCol="Location"
               rows={report.locations}
               total={report.locationsTotal}
-              onRowClick={details ? label => { if (details[label]) setOpenLocation(label); } : undefined}
+              onRowClick={showLocation}
             />
-            <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={report.offers} total={report.offersTotal} />
+            <MetricTable
+              title="Marketing Offer Breakdown"
+              subtitle={offerDetails ? 'Click an offer to see which locations ran it.' : undefined}
+              firstCol="Offer"
+              rows={report.offers}
+              total={report.offersTotal}
+              onRowClick={offerDetails ? label => { if (offerDetails[label]) setOpenOffer(label); } : undefined}
+            />
             <TopCreatives creatives={report.topCreatives} note={report.creativesNote} />
             {report.notes && report.notes.length > 0 && (
               <section className="text-xs text-slate-400 space-y-1 border-t border-white/10 pt-6">
@@ -82,15 +93,21 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
           onClose={() => setOpenLocation(null)}
         />
       )}
+      {openOffer && openOfferDetail && report && (
+        <OfferPanel
+          name={openOffer}
+          monthLabel={report.monthLabel}
+          detail={openOfferDetail}
+          onClose={() => setOpenOffer(null)}
+          onLocation={showLocation}
+        />
+      )}
     </div>
   );
 }
 
-// One location's own view: its numbers, its offer breakdown (bookings split across its offers by lead share, same as the
-// all-locations table) and its top creatives ranked by its own CPL.
-function LocationPanel({ name, monthLabel, detail, note, onClose }: {
-  name: string; monthLabel: string; detail: GmnLocationDetail; note?: string; onClose: () => void;
-}) {
+// Modal shell shared by the location and offer click-throughs (Esc / backdrop / Close button close it).
+function Panel({ kicker, title, onClose, children }: { kicker: string; title: string; onClose: () => void; children: ReactNode }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
     window.addEventListener('keydown', onKey);
@@ -98,39 +115,74 @@ function LocationPanel({ name, monthLabel, detail, note, onClose }: {
     document.body.style.overflow = 'hidden';
     return () => { window.removeEventListener('keydown', onKey); document.body.style.overflow = prev; };
   }, [onClose]);
-  const r = detail.row;
-  const tiles: [string, string][] = [
-    ['Spend', fmtUsd(r.spend)], ['Leads', fmtInt(r.leads)], ['CPL', fmtUsd(r.cpl)],
-    ['Bookings', fmtInt(r.bookings)], ['CPB', fmtUsd(r.cpb)], ['CTR', fmtPct(r.ctr)],
-  ];
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 overflow-y-auto" onClick={onClose} role="dialog" aria-modal="true" aria-label={name}>
+    <div className="fixed inset-0 z-50 bg-black/70 overflow-y-auto" onClick={onClose} role="dialog" aria-modal="true" aria-label={title}>
       <div className="max-w-6xl mx-auto my-6 sm:my-10 px-4" onClick={e => e.stopPropagation()}>
         <div className="bg-[#2C2A29] border border-white/15 rounded-2xl shadow-2xl">
           <div className="flex items-start justify-between gap-4 px-5 sm:px-6 py-4 border-b border-white/10">
             <div>
-              <p className={`text-xs font-semibold uppercase tracking-wider ${ACCENT}`}>{monthLabel}</p>
-              <h2 className="text-xl sm:text-2xl font-light mt-0.5">{name}</h2>
+              <p className={`text-xs font-semibold uppercase tracking-wider ${ACCENT}`}>{kicker}</p>
+              <h2 className="text-xl sm:text-2xl font-light mt-0.5">{title}</h2>
             </div>
             <button type="button" onClick={onClose} className="text-slate-300 hover:text-white text-sm border border-white/20 rounded-lg px-3 py-1.5">
               Close
             </button>
           </div>
-          <div className="px-5 sm:px-6 py-6 space-y-10">
-            <div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
-              {tiles.map(([l, v]) => (
-                <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
-                  <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
-                  <p className="text-lg font-semibold mt-0.5 tabular-nums">{v}</p>
-                </div>
-              ))}
-            </div>
-            <TopCreatives creatives={detail.topCreatives} note={note} emptyText="No creative at this location reached $100 spend with at least one lead this month." />
-            <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={detail.offers} total={{ ...r, label: 'Total' }} />
-          </div>
+          <div className="px-5 sm:px-6 py-6 space-y-10">{children}</div>
         </div>
       </div>
     </div>
+  );
+}
+
+function RowTiles({ r }: { r: GmnMetricRow }) {
+  const tiles: [string, string][] = [
+    ['Spend', fmtUsd(r.spend)], ['Leads', fmtInt(r.leads)], ['CPL', fmtUsd(r.cpl)],
+    ['Bookings', fmtInt(r.bookings)], ['CPB', fmtUsd(r.cpb)], ['CTR', fmtPct(r.ctr)],
+  ];
+  return (
+    <div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
+      {tiles.map(([l, v]) => (
+        <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
+          <p className="text-lg font-semibold mt-0.5 tabular-nums">{v}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// One location's own view: its numbers, its top creatives ranked by its own CPL, then its offer breakdown (bookings
+// split across its offers by lead share, same as the all-locations table).
+function LocationPanel({ name, monthLabel, detail, note, onClose }: {
+  name: string; monthLabel: string; detail: GmnLocationDetail; note?: string; onClose: () => void;
+}) {
+  return (
+    <Panel kicker={monthLabel} title={name} onClose={onClose}>
+      <RowTiles r={detail.row} />
+      <TopCreatives creatives={detail.topCreatives} note={note} emptyText="No creative at this location reached $100 spend with at least one lead this month." />
+      <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={detail.offers} total={{ ...detail.row, label: 'Total' }} />
+    </Panel>
+  );
+}
+
+// One offer's view: the locations that ran it, each with its numbers for this offer (bookings = that location's
+// calendar count split by its lead share). Location names jump to that location's own panel.
+function OfferPanel({ name, monthLabel, detail, onClose, onLocation }: {
+  name: string; monthLabel: string; detail: GmnOfferDetail; onClose: () => void; onLocation?: (label: string) => void;
+}) {
+  return (
+    <Panel kicker={`${monthLabel} · Offer`} title={name} onClose={onClose}>
+      <RowTiles r={detail.row} />
+      <MetricTable
+        title={`Locations that ran this offer (${detail.locations.length})`}
+        subtitle={onLocation ? 'Click a location to open its own report.' : undefined}
+        firstCol="Location"
+        rows={detail.locations}
+        total={{ ...detail.row, label: 'Total' }}
+        onRowClick={onLocation}
+      />
+    </Panel>
   );
 }
 

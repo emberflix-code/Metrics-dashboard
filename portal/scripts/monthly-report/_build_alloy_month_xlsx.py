@@ -17,6 +17,11 @@ ghl_src = sys.argv[7] if len(sys.argv) > 7 and sys.argv[7] else None
 # creatives (_alloy_month_top_creatives.ts). With the offers file, <out>.payload.json is written for the report page.
 offers_src = sys.argv[8] if len(sys.argv) > 8 and sys.argv[8] else None
 creatives_src = sys.argv[9] if len(sys.argv) > 9 and sys.argv[9] else None
+# Manual bookings (optional JSON {"<location>": <bookings>}) for locations whose calendar we can't read, e.g. Edina MN,
+# which has no GHL connection because it works with another agency (user, 2026-10-16). Sets that location's calendar
+# count (the deck's "Bookings") and is noted in its Booking notes.
+manual_src = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else None
+manual_bookings = json.load(open(manual_src, encoding="utf-8")) if manual_src else {}
 data = json.load(open(src, encoding="utf-8"))
 bk = {r["name"]: r for r in json.load(open(bookings_src, encoding="utf-8"))["rows"]} if bookings_src else None
 gl_doc = json.load(open(ghl_src, encoding="utf-8")) if ghl_src else None
@@ -228,6 +233,15 @@ for c in data["clients"]:
 dropped_no_spend = [r["name"] for r in rows if r["spend_l"] == 0 and r["spend_c"] == 0]
 rows = [r for r in rows if r["name"] not in dropped_no_spend]
 rows.sort(key=lambda r: r["name"])
+for r in rows:
+    if r["name"] in manual_bookings:
+        r["calendar_count"] = int(manual_bookings[r["name"]])
+        r["booking_note"] = (f"{r['calendar_count']} bookings entered manually: this location's booking calendar can't be read "
+                             "(no GoHighLevel connection).")
+        r["note"] = "; ".join(x for x in r["note"].split("; ") if not x.startswith("bookings: ")) if r["note"] else r["note"]
+unknown_manual = [n for n in manual_bookings if n not in {r["name"] for r in rows}]
+if unknown_manual:
+    print("WARNING manual bookings for locations not in the report:", unknown_manual)
 ops = next((c for c in data["clients"] if c["name"].lower().startswith("alloy ops")), None)
 
 MONEY, INT, PCT = "\\$#,##0.00", "#,##0", "0.00%"
@@ -636,6 +650,15 @@ if offers_src:
             } for lr in loc_rows
         },
         "locationCreativesNote": creatives.get("locationNote"),
+        # click-through per offer: the locations that ran it, each with its numbers for that offer (sorted by spend)
+        "offerDetails": {
+            orow["label"]: {
+                "row": orow,
+                "locations": sorted(
+                    (dict(x, label=loc) for loc, xs in location_offers.items() for x in xs if x["label"] == orow["label"]),
+                    key=lambda x: -x["spend"]),
+            } for orow in offer_rows
+        },
         "notes": [
             "Spend, reach, impressions and link clicks: Meta (dashboard data). Reach adds each day's reach, so a person "
             "reached on several days is counted again.",
