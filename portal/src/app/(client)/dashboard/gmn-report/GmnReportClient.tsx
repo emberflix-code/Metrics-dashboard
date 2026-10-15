@@ -365,7 +365,7 @@ function CreativeMedia({ c, eager = false }: { c: GmnCreative; eager?: boolean }
         />
       ) : (
         // eslint-disable-next-line @next/next/no-img-element
-        <img src={poster} alt={c.title || `Creative ${c.rank}`} className="absolute inset-0 w-full h-full object-contain" loading={eager ? 'eager' : 'lazy'} />
+        <img src={poster} alt={`Creative ${c.rank}`} className="absolute inset-0 w-full h-full object-contain" loading={eager ? 'eager' : 'lazy'} />
       )}
       {c.type === 'video' && videoFailed && (
         <div className="absolute bottom-0 inset-x-0 bg-black/75 text-xs text-slate-300 px-3 py-2">
@@ -486,12 +486,6 @@ function CreativePanel({ c, monthLabel, brand, onClose, onLocation }: {
             Ran at {c.locations.length} location{c.locations.length === 1 ? '' : 's'}
             {c.variants > 1 ? ` in ${c.variants} versions (same image or video with a different city or offer headline)` : ''}.
           </p>
-          {c.body && (
-            <div className="bg-black/25 border border-white/10 rounded-xl p-4 text-sm text-slate-300 whitespace-pre-line max-h-56 overflow-y-auto">
-              <p className="text-[11px] uppercase tracking-wider text-slate-500 mb-2">Ad copy</p>
-              {c.body}
-            </div>
-          )}
         </div>
       </div>
       <section>

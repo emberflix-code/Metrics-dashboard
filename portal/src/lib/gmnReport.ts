@@ -113,5 +113,15 @@ export async function loadPublishedReport(clientId: string, month: string): Prom
      WHERE client_id = $1 AND month = $2::date AND published_at IS NOT NULL`,
     [clientId, `${month}-01`]
   ).catch(() => []);
-  return row?.payload ?? null;
+  if (!row?.payload) return null;
+  // The page doesn't show ad copy or headlines; blank them so they never reach the browser either.
+  const strip = (cs: GmnCreative[] | undefined) => (cs ?? []).map(c => ({ ...c, title: null, body: null }));
+  const p = row.payload;
+  return {
+    ...p,
+    topCreatives: strip(p.topCreatives),
+    locationDetails: p.locationDetails
+      ? Object.fromEntries(Object.entries(p.locationDetails).map(([k, d]) => [k, { ...d, topCreatives: strip(d.topCreatives) }]))
+      : p.locationDetails,
+  };
 }
