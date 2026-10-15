@@ -29,6 +29,18 @@ const matches = (name: string, filter: string) => {
 }
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
+// Meta's automatic translations of the copy (Portuguese, Spanish, Tagalog, Arabic, …) show up as their own headlines and
+// bodies; the report lists English copy only (user, 2026-10-16). Non-English = any accented / non-Latin letter, or a
+// common non-English word. Every excluded text is printed with its spend so the cut can be checked.
+const FOREIGN_WORDS = new Set(('de del la las el los con para por una que neste nesta este esta otoño outono autunno automne herbst '
+  + 'emagrecimento emagreça adelgaza adega dimagrimento dimagrisci perda peso amincissement perdez poids abnehmen payat na ngayong '
+  + 'taglagas katawan alerta oferta increíble giảm cân mùa thu naghahanap kami gusto ang mga ng nous pour avec und der das').split(' '))
+const isEnglish = (text: string) => {
+  const letters = text.replace(/\{(City|Coach)\}/g, '').replace(/[\p{Extended_Pictographic}\uFE0F\u200D]/gu, '')
+  if (/[^\x00-\x7F\u2018\u2019\u201C\u201D\u2013\u2014\u2026\u00A0\u2022\u2705\u23E9\u23EA\u2B50]/.test(letters)) return false
+  return !letters.toLowerCase().split(/[^a-z']+/).some(w => FOREIGN_WORDS.has(w))
+}
+
 type Agg = { spend: number; impressions: number; linkClicks: number; leads: number }
 const add = (a: Agg, b: Agg) => { a.spend += b.spend; a.impressions += b.impressions; a.linkClicks += b.linkClicks; a.leads += b.leads }
 const zero = (): Agg => ({ spend: 0, impressions: 0, linkClicks: 0, leads: 0 })
@@ -75,6 +87,7 @@ async function main() {
   const out: Record<string, any> = {}
   const coverage: string[] = []
   let lowCoverage = false
+  const excluded = new Map<string, number>()
   for (const [kind, key] of [['title', 'topHeadlines'], ['body', 'topAdCopy']] as const) {
     const rows = (await pool.query(
       `SELECT t.text, b.campaign_name, SUM(b.spend)::float spend, SUM(b.impressions)::bigint impressions,
@@ -87,10 +100,12 @@ async function main() {
     for (const r of rows) {
       const loc = locationFor(r.campaign_name || '')
       const k = kind === 'title' ? r.text.replace(/\s+/g, ' ').trim() : template(r.text, loc)
+      covered += r.spend
+      if (!isEnglish(k)) { excluded.set(`${kind}|${k.slice(0, 80)}`, (excluded.get(`${kind}|${k.slice(0, 80)}`) || 0) + r.spend); continue }
       let g = groups.get(k)
       if (!g) { g = { total: zero(), byLoc: new Map(), texts: new Set() }; groups.set(k, g) }
       const v = { spend: r.spend, impressions: Number(r.impressions), linkClicks: Number(r.link_clicks), leads: r.results }
-      add(g.total, v); covered += r.spend
+      add(g.total, v)
       if (!g.byLoc.has(loc)) g.byLoc.set(loc, zero())
       add(g.byLoc.get(loc)!, v)
       g.texts.add(r.text)
@@ -107,8 +122,11 @@ async function main() {
       }))
   }
   out.note = `Headlines and ad copy ranked by CPL (Meta leads, Ads Manager per-text breakdown) among those with at least $${MIN_SPEND} spend `
-    + `and 1+ lead. Ad copy is grouped by template: the same copy run at several locations, with only the city and coach name changed, counts as one.`
+    + `and 1+ lead, English copy only (Meta's automatic translations are left out). Ad copy is grouped by template: the same copy run at several locations, with only the city and coach name changed, counts as one.`
   coverage.forEach(c => console.log(c))
+  const ex = Array.from(excluded.entries()).sort((a, b) => b[1] - a[1])
+  console.log(`excluded as non-English: ${ex.length} texts, $${ex.reduce((s, [, v]) => s + v, 0).toFixed(2)}`)
+  for (const [t, v] of ex.slice(0, 40)) console.log(`  $${v.toFixed(2)}  ${t.replace(/\n/g, ' / ')}`)
   if (lowCoverage && !FORCE) {
     console.error(`Copy breakdown covers under ${MIN_COVERAGE * 100}% of the month's spend, so the month isn't fully synced yet; nothing written.
 `
