@@ -36,18 +36,20 @@ const short = (label: string) => label.replace(/^Alloy (personal training|Person
 // Brand kits for the Enhanced view's header. Alloy: their yellow-on-transparent logo (public/brand/alloy-logo.png,
 // from alloypersonaltraining.com), Alloy yellow #E1E000 on black/charcoal, bold condensed uppercase type (their site
 // uses United Sans Semi Condensed; Oswald is the free stand-in, falling back to a system condensed face).
-const BRANDS = {
+export const BRANDS = {
   alloy: { logo: '/brand/alloy-logo.png', name: 'Alloy Personal Training', tagline: 'Stronger Together' },
 } as const;
 export type BrandKey = keyof typeof BRANDS;
 const BRAND_FONT = "'Oswald', 'Arial Narrow', 'Roboto Condensed', sans-serif";
+export const BRAND_FONT_STACK = BRAND_FONT;
+export const BRAND_LOGOS: Record<BrandKey, string> = { alloy: BRANDS.alloy.logo };
 
-export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffer, renderCreative }: {
+export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffer, renderCreatives }: {
   report: GmnReportPayload;
   brand?: BrandKey;
   onOpenLocation?: (label: string) => void;
   onOpenOffer?: (label: string) => void;
-  renderCreative: (c: GmnCreative) => ReactNode;
+  renderCreatives: (cs: GmnCreative[]) => ReactNode;
 }) {
   const T = report.locationsTotal;
   const bookRate = T.leads && T.bookings != null ? (T.bookings / T.leads) * 100 : null;
@@ -59,11 +61,11 @@ export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffe
       {brand && <BrandHeader brand={brand} report={report} />}
       <Hero report={report} bookRate={bookRate} />
       <Spotlights report={report} onOpenLocation={onOpenLocation} />
-      <EfficiencyMap rows={report.locations} onOpenLocation={onOpenLocation} />
+      <HeatTable rows={report.locations} total={T} month={report.month} onOpenLocation={onOpenLocation} />
       <Leaderboard rows={report.locations} total={T} onOpenLocation={onOpenLocation} />
       <OfferMix report={report} onOpenOffer={onOpenOffer} />
-      <CreativeShowcase creatives={report.topCreatives} note={report.creativesNote} renderCreative={renderCreative} />
-      <HeatTable rows={report.locations} total={T} month={report.month} onOpenLocation={onOpenLocation} />
+      <CreativeShowcase creatives={report.topCreatives} note={report.creativesNote} renderCreatives={renderCreatives} />
+      <EfficiencyMap rows={report.locations} onOpenLocation={onOpenLocation} />
     </div>
   );
 }
@@ -393,21 +395,13 @@ function OfferMix({ report, onOpenOffer }: { report: GmnReportPayload; onOpenOff
   );
 }
 
-// ---------- 6. creatives: podium + the rest ----------
-function CreativeShowcase({ creatives, note, renderCreative }: { creatives: GmnCreative[]; note?: string; renderCreative: (c: GmnCreative) => ReactNode }) {
+// ---------- 6. creatives: equal-size cards grouped Images / Videos (ranks kept) ----------
+function CreativeShowcase({ creatives, note, renderCreatives }: { creatives: GmnCreative[]; note?: string; renderCreatives: (cs: GmnCreative[]) => ReactNode }) {
   if (!creatives.length) return null;
-  const podium = creatives.slice(0, 3), rest = creatives.slice(3);
   return (
     <section>
       <SectionTitle title="Creative hall of fame" sub={note} />
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {podium.map(c => (
-          <div key={c.rank} className={`rounded-2xl p-[2px] ${c.rank === 1 ? 'bg-gradient-to-br from-[#E1E000] via-[#E1E000]/40 to-transparent' : 'bg-white/10'}`}>
-            <div className="bg-[#2C2A29] rounded-2xl h-full">{renderCreative(c)}</div>
-          </div>
-        ))}
-      </div>
-      {rest.length > 0 && <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">{rest.map(c => <div key={c.rank}>{renderCreative(c)}</div>)}</div>}
+      {renderCreatives(creatives)}
     </section>
   );
 }
