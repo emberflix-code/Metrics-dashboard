@@ -77,7 +77,26 @@ export interface GmnReportPayload {
   // Click-through per offer (keyed by the offer row's label): the locations that ran it, each with its numbers for
   // that offer. Optional — older snapshots don't have it and the offer rows stay plain.
   offerDetails?: Record<string, GmnOfferDetail>;
+  // Top headlines and ad copy (Meta's title_asset / body_asset breakdowns), ranked like the creatives. Ad copy is grouped by
+  // template: each location's city name is swapped for "{City}" so the same copy run at many locations is one row.
+  // Optional — older snapshots don't have them and the Enhanced view just skips the section.
+  topHeadlines?: GmnCopyItem[];
+  topAdCopy?: GmnCopyItem[];
+  copyNote?: string;
   notes?: string[];
+}
+
+export interface GmnCopyItem {
+  rank: number;
+  text: string;               // the headline, or the ad copy template with "{City}" in place of the location's city
+  variants: number;           // distinct texts merged into this row (one per city for ad copy)
+  spend: number;
+  impressions: number;
+  linkClicks: number;
+  ctr: number | null;
+  leads: number;              // Meta leads
+  cpl: number | null;
+  locations: GmnCreativeLocation[];
 }
 
 export interface GmnOfferDetail {

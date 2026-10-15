@@ -7,7 +7,7 @@
 // "Other"), diverging blue (better than the network) <-> red (worse) with a neutral gray midpoint, status colors only
 // with an icon + label, brand yellow for emphasis (never a series).
 import { useMemo, useState, type ReactNode } from 'react';
-import type { GmnCreative, GmnMetricRow, GmnReportPayload } from '@/lib/gmnReport';
+import type { GmnCopyItem, GmnCreative, GmnMetricRow, GmnReportPayload } from '@/lib/gmnReport';
 import { fmtInt, fmtPct, fmtUsd } from '@/app/(marketer)/marketer/_components/format';
 
 const C = {
@@ -44,11 +44,12 @@ const BRAND_FONT = "'Oswald', 'Arial Narrow', 'Roboto Condensed', sans-serif";
 export const BRAND_FONT_STACK = BRAND_FONT;
 export const BRAND_LOGOS: Record<BrandKey, string> = { alloy: BRANDS.alloy.logo };
 
-export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffer, renderCreatives }: {
+export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffer, onOpenCopy, renderCreatives }: {
   report: GmnReportPayload;
   brand?: BrandKey;
   onOpenLocation?: (label: string) => void;
   onOpenOffer?: (label: string) => void;
+  onOpenCopy?: (item: GmnCopyItem, kind: CopyKind) => void;
   renderCreatives: (cs: GmnCreative[]) => ReactNode;
 }) {
   const T = report.locationsTotal;
@@ -65,6 +66,7 @@ export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffe
       <Leaderboard rows={report.locations} total={T} onOpenLocation={onOpenLocation} />
       <OfferMix report={report} onOpenOffer={onOpenOffer} />
       <CreativeShowcase creatives={report.topCreatives} note={report.creativesNote} renderCreatives={renderCreatives} />
+      <WinningWords headlines={report.topHeadlines ?? []} adCopy={report.topAdCopy ?? []} note={report.copyNote} onOpenCopy={onOpenCopy} />
       <EfficiencyMap rows={report.locations} onOpenLocation={onOpenLocation} />
     </div>
   );
@@ -403,6 +405,83 @@ function CreativeShowcase({ creatives, note, renderCreatives }: { creatives: Gmn
       <SectionTitle title="Creative hall of fame" sub={note} />
       {renderCreatives(creatives)}
     </section>
+  );
+}
+
+// ---------- 6b. winning words: top headlines + top ad copy ----------
+export type CopyKind = 'headline' | 'adcopy';
+
+// Copy text with the "{City}" / "{Coach}" placeholders (each location's own city / coach name) shown as yellow chips.
+export function CopyText({ text }: { text: string }) {
+  const parts = text.split(/(\{City\}|\{Coach\})/);
+  return (
+    <>
+      {parts.map((p, i) => (p === '{City}' || p === '{Coach}')
+        ? <span key={i} className="inline-block bg-[#E1E000]/15 text-[#E1E000] rounded px-1 text-[0.9em] font-semibold not-italic">{p.slice(1, -1)}</span>
+        : <span key={i}>{p}</span>)}
+    </>
+  );
+}
+
+function WinningWords({ headlines, adCopy, note, onOpenCopy }: {
+  headlines: GmnCopyItem[]; adCopy: GmnCopyItem[]; note?: string; onOpenCopy?: (item: GmnCopyItem, kind: CopyKind) => void;
+}) {
+  if (!headlines.length && !adCopy.length) return null;
+  return (
+    <section>
+      <SectionTitle title="Winning words" sub={note} />
+      <div className="grid grid-cols-1 xl:grid-cols-5 gap-6 items-start">
+        <CopyList title="Top headlines" items={headlines} kind="headline" onOpenCopy={onOpenCopy} className="xl:col-span-2" />
+        <CopyList title="Top ad copy" items={adCopy} kind="adcopy" onOpenCopy={onOpenCopy} className="xl:col-span-3" />
+      </div>
+    </section>
+  );
+}
+
+function CopyList({ title, items, kind, onOpenCopy, className = '' }: {
+  title: string; items: GmnCopyItem[]; kind: CopyKind; onOpenCopy?: (item: GmnCopyItem, kind: CopyKind) => void; className?: string;
+}) {
+  const best = Math.min(...items.map(i => i.cpl ?? Infinity));
+  return (
+    <div className={`bg-black/25 border border-white/10 rounded-2xl p-5 ${className}`}>
+      <p className="brand-type text-sm font-semibold text-[#E1E000] mb-4">{title}</p>
+      {!items.length && <p className="text-sm text-slate-400">None reached $300 spend with a lead this month.</p>}
+      <ol className="space-y-3">
+        {items.map(it => {
+          const body = (
+            <div className="flex gap-4">
+              <span className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold ${it.rank === 1 ? 'bg-[#E1E000] text-black' : 'bg-white/10 text-slate-200'}`}>{it.rank}</span>
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start justify-between gap-4">
+                  <p className={kind === 'headline'
+                    ? 'text-base font-semibold text-white break-words'
+                    : 'text-sm text-slate-200 whitespace-pre-line line-clamp-3 break-words'}>
+                    <CopyText text={it.text} />
+                  </p>
+                  <div className="shrink-0 text-right">
+                    <p className="text-lg font-semibold tabular-nums leading-none">{fmtUsd(it.cpl)}</p>
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 mt-1">CPL</p>
+                  </div>
+                </div>
+                <div className="mt-2 h-1.5 bg-black/30 rounded">
+                  <div className="h-1.5 rounded-r" style={{ width: `${it.cpl ? (best / it.cpl) * 100 : 0}%`, background: it.rank === 1 ? C.accent : C.blue, opacity: 0.85 }} />
+                </div>
+                <p className="text-xs text-slate-400 mt-1.5 tabular-nums">
+                  {fmtUsd(it.spend)} spend · {fmtInt(it.leads)} leads · CTR {fmtPct(it.ctr)} · {it.locations.length} location{it.locations.length === 1 ? '' : 's'}
+                </p>
+              </div>
+            </div>
+          );
+          return (
+            <li key={it.rank}>
+              {onOpenCopy
+                ? <button type="button" onClick={() => onOpenCopy(it, kind)} className="w-full text-left rounded-xl p-3 -m-1 hover:bg-white/5 border border-transparent hover:border-[#E1E000]/40 transition-colors">{body}</button>
+                : <div className="p-3 -m-1">{body}</div>}
+            </li>
+          );
+        })}
+      </ol>
+    </div>
   );
 }
 

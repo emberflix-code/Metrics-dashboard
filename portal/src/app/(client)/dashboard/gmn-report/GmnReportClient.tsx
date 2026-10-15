@@ -1,9 +1,9 @@
 'use client';
 
 import { useEffect, useState, type ReactNode } from 'react';
-import type { GmnCreative, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
+import type { GmnCopyItem, GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
-import EnhancedView, { BRAND_FONT_STACK, BRAND_LOGOS, type BrandKey } from './EnhancedView';
+import EnhancedView, { BRAND_FONT_STACK, BRAND_LOGOS, CopyText, type BrandKey, type CopyKind } from './EnhancedView';
 
 interface Props {
   clientName: string;
@@ -37,8 +37,10 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
   // modals take the brand look only in the Enhanced view; Classic modals keep their original look
   const panelBrand = view === 'enhanced' ? brand : undefined;
   const [openCreative, setOpenCreative] = useState<GmnCreative | null>(null);
-  const showCreative = (c: GmnCreative) => { setOpenLocation(null); setOpenOffer(null); setOpenCreative(c); };
-  const openLocationFromCreative = showLocation ? (label: string) => { setOpenCreative(null); showLocation(label); } : undefined;
+  const [openCopy, setOpenCopy] = useState<{ item: GmnCopyItem; kind: CopyKind } | null>(null);
+  const showCreative = (c: GmnCreative) => { setOpenLocation(null); setOpenOffer(null); setOpenCopy(null); setOpenCreative(c); };
+  const showCopy = (item: GmnCopyItem, kind: CopyKind) => { setOpenLocation(null); setOpenOffer(null); setOpenCreative(null); setOpenCopy({ item, kind }); };
+  const openLocationFromCreative = showLocation ? (label: string) => { setOpenCreative(null); setOpenCopy(null); showLocation(label); } : undefined;
   return (
     <div className="min-h-screen bg-[#2C2A29] text-slate-100">
       <header className="border-b border-white/10 bg-black/20">
@@ -90,6 +92,7 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
             brand={brand}
             onOpenLocation={showLocation}
             onOpenOffer={showOffer}
+            onOpenCopy={showCopy}
             renderCreatives={cs => <CreativeGroups creatives={cs} onShowLocations={showCreative} cols="grid-cols-1 sm:grid-cols-2 lg:grid-cols-4" />}
           />
         ) : (
@@ -142,6 +145,16 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
           brand={panelBrand}
           onClose={() => setOpenOffer(null)}
           onLocation={showLocation}
+        />
+      )}
+      {openCopy && report && (
+        <CopyPanel
+          item={openCopy.item}
+          kind={openCopy.kind}
+          monthLabel={report.monthLabel}
+          brand={panelBrand}
+          onClose={() => setOpenCopy(null)}
+          onLocation={openLocationFromCreative}
         />
       )}
       {openCreative && report && (
@@ -439,24 +452,20 @@ function CreativeGroups({ creatives, onShowLocations, cols = 'grid-cols-1 sm:gri
 
 type CreativeSortKey = 'location' | 'spend' | 'impressions' | 'linkClicks' | 'ctr' | 'leads' | 'cpl';
 
-// One creative's modal: the creative large (with its ad copy), its numbers, and every location that ran it, with a
-// spend-share bar and CPL shaded against the creative's own CPL (blue = better, red = worse). Locations open their report.
-function CreativePanel({ c, monthLabel, brand, onClose, onLocation }: {
-  c: GmnCreative; monthLabel: string; brand?: BrandKey; onClose: () => void; onLocation?: (label: string) => void;
+// The locations that ran a creative / headline / ad copy: sortable, with a spend-share bar and each location's CPL shaded
+// against the item's own CPL (blue = better, red = worse). Locations open their report.
+function LocationsBreakdown({ rows: input, refCpl, what, onLocation }: {
+  rows: GmnCreativeLocation[]; refCpl: number | null; what: string; onLocation?: (label: string) => void;
 }) {
   const [sort, setSort] = useState<{ key: CreativeSortKey; dir: 1 | -1 }>({ key: 'spend', dir: -1 });
-  const rows = [...c.locations].sort((a, b) => {
+  const rows = [...input].sort((a, b) => {
     if (sort.key === 'location') return sort.dir * a.location.localeCompare(b.location);
     return sort.dir * (((a[sort.key] as number | null) ?? Infinity) - ((b[sort.key] as number | null) ?? Infinity));
   });
-  const maxSpend = Math.max(...c.locations.map(l => l.spend), 1);
-  const tiles: [string, string][] = [
-    ['Spend', fmtUsd(c.spend)], ['Leads', fmtInt(c.leads)], ['CPL', fmtUsd(c.cpl)],
-    ['Impr.', fmtInt(c.impressions)], ['Link clicks', fmtInt(c.linkClicks)], ['CTR', fmtPct(c.ctr)],
-  ];
+  const maxSpend = Math.max(...input.map(l => l.spend), 1);
   const cplShade = (v: number | null) => {
-    if (v == null || c.cpl == null) return undefined;
-    const ratio = v / c.cpl;
+    if (v == null || refCpl == null) return undefined;
+    const ratio = v / refCpl;
     const t = Math.min(1, Math.abs(Math.log2(ratio)));
     return `rgba(${ratio <= 1 ? '57,135,229' : '230,103,103'},${(0.12 + 0.45 * t).toFixed(2)})`;
   };
@@ -468,60 +477,103 @@ function CreativePanel({ c, monthLabel, brand, onClose, onLocation }: {
     </th>
   );
   return (
+    <section>
+      <h3 className="text-xl font-light mb-1">Locations that ran this {what} ({input.length})</h3>
+      <p className="text-xs text-slate-400 mb-4">
+        Sort by any column. The bar shows each location&apos;s share of this {what}&apos;s spend; CPL is shaded against the
+        {' '}{what}&apos;s own CPL ({fmtUsd(refCpl)}): blue = better, red = worse.{onLocation ? ' Click a location to open its report.' : ''}
+      </p>
+      <div className="overflow-auto max-h-[480px] rounded-xl border border-white/15">
+        <table className="w-full text-sm border-collapse min-w-[760px]">
+          <thead className="sticky top-0 bg-[#1F1E1D] z-10">
+            <tr>{th('location', 'Location', false)}{th('spend', 'Spend')}{th('impressions', 'Impr.')}{th('linkClicks', 'Clicks')}{th('ctr', 'CTR')}{th('leads', 'Leads')}{th('cpl', 'CPL')}</tr>
+          </thead>
+          <tbody>
+            {rows.map(l => (
+              <tr key={l.location} className="border-t border-white/5 hover:bg-white/5">
+                <td className="px-3 py-1.5">
+                  {onLocation ? <button type="button" onClick={() => onLocation(l.location)} className="text-left hover:text-[#E1E000] underline decoration-white/20 underline-offset-2">{l.location}</button> : l.location}
+                </td>
+                <td className="px-3 py-1.5">
+                  <div className="flex items-center justify-end gap-2">
+                    <div className="w-20 h-2 bg-black/30 rounded hidden sm:block"><div className="h-2 rounded-r bg-[#3987e5]" style={{ width: `${(l.spend / maxSpend) * 100}%` }} /></div>
+                    <span className="tabular-nums w-20 text-right">{fmtUsd(l.spend)}</span>
+                  </div>
+                </td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(l.impressions)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(l.linkClicks)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{fmtPct(l.ctr)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(l.leads)}</td>
+                <td className="px-3 py-1.5 text-right tabular-nums" style={{ background: cplShade(l.cpl) }}>{fmtUsd(l.cpl)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function MetricTiles({ m }: { m: { spend: number; leads: number; cpl: number | null; impressions: number; linkClicks: number; ctr: number | null } }) {
+  const tiles: [string, string][] = [
+    ['Spend', fmtUsd(m.spend)], ['Leads', fmtInt(m.leads)], ['CPL', fmtUsd(m.cpl)],
+    ['Impr.', fmtInt(m.impressions)], ['Link clicks', fmtInt(m.linkClicks)], ['CTR', fmtPct(m.ctr)],
+  ];
+  return (
+    <div className="grid grid-cols-3 gap-3">
+      {tiles.map(([l, v]) => (
+        <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
+          <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
+          <p className="text-lg font-semibold mt-0.5 tabular-nums">{v}</p>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// One creative's modal: the creative large, its numbers, and every location that ran it.
+function CreativePanel({ c, monthLabel, brand, onClose, onLocation }: {
+  c: GmnCreative; monthLabel: string; brand?: BrandKey; onClose: () => void; onLocation?: (label: string) => void;
+}) {
+  return (
     <Panel kicker={`${monthLabel} · Creative #${c.rank} · ${c.type === 'video' ? 'Video' : 'Image'}`} title={`Creative #${c.rank}`} onClose={onClose} brand={brand}>
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
         <div className="lg:col-span-2 relative bg-black rounded-xl overflow-hidden aspect-square border border-white/10">
           <CreativeMedia c={c} eager />
         </div>
         <div className="lg:col-span-3 flex flex-col gap-4">
-          <div className="grid grid-cols-3 gap-3">
-            {tiles.map(([l, v]) => (
-              <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
-                <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
-                <p className="text-lg font-semibold mt-0.5 tabular-nums">{v}</p>
-              </div>
-            ))}
-          </div>
+          <MetricTiles m={c} />
           <p className="text-xs text-slate-400">
             Ran at {c.locations.length} location{c.locations.length === 1 ? '' : 's'}
             {c.variants > 1 ? ` in ${c.variants} versions (same image or video with a different city or offer headline)` : ''}.
           </p>
         </div>
       </div>
-      <section>
-        <h3 className="text-xl font-light mb-1">Locations that ran this creative ({c.locations.length})</h3>
-        <p className="text-xs text-slate-400 mb-4">
-          Sort by any column. The bar shows each location&apos;s share of this creative&apos;s spend; CPL is shaded against the
-          creative&apos;s own CPL ({fmtUsd(c.cpl)}): blue = better, red = worse.{onLocation ? ' Click a location to open its report.' : ''}
-        </p>
-        <div className="overflow-auto max-h-[480px] rounded-xl border border-white/15">
-          <table className="w-full text-sm border-collapse min-w-[760px]">
-            <thead className="sticky top-0 bg-[#1F1E1D] z-10">
-              <tr>{th('location', 'Location', false)}{th('spend', 'Spend')}{th('impressions', 'Impr.')}{th('linkClicks', 'Clicks')}{th('ctr', 'CTR')}{th('leads', 'Leads')}{th('cpl', 'CPL')}</tr>
-            </thead>
-            <tbody>
-              {rows.map(l => (
-                <tr key={l.location} className="border-t border-white/5 hover:bg-white/5">
-                  <td className="px-3 py-1.5">
-                    {onLocation ? <button type="button" onClick={() => onLocation(l.location)} className="text-left hover:text-[#E1E000] underline decoration-white/20 underline-offset-2">{l.location}</button> : l.location}
-                  </td>
-                  <td className="px-3 py-1.5">
-                    <div className="flex items-center justify-end gap-2">
-                      <div className="w-20 h-2 bg-black/30 rounded hidden sm:block"><div className="h-2 rounded-r bg-[#3987e5]" style={{ width: `${(l.spend / maxSpend) * 100}%` }} /></div>
-                      <span className="tabular-nums w-20 text-right">{fmtUsd(l.spend)}</span>
-                    </div>
-                  </td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(l.impressions)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(l.linkClicks)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{fmtPct(l.ctr)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums">{fmtInt(l.leads)}</td>
-                  <td className="px-3 py-1.5 text-right tabular-nums" style={{ background: cplShade(l.cpl) }}>{fmtUsd(l.cpl)}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <LocationsBreakdown rows={c.locations} refCpl={c.cpl} what="creative" onLocation={onLocation} />
+    </Panel>
+  );
+}
+
+// One headline's / ad copy template's modal: the full text, its numbers, and every location that ran it.
+function CopyPanel({ item, kind, monthLabel, brand, onClose, onLocation }: {
+  item: GmnCopyItem; kind: CopyKind; monthLabel: string; brand?: BrandKey; onClose: () => void; onLocation?: (label: string) => void;
+}) {
+  const what = kind === 'headline' ? 'headline' : 'ad copy';
+  return (
+    <Panel kicker={`${monthLabel} · ${kind === 'headline' ? 'Headline' : 'Ad copy'} #${item.rank}`} title={kind === 'headline' ? item.text : `Ad copy #${item.rank}`} onClose={onClose} brand={brand}>
+      <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
+        <div className="lg:col-span-3 bg-black/25 border border-white/10 rounded-xl p-5 text-sm text-slate-200 whitespace-pre-line leading-relaxed max-h-[420px] overflow-y-auto">
+          <CopyText text={item.text} />
         </div>
-      </section>
+        <div className="lg:col-span-2 flex flex-col gap-4">
+          <MetricTiles m={item} />
+          <p className="text-xs text-slate-400">
+            Ran at {item.locations.length} location{item.locations.length === 1 ? '' : 's'}
+            {kind === 'adcopy' && item.variants > 1 ? ` as ${item.variants} versions (City and Coach = each location's own city and coach name)` : ''}.
+          </p>
+        </div>
+      </div>
+      <LocationsBreakdown rows={item.locations} refCpl={item.cpl} what={what} onLocation={onLocation} />
     </Panel>
   );
 }

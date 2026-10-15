@@ -22,6 +22,8 @@ creatives_src = sys.argv[9] if len(sys.argv) > 9 and sys.argv[9] else None
 # count (the deck's "Bookings") and is noted in its Booking notes.
 manual_src = sys.argv[10] if len(sys.argv) > 10 and sys.argv[10] else None
 manual_bookings = json.load(open(manual_src, encoding="utf-8")) if manual_src else {}
+# Top headlines + ad copy (optional, _alloy_month_top_copy.ts) for the Enhanced view of the report page.
+copy_src = sys.argv[11] if len(sys.argv) > 11 and sys.argv[11] else None
 data = json.load(open(src, encoding="utf-8"))
 bk = {r["name"]: r for r in json.load(open(bookings_src, encoding="utf-8"))["rows"]} if bookings_src else None
 gl_doc = json.load(open(ghl_src, encoding="utf-8")) if ghl_src else None
@@ -625,6 +627,7 @@ if offers_src:
                               sum(o["cpb_spend"] for o in offers.values()))
 
     creatives = json.load(open(creatives_src, encoding="utf-8")) if creatives_src else {"topCreatives": [], "note": None}
+    top_copy = json.load(open(copy_src, encoding="utf-8")) if copy_src else {}
     payload = {
         "version": 1,
         "title": "Alloy Personal Training Local Marketing Monthly Report",
@@ -650,6 +653,9 @@ if offers_src:
             } for lr in loc_rows
         },
         "locationCreativesNote": creatives.get("locationNote"),
+        "topHeadlines": top_copy.get("topHeadlines", []),
+        "topAdCopy": top_copy.get("topAdCopy", []),
+        "copyNote": top_copy.get("note"),
         # click-through per offer: the locations that ran it, each with its numbers for that offer (sorted by spend)
         "offerDetails": {
             orow["label"]: {
