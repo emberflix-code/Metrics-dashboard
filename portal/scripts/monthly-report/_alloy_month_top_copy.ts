@@ -9,7 +9,8 @@
  *  - Ranked by CPL (Meta leads) among items with ≥ MIN_SPEND spend and ≥1 lead (same $300 rule as the creatives); top 10.
  *  - Each item lists the locations that ran it (campaign name → Alloy location by campaign filter, most specific wins).
  * Output: { topHeadlines, topAdCopy, note } consumed by _build_alloy_month_xlsx.py (11th arg) into the report payload.
- * Run (from portal/): railway run --service Metrics-dashboard npx --yes tsx scripts/monthly-report/_alloy_month_top_copy.ts 2026-09 <outFile>
+ * Run (from portal/): railway run --service Metrics-dashboard npx --yes tsx scripts/monthly-report/_alloy_month_top_copy.ts 2026-09 <outFile> [--force]
+ *  Refuses to write when the copy breakdown covers < 98% of the month's spend (the daily sync hasn't caught up yet).
  */
 import { Pool } from 'pg'
 import { writeFileSync } from 'fs'
@@ -18,7 +19,8 @@ const [MONTH, OUT] = [process.argv[2] || '2026-09', process.argv[3] || 'alloy_to
 const [y, m] = MONTH.split('-').map(Number)
 const SINCE = `${MONTH}-01`, UNTIL = new Date(Date.UTC(y, m, 0)).toISOString().slice(0, 10)
 const ACCOUNTS = ['1007481743408819', '3023829647843614']
-const MIN_SPEND = 300, TOP_N = 10
+const MIN_SPEND = 300, TOP_N = 10, MIN_COVERAGE = 0.98
+const FORCE = process.argv.includes('--force')
 const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, max: 2 })
 
 const matches = (name: string, filter: string) => {
@@ -72,6 +74,7 @@ async function main() {
 
   const out: Record<string, any> = {}
   const coverage: string[] = []
+  let lowCoverage = false
   for (const [kind, key] of [['title', 'topHeadlines'], ['body', 'topAdCopy']] as const) {
     const rows = (await pool.query(
       `SELECT t.text, b.campaign_name, SUM(b.spend)::float spend, SUM(b.impressions)::bigint impressions,
@@ -92,6 +95,7 @@ async function main() {
       add(g.byLoc.get(loc)!, v)
       g.texts.add(r.text)
     }
+    if (covered < monthSpend * MIN_COVERAGE) lowCoverage = true
     coverage.push(`${kind}: ${groups.size} groups, breakdown spend $${covered.toFixed(2)} of $${monthSpend.toFixed(2)} (${(covered / monthSpend * 100).toFixed(1)}%)`)
     out[key] = Array.from(groups.entries())
       .filter(([, g]) => g.total.spend >= MIN_SPEND && g.total.leads > 0)
@@ -105,6 +109,14 @@ async function main() {
   out.note = `Headlines and ad copy ranked by CPL (Meta leads, Ads Manager per-text breakdown) among those with at least $${MIN_SPEND} spend `
     + `and 1+ lead. Ad copy is grouped by template: the same copy run at several locations, with only the city and coach name changed, counts as one.`
   coverage.forEach(c => console.log(c))
+  if (lowCoverage && !FORCE) {
+    console.error(`Copy breakdown covers under ${MIN_COVERAGE * 100}% of the month's spend, so the month isn't fully synced yet; nothing written.
+`
+      + `Catch up first (from portal/, repeat until covered): railway run --service Metrics-dashboard npx --yes tsx -e "require('./src/lib/metaSync').syncAccountCopyOnly('<account id>').then(r => { console.log(r); process.exit(0) })"
+`
+      + `or pass --force to write anyway.`)
+    process.exit(2)
+  }
   console.log(`headlines: ${out.topHeadlines.length}, ad copy: ${out.topAdCopy.length}`)
   writeFileSync(OUT, JSON.stringify(out, null, 2))
   await pool.end()

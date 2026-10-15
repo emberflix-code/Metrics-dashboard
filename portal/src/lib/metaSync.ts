@@ -2316,7 +2316,8 @@ async function syncCreatives(
 const TARGETING_BUDGET_MS = 60_000;
 const TARGETING_ONLY_BUDGET_MS = 10 * 60_000;
 const COPY_BUDGET_MS = 60_000;
-const COPY_BREAKDOWN_BUDGET_MS = 90_000;
+// 4 min: at 90s a large account (Alloy BM2) advanced ~one 3-day chunk per daily run and never caught up.
+const COPY_BREAKDOWN_BUDGET_MS = 4 * 60_000;
 const COPY_ONLY_BUDGET_MS = 10 * 60_000;
 // Per the 2026-09-23 decision: active entities + the last 90 days of spend.
 // Older copy performance is low value and each extra breakdown kind is
@@ -2914,8 +2915,12 @@ export async function syncCopyBreakdowns(accountId: string, token: string, yeste
   if (complete && earliest && daysBetween(earliest, floorDate) > 0) earliest = floorDate;
   let topUpDone = false;
   let guard = 8;
+  // Top-up only ever covers the last 7 days. A missing or lagging copy_topup_until used to make the top-up span
+  // [floor, yesterday] oldest-first, so on a large account the newest days (what the monthly report needs) came last
+  // and the 90-day walk never finished. History is the backfill's job, and that walks newest-first, month by month.
+  const topupMark = yesterday; // buildSyncRanges tops up from (mark - 7 days)
   while (guard-- > 0) {
-    const ranges = buildSyncRanges(floorDate, yesterday, state?.copy_topup_until ?? null, newest, earliest, complete);
+    const ranges = buildSyncRanges(floorDate, yesterday, topupMark, newest, earliest, complete);
     const topUp = !topUpDone ? ranges.find(r => r.kind === 'topup') : undefined;
     const backfill = ranges.find(r => r.kind === 'backfill');
     if (!topUp && !backfill) break;
