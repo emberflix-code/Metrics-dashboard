@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
-import { clusterByPerceptualHashCached, hasFreshClusterCache, computeDownsampledGray, computePixelMADFromDownsampled, PIXEL_MAD_MATCH_THRESHOLD, PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD } from '@/lib/phash';
+import { clusterByPerceptualHashCached, hasFreshClusterCache, resolveClusteredThemeAndUgc, computeDownsampledGray, computePixelMADFromDownsampled, PIXEL_MAD_MATCH_THRESHOLD, PHASH_MATCH_THRESHOLD, PHASH_CANDIDATE_THRESHOLD } from '@/lib/phash';
 
 interface CreativeRow {
   assetKey: string;
@@ -21,6 +21,13 @@ interface CreativeRow {
   ctr: number;
   cpl: number;
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
+  // Manual admin tags (meta_creative_assets.theme / ugc_status), resolved over
+  // the card's whole phash cluster like /api/meta/db/asset-breakdown does.
+  // Missing until 2026-10-20: tags on static (non-DCO) creatives saved fine
+  // but every reload showed the card untagged, because this route never
+  // returned them.
+  theme: string | null;
+  ugcStatus: string | null;
 }
 
 // DB-backed mirror of /api/meta/creatives. Joins meta_creative_assets +
@@ -149,6 +156,10 @@ export async function GET(req: NextRequest) {
     }
     const canonicalKeyOf = await clusterByPerceptualHashCached(cacheKey, clusterInputAssets, confirmByPixelDiff);
 
+    const themeUgcByCanonical = resolveClusteredThemeAndUgc(
+      assetRows.map(a => ({ assetKey: a.asset_key, theme: a.theme, ugcStatus: a.ugc_status })),
+      canonicalKeyOf
+    );
     const rows = new Map<string, CreativeRow>();
     for (const m of mapRows) {
       const metrics = metricsByAdId.get(m.ad_id);
@@ -181,6 +192,8 @@ export async function GET(req: NextRequest) {
           spend: 0, results: 0, impressions: 0, linkClicks: 0, reach: 0,
           ctr: 0, cpl: 0,
           ads: [],
+          theme: themeUgcByCanonical.get(canonicalKey)?.theme ?? null,
+          ugcStatus: themeUgcByCanonical.get(canonicalKey)?.ugcStatus ?? null,
         };
         rows.set(canonicalKey, row);
       }
