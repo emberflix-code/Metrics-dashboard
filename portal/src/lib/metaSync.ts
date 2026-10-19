@@ -484,24 +484,34 @@ export async function syncEntities(accountId: string, token: string): Promise<nu
 // ── Ads Manager "Results" rule ─────────────────────────────────────────
 // For these accounts the cached `results` reproduce Ads Manager's Results
 // column campaign for campaign, instead of the pixel-or-form heuristic in
-// resolveResultsFromActions. Reverse-engineered 2026-09-22 against an
-// Ads Manager export for AF Regional Omega (Jan 1–Sep 21 2026, 2,359
-// campaigns): 2,357 rows exact, total 24,320 vs 24,318 (the last day was
-// still settling). What Ads Manager does:
-//   - "Leads (form)"  = onsite_conversion.lead_grouped only. Given to a
-//     campaign ONLY when every ad set optimises for LEAD_GENERATION AND the
-//     campaign was created on/after ~June 2026 (older instant-form
-//     campaigns, created Mar–May, still get the combined figure — a Meta
-//     reporting change by creation date; any cutoff May 8–Jul 12 matched).
-//   - everything else ("Leads", "Website leads") = Meta's combined `lead`
-//     action (pixel + form). The campaign objective is OUTCOME_LEADS for
-//     all of them, so it does not distinguish; only optimisation goal and
-//     creation date do.
-// The old heuristic picked ONE of pixel/form per campaign and was ~1% low
-// on Omega (24,045). Scoped by account because it changes every
-// Meta-sourced Leads/CPL figure and needs a full results re-sync when an
-// account is added; the user's instruction was Omega + the other Anytime
-// Fitness accounts, not the Canada ones and not Alloy / non-AF.
+// resolveResultsFromActions: Results = Meta's combined `lead` action
+// (pixel + form). Scoped by account because it changes every Meta-sourced
+// Leads/CPL figure and needs a full results re-sync when an account is
+// added; the user's instruction was Omega + the other Anytime Fitness
+// accounts, not the Canada ones and not Alloy / non-AF.
+//
+// There used to be a second branch here: campaigns whose ad sets all
+// optimise for LEAD_GENERATION and that were created on/after
+// FORM_ONLY_CREATED_CUTOFF stored onsite_conversion.lead_grouped only
+// ("Leads (form)"), dropping the campaign's pixel leads. Reverse-engineered
+// 2026-09-22 from one Omega export and WITHDRAWN 2026-10-19: it is wrong,
+// and badly so. Measured against the user's own five Ads Manager exports
+// for Sep 1–30 2026, per campaign across all 186 Omega campaigns, Results
+// equals combined `lead` for 183 and onsite-only for 2. The branch was
+// tagging 208 of Omega's 217 campaigns 'form' and discarding 2,371 pixel
+// leads, so the Anytime Fitness Corporate dashboard read 4,000 leads where
+// the exports totalled 6,195 — the whole 2,195 gap. The other four
+// accounts matched only because they had no pixel leads that month
+// (lead == onsite), which is also why the original reverse-engineering
+// looked clean. No date cutoff can rescue it: the affected campaigns are
+// all LEAD_GENERATION and were created after any plausible cutoff.
+//
+// So every campaign in scope now resolves to 'lead'. The ResultsRule type,
+// getResultsRules() and resultsUnderRule() are kept — six call sites in
+// metaSync.ts and marketer/campaignStats.ts rely on them, and they are the
+// hook if a genuinely form-only account ever turns up — but today the
+// classifier has one outcome. Verify any reinstated branch per campaign
+// against a fresh export, not against an account total.
 const ADS_MANAGER_RESULTS_ACCOUNTS = new Set([
   '4594093867301854', // GymMembersNow AF Regional Omega
   '216024513873696',  // GymMembersNow AF #4299 - Grand Parkway, TX (Matthew McCool)
@@ -510,7 +520,6 @@ const ADS_MANAGER_RESULTS_ACCOUNTS = new Set([
   '9135921576479804', // GymMembersNow AF Regional Aaron Meier
   '794347999225743',  // GymMembersNow AF Regional Rob Jent
 ]);
-const FORM_ONLY_CREATED_CUTOFF = '2026-06-01';
 type ResultsRule = 'form' | 'lead';
 interface ResultsRules { byCampaign: Map<string, ResultsRule>; byAd: Map<string, ResultsRule> }
 const RESULTS_RULES_TTL_MS = 15 * 60_000;
@@ -519,32 +528,17 @@ const _resultsRulesCache = new Map<string, { expires: number; rules: ResultsRule
 export function invalidateResultsRules(accountId: string): void { _resultsRulesCache.delete(accountId); }
 
 // null = account not in scope, caller keeps resolveResultsFromActions.
-// Built from meta_entities (created_time / optimization_goal are filled by
-// syncEntities, which runs first in every sync). A campaign with no ad-set
-// rows yet, or one whose ad sets carry no goal, falls back to 'lead'.
+// Every in-scope campaign resolves to 'lead' (combined pixel + form), which
+// is what Ads Manager reports — see the withdrawn form-only branch above.
 export async function getResultsRules(accountId: string): Promise<ResultsRules | null> {
   if (!ADS_MANAGER_RESULTS_ACCOUNTS.has(accountId)) return null;
   const hit = _resultsRulesCache.get(accountId);
   if (hit && hit.expires > Date.now()) return hit.rules;
-  const campaigns = await query<{ entity_id: string; created: string | null }>(
-    `SELECT entity_id, to_char(created_time, 'YYYY-MM-DD') AS created FROM meta_entities WHERE account_id = $1 AND level = 'campaign'`, [accountId]);
-  const adsets = await query<{ campaign_id: string | null; optimization_goal: string | null }>(
-    `SELECT campaign_id, optimization_goal FROM meta_entities WHERE account_id = $1 AND level = 'adset'`, [accountId]);
-  const ads = await query<{ entity_id: string; campaign_id: string | null }>(
-    `SELECT entity_id, campaign_id FROM meta_entities WHERE account_id = $1 AND level = 'ad'`, [accountId]);
-  const allForm = new Map<string, boolean>();
-  for (const a of adsets) {
-    if (!a.campaign_id) continue;
-    const prev = allForm.get(a.campaign_id);
-    allForm.set(a.campaign_id, (prev ?? true) && a.optimization_goal === 'LEAD_GENERATION');
-  }
-  const byCampaign = new Map<string, ResultsRule>();
-  for (const c of campaigns) {
-    byCampaign.set(c.entity_id, allForm.get(c.entity_id) === true && !!c.created && c.created >= FORM_ONLY_CREATED_CUTOFF ? 'form' : 'lead');
-  }
-  const byAd = new Map<string, ResultsRule>();
-  for (const a of ads) byAd.set(a.entity_id, (a.campaign_id && byCampaign.get(a.campaign_id)) || 'lead');
-  const rules = { byCampaign, byAd };
+  // Empty maps: every call site resolves a miss to 'lead', which is now the
+  // only outcome, so there is nothing to read from meta_entities. This also
+  // drops the three full-table entity scans this used to do per sync (~8,400
+  // campaigns + 20,000 ad sets on Omega alone).
+  const rules: ResultsRules = { byCampaign: new Map(), byAd: new Map() };
   _resultsRulesCache.set(accountId, { expires: Date.now() + RESULTS_RULES_TTL_MS, rules });
   return rules;
 }
