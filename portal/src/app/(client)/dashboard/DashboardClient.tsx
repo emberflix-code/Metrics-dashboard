@@ -1422,6 +1422,29 @@ function _ugcLabel(v: string | null | undefined): string {
   return UGC_OPTIONS.find(o => o.value === v)?.label || '';
 }
 
+// Quick-tag mode (admin, Creatives tab toolbar): a "brush" of Theme and/or
+// Type. While on, clicking anywhere on a creative card applies the brush
+// instead of opening the asset modal; clicking a card that already carries
+// the whole brush clears it again (toggle). Module state like the other
+// Creatives toggles so the plain-HTML card templates can read it.
+let _quickTagOn = false;
+let _quickTagTheme: string | null = null;
+let _quickTagUgc: string | null = null;
+
+// One-click tag chips on an admin card (replaced the Theme…/Type… dropdowns):
+// click a chip to set it, click the lit chip again to clear it.
+const _CHIP_THEME_SHORT: Record<string, string> = { 'non-active': 'Non-Active', strength: 'Strength', tread: 'Tread', 'strength+tread': 'Str+Tread' };
+function _tagChipsHtml(r: { accountId: string; assetKey: string; theme?: string | null; ugcStatus?: string | null }): string {
+  const acc = r.accountId.replace(/'/g, "\\'"), key = r.assetKey.replace(/'/g, "\\'");
+  const chip = (field: 'theme' | 'ugcStatus', value: string, label: string, on: boolean, onCls: string) =>
+    `<button type="button" class="tag-chip ${on ? onCls : 'tag-chip-off'}" aria-pressed="${on}" title="${on ? 'Click to clear' : 'Click to tag'}"
+      onclick="event.stopPropagation();window._toggleCreativeTag('${acc}','${key}','${field}','${value}')">${label}</button>`;
+  return `<div class="flex flex-col gap-1 mb-2" onclick="event.stopPropagation()">
+    <div class="flex flex-wrap gap-1">${THEME_OPTIONS.map(o => chip('theme', o.value, _CHIP_THEME_SHORT[o.value] || o.label, r.theme === o.value, 'tag-chip-theme')).join('')}</div>
+    <div class="flex flex-wrap gap-1">${UGC_OPTIONS.map(o => chip('ugcStatus', o.value, o.label, r.ugcStatus === o.value, 'tag-chip-ugc')).join('')}</div>
+  </div>`;
+}
+
 // Deployed-build indicator shown in the dashboard footer + floating badge.
 // NEXT_PUBLIC_VERSION comes from `git describe --tags --always` (see
 // next.config.mjs) — once a real tag exists it reads like "v1.2.1" or
@@ -2335,16 +2358,7 @@ function renderCreativesV2() {
     // (badges AND dropdowns, admin included) when _hideCreativeTagging is on
     // — see Props.hideCreativeTagging.
     const themeUgcLine = _hideCreativeTagging ? '' : _isAdminView
-      ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
-          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
-            <option value="">Theme…</option>
-            ${THEME_OPTIONS.map(o => `<option value="${o.value}"${r.theme===o.value?' selected':''}>${o.label}</option>`).join('')}
-          </select>
-          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','ugcStatus',this.value)">
-            <option value="">Type…</option>
-            ${UGC_OPTIONS.map(o => `<option value="${o.value}"${r.ugcStatus===o.value?' selected':''}>${o.label}</option>`).join('')}
-          </select>
-        </div>`
+      ? _tagChipsHtml(r)
       : (r.theme || r.ugcStatus)
         ? `<div class="flex items-center gap-1 mb-2 flex-wrap">
             ${r.theme ? `<span class="text-[10px] font-medium bg-indigo-500/15 text-indigo-300 px-1.5 py-0.5 rounded">${_themeLabel(r.theme)}</span>` : ''}
@@ -2366,7 +2380,7 @@ function renderCreativesV2() {
         </div>`
       : '';
     return `
-      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" data-tag-card onclick="window._cardClick('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
           ${thumb}
           <button type="button" class="low-res-reveal-btn" title="Meta only provided a low-resolution preview for this creative — click to view it anyway" onclick="event.stopPropagation();this.closest('.thumb-wrap').classList.add('low-res-revealed')">
@@ -2678,16 +2692,7 @@ function renderCreativesV3() {
     // Whole thing hidden (badges AND dropdowns, admin included) when
     // _hideCreativeTagging is on — see Props.hideCreativeTagging.
     const themeUgcLine = _hideCreativeTagging ? '' : _isAdminView
-      ? `<div class="flex items-center gap-1.5 mb-2" onclick="event.stopPropagation()">
-          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','theme',this.value)">
-            <option value="">Theme…</option>
-            ${THEME_OPTIONS.map(o => `<option value="${o.value}"${r.theme===o.value?' selected':''}>${o.label}</option>`).join('')}
-          </select>
-          <select class="text-[10px] bg-slate-800 border border-slate-700 rounded px-1 py-0.5 text-slate-300 flex-1 min-w-0" onchange="window._saveCreativeTag('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}','ugcStatus',this.value)">
-            <option value="">Type…</option>
-            ${UGC_OPTIONS.map(o => `<option value="${o.value}"${r.ugcStatus===o.value?' selected':''}>${o.label}</option>`).join('')}
-          </select>
-        </div>`
+      ? _tagChipsHtml(r)
       : (r.theme || r.ugcStatus)
         ? `<div class="flex items-center gap-1 mb-2 flex-wrap">
             ${r.theme ? `<span class="text-[10px] font-medium bg-indigo-500/15 text-indigo-300 px-1.5 py-0.5 rounded">${_themeLabel(r.theme)}</span>` : ''}
@@ -2715,7 +2720,7 @@ function renderCreativesV3() {
           <span class="low-res-reveal-label">Low-res preview — click to view</span>
         </button>`;
     return `
-      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" data-asset-card onclick="window._openAsset('${r.assetKey.replace(/'/g,"\\'")}')">
+      <div class="bg-slate-900/40 border border-slate-800 hover:border-slate-700 rounded-xl overflow-hidden fade-up fade-up-${Math.min(i+1,6)} cursor-pointer transition-colors" data-asset-card data-tag-card onclick="window._cardClick('${r.accountId.replace(/'/g,"\\'")}','${r.assetKey.replace(/'/g,"\\'")}')">
         <div class="thumb-wrap relative aspect-video bg-slate-800${noThumbClass} overflow-hidden">
           ${thumb}
           ${revealBtn}
@@ -4823,7 +4828,11 @@ if (typeof window !== 'undefined') {
   // Admin-only (see _isAdminView gating on the dropdowns that call this):
   // saves a single Theme or UGC tag for one creative asset, then patches the
   // in-memory row so the badge/dropdown reflects it without a full refetch.
-  (window as any)._saveCreativeTag = async (accountId: string, assetKey: string, field: 'theme' | 'ugcStatus', value: string) => {
+  (window as any)._saveCreativeTag = (accountId: string, assetKey: string, field: 'theme' | 'ugcStatus', value: string) =>
+    (window as any)._saveCreativeTags(accountId, assetKey, { [field]: value || null });
+  // Saves one or both tags in a single request (the route accepts theme and
+  // ugcStatus together) — quick-tag mode sets both from one card click.
+  (window as any)._saveCreativeTags = async (accountId: string, assetKey: string, fields: { theme?: string | null; ugcStatus?: string | null }) => {
     try {
       // When cross-account creative tagging merged this card from more than
       // one account (see mergeInto/contributingAccountIds), propagate the
@@ -4846,7 +4855,7 @@ if (typeof window !== 'undefined') {
       const res = await fetch('/api/admin/creative-tags', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, accountIds, assetKey, [field]: value || null }),
+        body: JSON.stringify({ accountId, accountIds, assetKey, ...fields }),
       });
       if (!res.ok) {
         const json = await res.json().catch(() => ({}));
@@ -4859,7 +4868,7 @@ if (typeof window !== 'undefined') {
       // because most of this account's videos are static, not DCO — the
       // save succeeded and even the DCO-array patch ran fine, it just
       // never touched the array the visible video card actually reads from.
-      const patch = (row: { assetKey: string; theme?: string | null; ugcStatus?: string | null }) => { if (row.assetKey === assetKey) (row as any)[field] = value || null; };
+      const patch = (row: { assetKey: string; theme?: string | null; ugcStatus?: string | null }) => { if (row.assetKey === assetKey) Object.assign(row, fields); };
       if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
       if (_dcoAssetsV3) { _dcoAssetsV3.images.forEach(patch); _dcoAssetsV3.videos.forEach(patch); }
       if (_staticAssets) { _staticAssets.forEach(patch); }
@@ -4877,10 +4886,36 @@ if (typeof window !== 'undefined') {
       // just hadn't caught up.
       if (!document.getElementById('creatives-v2-view')?.classList.contains('hidden')) renderCreativesV2();
       if (!document.getElementById('creatives-v3-view')?.classList.contains('hidden')) renderCreativesV3();
-      showNotification(`${field === 'theme' ? 'Theme' : 'Type'} saved`, 'success', 2000);
+      const saved = [fields.theme !== undefined ? `Theme ${fields.theme ? _themeLabel(fields.theme) : 'cleared'}` : '', fields.ugcStatus !== undefined ? `Type ${fields.ugcStatus ? _ugcLabel(fields.ugcStatus) : 'cleared'}` : ''].filter(Boolean).join(' · ');
+      showNotification(saved || 'Saved', 'success', 1500);
     } catch (e) {
       showNotification(e instanceof Error ? e.message : 'Save failed', 'error');
     }
+  };
+
+  const _findCreativeRow = (accountId: string, assetKey: string) => [
+    ..._dcoAssets?.images || [], ..._dcoAssets?.videos || [],
+    ..._dcoAssetsV3?.images || [], ..._dcoAssetsV3?.videos || [],
+    ..._staticAssets || [], ..._staticAssetsV3 || [],
+  ].find(r => r.assetKey === assetKey && r.accountId === accountId) as { theme?: string | null; ugcStatus?: string | null } | undefined;
+
+  // Tag chip on a card: set the value, or clear it when it's already the lit chip.
+  (window as any)._toggleCreativeTag = (accountId: string, assetKey: string, field: 'theme' | 'ugcStatus', value: string) => {
+    const cur = _findCreativeRow(accountId, assetKey)?.[field] ?? null;
+    return (window as any)._saveCreativeTags(accountId, assetKey, { [field]: cur === value ? null : value });
+  };
+
+  // Card click: in quick-tag mode apply the brush (or clear it when the card
+  // already carries the whole brush); otherwise open the asset modal as before.
+  (window as any)._cardClick = (accountId: string, assetKey: string) => {
+    if (!(_quickTagOn && _isAdminView && !_hideCreativeTagging)) { (window as any)._openAsset(assetKey); return; }
+    if (!_quickTagTheme && !_quickTagUgc) { showNotification('Pick a Theme and/or Type in the Quick tag bar first', 'error', 2500); return; }
+    const row = _findCreativeRow(accountId, assetKey);
+    const hasAll = (!_quickTagTheme || row?.theme === _quickTagTheme) && (!_quickTagUgc || row?.ugcStatus === _quickTagUgc);
+    const fields: { theme?: string | null; ugcStatus?: string | null } = {};
+    if (_quickTagTheme) fields.theme = hasAll ? null : _quickTagTheme;
+    if (_quickTagUgc) fields.ugcStatus = hasAll ? null : _quickTagUgc;
+    return (window as any)._saveCreativeTags(accountId, assetKey, fields);
   };
 
   // Fired only when a user clicks "low-res preview — click to view" on a
@@ -5906,6 +5941,37 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   >Show hidden assets</button>
                 </div>
               </div>
+              {_isAdminView && !hideCreativeTagging && (
+                <div id="quick-tag-bar" className="quick-tag-bar flex items-center gap-1.5 flex-wrap rounded-lg px-2 py-1.5 mt-2">
+                  <button
+                    id="quick-tag-toggle"
+                    className="sort-btn"
+                    title="When on, clicking a card applies the Theme/Type picked here instead of opening it; clicking it again clears them"
+                    onClick={(e) => {
+                      _quickTagOn = !_quickTagOn;
+                      e.currentTarget.classList.toggle('active-sort-btn', _quickTagOn);
+                      e.currentTarget.textContent = _quickTagOn ? 'Quick tag: ON' : 'Quick tag: OFF';
+                      document.body.classList.toggle('quick-tag-on', _quickTagOn);
+                      document.getElementById('quick-tag-bar')?.classList.toggle('on', _quickTagOn);
+                    }}
+                  >Quick tag: OFF</button>
+                  <span className="text-[10px] text-slate-500 ml-1">Theme</span>
+                  {THEME_OPTIONS.map(o => (
+                    <button key={o.value} type="button" data-qt-theme={o.value} className="tag-chip tag-chip-off" onClick={() => {
+                      _quickTagTheme = _quickTagTheme === o.value ? null : o.value;
+                      document.querySelectorAll('[data-qt-theme]').forEach(b => { const on = (b as HTMLElement).dataset.qtTheme === _quickTagTheme; b.classList.toggle('tag-chip-theme', on); b.classList.toggle('tag-chip-off', !on); });
+                    }}>{_CHIP_THEME_SHORT[o.value] || o.label}</button>
+                  ))}
+                  <span className="text-[10px] text-slate-500 ml-2">Type</span>
+                  {UGC_OPTIONS.map(o => (
+                    <button key={o.value} type="button" data-qt-ugc={o.value} className="tag-chip tag-chip-off" onClick={() => {
+                      _quickTagUgc = _quickTagUgc === o.value ? null : o.value;
+                      document.querySelectorAll('[data-qt-ugc]').forEach(b => { const on = (b as HTMLElement).dataset.qtUgc === _quickTagUgc; b.classList.toggle('tag-chip-ugc', on); b.classList.toggle('tag-chip-off', !on); });
+                    }}>{o.label}</button>
+                  ))}
+                  <span className="text-[10px] text-slate-500 ml-2">Pick a Theme and/or Type, turn Quick tag on, then click cards &mdash; click a card again to clear.</span>
+                </div>
+              )}
               <p className="text-[11px] text-slate-500 mt-1 mb-3">
                 Every video and every image this account ran, viewed separately. Each card shows the asset&apos;s totals plus its full campaign-by-campaign breakdown &mdash; no click-through needed. Thumbnails here are a stored copy of the image, so they won&apos;t go blank the way a Meta link sometimes does &mdash; assets still downloading their preview are hidden by default until then.
               </p>
