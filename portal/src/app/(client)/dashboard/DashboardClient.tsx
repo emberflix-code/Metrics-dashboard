@@ -482,6 +482,8 @@ const _creativesV2PhashCache = new Map<string, string | null>();
 // _computeClientBottomHash for why this exists (catches a different
 // headline/offer banner on an otherwise-identical base photo).
 const _creativesV2BottomHashCache = new Map<string, string | null>();
+// 256x256 grayscale copy per thumbnail URL, for the overlay-text check (see _computeClientFingerprint).
+const _creativesV2GrayCache = new Map<string, Uint8Array | null>();
 let _creativesV2PhashInFlight = false;
 // Static-ads (non-DCO) state. Populated by fetchStaticAssets() once the DCO
 // fetch has run and we know which ad IDs are DCO so we can subtract them.
@@ -1747,41 +1749,100 @@ if (typeof window !== 'undefined') {
 // for the full-frame hash (identity) and, separately, a bottom-half-only
 // hash (see _computeClientBottomHash) that catches headline/offer-banner
 // text overlays the full-frame 8x8 hash is too coarse to resolve.
-function _dHashRegion(img: HTMLImageElement, sy: number, sh: number): string | null {
-  try {
-    const SIZE = 8;
-    const canvas = document.createElement('canvas');
-    canvas.width = SIZE + 1;
-    canvas.height = SIZE;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) return null;
-    ctx.drawImage(img, 0, sy, img.naturalWidth, sh, 0, 0, SIZE + 1, SIZE);
-    const { data } = ctx.getImageData(0, 0, SIZE + 1, SIZE);
-    let bits = BigInt(0);
-    for (let row = 0; row < SIZE; row++) {
-      for (let col = 0; col < SIZE; col++) {
-        const i = (row * (SIZE + 1) + col) * 4;
-        const gray = (p: number) => 0.299 * data[p] + 0.587 * data[p + 1] + 0.114 * data[p + 2];
-        bits = (bits << BigInt(1)) | (gray(i) < gray(i + 4) ? BigInt(1) : BigInt(0));
-      }
-    }
-    return bits.toString(16).padStart(16, '0');
-  } catch {
-    return null; // canvas read blocked (CORS) or other failure
-  }
-}
 
-function _computeClientPhash(url: string): Promise<string | null> {
+
+// Size-independent fingerprint (2026-10-20). The old hash drew the full
+// image straight onto a 9x8 canvas, which only samples a handful of source
+// pixels, so the SAME creative stored at two sizes (e.g. 800px vs 1080px
+// after the preview upgrade) got different hashes and never merged - 59
+// identical AF Corporate pairs, up to $10,393 spend, split across cards.
+// Here the image is shrunk smoothly (stepwise halving, high-quality
+// smoothing) to a 256x256 grayscale copy once; both hashes are area
+// averages of that copy, and the copy itself is kept for the overlay-text
+// check in _creativesWorstBlockDiff.
+const FP_SIZE = 256;
+function _dHashFromGray(g: Uint8Array, y0: number, h: number): string {
+  const cell = (r: number, c: number) => {
+    const ya = y0 + Math.floor((r * h) / 8), yb = y0 + Math.floor(((r + 1) * h) / 8);
+    const xa = Math.floor((c * FP_SIZE) / 9), xb = Math.floor(((c + 1) * FP_SIZE) / 9);
+    let sum = 0;
+    for (let y = ya; y < yb; y++) for (let x = xa; x < xb; x++) sum += g[y * FP_SIZE + x];
+    return sum / ((yb - ya) * (xb - xa));
+  };
+  let bits = BigInt(0);
+  for (let r = 0; r < 8; r++) {
+    const row = Array.from({ length: 9 }, (_, c) => cell(r, c));
+    for (let c = 0; c < 8; c++) bits = (bits << BigInt(1)) | (row[c] < row[c + 1] ? BigInt(1) : BigInt(0));
+  }
+  return bits.toString(16).padStart(16, '0');
+}
+function _computeClientFingerprint(url: string): Promise<{ hash: string; bottomHash: string; gray: Uint8Array } | null> {
   return new Promise((resolve) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(_dHashRegion(img, 0, img.naturalHeight));
+    img.onload = () => {
+      try {
+        let src: CanvasImageSource = img;
+        let w = img.naturalWidth, h = img.naturalHeight;
+        if (!w || !h) { resolve(null); return; }
+        // halve until within 2x of the target so every pixel contributes
+        while (w > FP_SIZE * 2 || h > FP_SIZE * 2) {
+          const nw = Math.max(FP_SIZE, Math.ceil(w / 2)), nh = Math.max(FP_SIZE, Math.ceil(h / 2));
+          const c = document.createElement('canvas'); c.width = nw; c.height = nh;
+          const cx = c.getContext('2d'); if (!cx) { resolve(null); return; }
+          cx.imageSmoothingEnabled = true; cx.imageSmoothingQuality = 'high';
+          cx.drawImage(src, 0, 0, w, h, 0, 0, nw, nh);
+          src = c; w = nw; h = nh;
+        }
+        const canvas = document.createElement('canvas'); canvas.width = FP_SIZE; canvas.height = FP_SIZE;
+        const ctx = canvas.getContext('2d', { willReadFrequently: true }); if (!ctx) { resolve(null); return; }
+        ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(src, 0, 0, w, h, 0, 0, FP_SIZE, FP_SIZE);
+        const { data } = ctx.getImageData(0, 0, FP_SIZE, FP_SIZE);
+        const gray = new Uint8Array(FP_SIZE * FP_SIZE);
+        for (let i = 0; i < gray.length; i++) gray[i] = Math.round(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
+        resolve({ hash: _dHashFromGray(gray, 0, FP_SIZE), bottomHash: _dHashFromGray(gray, FP_SIZE / 2, FP_SIZE / 2), gray });
+      } catch {
+        resolve(null); // canvas read blocked (CORS) or other failure
+      }
+    };
     img.onerror = () => resolve(null);
     img.src = url;
   });
 }
 
-// Same-account server-side phash never needed this (clusterByPerceptualHash
+// Overlay-text check: mean |difference| of the most-changed 16x16 block of
+// the two 256x256 copies. A changed word or number in a small pill ("40%"
+// vs "50% off") lands in one or two blocks and scores 18+, while the same
+// creative re-exported at another size scores <= 8 (calibrated 2026-10-20
+// on all 364 AF Corporate creatives with spend since Sep 1: nothing fell
+// between 8.1 and 18.1). Memoized per pair since clustering re-runs on
+// every render.
+const CREATIVES_WORST_BLOCK_MAX = 12;
+const _worstBlockMemo = new Map<string, number>();
+function _creativesWorstBlockDiff(keyA: string, a: Uint8Array, keyB: string, b: Uint8Array): number {
+  const memoKey = keyA < keyB ? `${keyA}|${keyB}` : `${keyB}|${keyA}`;
+  const hit = _worstBlockMemo.get(memoKey);
+  if (hit !== undefined) return hit;
+  const B = 16;
+  let worst = 0;
+  for (let by = 0; by < FP_SIZE; by += B) {
+    for (let bx = 0; bx < FP_SIZE; bx += B) {
+      let sum = 0;
+      for (let i = 0; i < B; i++) {
+        const o = (by + i) * FP_SIZE + bx;
+        for (let j = 0; j < B; j++) sum += Math.abs(a[o + j] - b[o + j]);
+      }
+      if (sum / (B * B) > worst) worst = sum / (B * B);
+    }
+  }
+  _worstBlockMemo.set(memoKey, worst);
+  return worst;
+}
+
+// Bottom-half hash: now only the fallback rule (see _clusterCreativesV2ByPhash)
+// when a 256px fingerprint is unavailable. History: same-account server-side
+// phash never needed this (clusterByPerceptualHash
 // only ever compares assets WITHIN one account, where a lexicographic/
 // tagged tie-break already exists for genuine duplicates) — this is
 // specific to the client-side cross-account re-cluster, where the base 8x8
@@ -1794,15 +1855,6 @@ function _computeClientPhash(url: string): Promise<string | null> {
 // that region at the same 8x8 resolution is enough to tell two different
 // banners apart while still tolerating the minor JPEG/resize noise that
 // makes an exact-pixel comparison too strict.
-function _computeClientBottomHash(url: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => resolve(_dHashRegion(img, Math.floor(img.naturalHeight / 2), Math.ceil(img.naturalHeight / 2)));
-    img.onerror = () => resolve(null);
-    img.src = url;
-  });
-}
 
 function _hammingDistance(a: string, b: string): number {
   let x = BigInt('0x' + a) ^ BigInt('0x' + b);
@@ -1817,6 +1869,7 @@ const _CREATIVES_V2_PHASH_THRESHOLD = 4; // matches PHASH_MATCH_THRESHOLD in lib
 // 46-82/256. At this hash's native 8x8/64-bit resolution that maps to the
 // same 0-4 acceptance band as the full-frame hash.
 const _CREATIVES_V2_BOTTOM_HASH_THRESHOLD = 4;
+const _CREATIVES_FP_CANDIDATE_THRESHOLD = 8; // only with the 256px fingerprint, which the block check then confirms
 
 // Same union-find clustering approach as clusterByPerceptualHash in
 // lib/phash.ts, operating on the client-computed hash cache instead.
@@ -1835,7 +1888,7 @@ const _CREATIVES_V2_BOTTOM_HASH_THRESHOLD = 4;
 // false): only cluster within the same account, matching mergeInto's
 // default. When the client has opted into cross-account creative tagging,
 // this clustering is allowed across accounts too, same as mergeInto.
-function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean, bottomHashOf: (k: string) => string | null, taggedOf: (k: string) => boolean): Map<string, string> {
+function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => string | null, accountIdOf: (k: string) => string | null, crossAccountEnabled: boolean, bottomHashOf: (k: string) => string | null, taggedOf: (k: string) => boolean, grayOf: (k: string) => Uint8Array | null = () => null): Map<string, string> {
   const canonicalOf = new Map<string, string>();
   const withHash = assetKeys.filter(k => hashOf(k));
   for (const k of assetKeys) if (!hashOf(k)) canonicalOf.set(k, k);
@@ -1853,7 +1906,18 @@ function _clusterCreativesV2ByPhash(assetKeys: string[], hashOf: (k: string) => 
     for (let j = i + 1; j < withHash.length; j++) {
       if (!crossAccountEnabled && accountIdOf(withHash[i]) !== accountIdOf(withHash[j])) continue;
       const ha = hashOf(withHash[i]), hb = hashOf(withHash[j]);
-      if (!ha || !hb || _hammingDistance(ha, hb) > _CREATIVES_V2_PHASH_THRESHOLD) continue;
+      if (!ha || !hb) continue;
+      const ga = grayOf(withHash[i]), gb = grayOf(withHash[j]);
+      if (ga && gb) {
+        // Size-independent fingerprints (see _computeClientFingerprint): a
+        // looser hash gate, then the block-level overlay-text check decides
+        // (same picture AND same text) instead of the bottom-half hash below.
+        if (_hammingDistance(ha, hb) > _CREATIVES_FP_CANDIDATE_THRESHOLD) continue;
+        if (_creativesWorstBlockDiff(withHash[i], ga, withHash[j], gb) > CREATIVES_WORST_BLOCK_MAX) continue;
+        union(withHash[i], withHash[j]);
+        continue;
+      }
+      if (_hammingDistance(ha, hb) > _CREATIVES_V2_PHASH_THRESHOLD) continue;
       // Full-frame match alone isn't enough — confirmed live 2026-09-11
       // that the same base photo with a DIFFERENT headline/offer banner
       // ("6-Week Fall Transformation" vs "40% Off Your Membership") still
@@ -1923,7 +1987,11 @@ function _mergeCreativesByPhash(rows: AssetBreakdownRow[], crossAccountEnabled: 
     const row = rows.find(r => r.assetKey === assetKey);
     return !!(row?.theme || row?.ugcStatus);
   };
-  const canonicalKeyOf = _clusterCreativesV2ByPhash(rows.map(r => r.assetKey), phashOf, accountIdOfKey, crossAccountEnabled, bottomHashOf, taggedOf);
+  const grayOf = (assetKey: string) => {
+    const row = rows.find(r => r.assetKey === assetKey);
+    return row?.thumbnail ? (_creativesV2GrayCache.get(row.thumbnail) ?? null) : null;
+  };
+  const canonicalKeyOf = _clusterCreativesV2ByPhash(rows.map(r => r.assetKey), phashOf, accountIdOfKey, crossAccountEnabled, bottomHashOf, taggedOf, grayOf);
   if (!Array.from(canonicalKeyOf.values()).some((v, i) => v !== rows.map(r => r.assetKey)[i])) return rows;
 
   const merged = new Map<string, AssetBreakdownRow>();
@@ -2045,12 +2113,10 @@ function _ensureCreativesV2Phashes(images: AssetBreakdownRow[]) {
   const BATCH = 60;
   const batch = missing.slice(0, BATCH);
   Promise.all(batch.map(async r => {
-    const [hash, bottomHash] = await Promise.all([
-      _computeClientPhash(r.thumbnail!),
-      _computeClientBottomHash(r.thumbnail!),
-    ]);
-    _creativesV2PhashCache.set(r.thumbnail!, hash);
-    _creativesV2BottomHashCache.set(r.thumbnail!, bottomHash);
+    const fp = await _computeClientFingerprint(r.thumbnail!);
+    _creativesV2PhashCache.set(r.thumbnail!, fp?.hash ?? null);
+    _creativesV2BottomHashCache.set(r.thumbnail!, fp?.bottomHash ?? null);
+    _creativesV2GrayCache.set(r.thumbnail!, fp?.gray ?? null);
   })).then(() => {
     _creativesV2PhashInFlight = false;
     renderCreativesV2();
@@ -2071,12 +2137,10 @@ function _ensureCreativesV3Phashes(images: AssetBreakdownRow[]) {
   const BATCH = 60;
   const batch = missing.slice(0, BATCH);
   Promise.all(batch.map(async r => {
-    const [hash, bottomHash] = await Promise.all([
-      _computeClientPhash(r.thumbnail!),
-      _computeClientBottomHash(r.thumbnail!),
-    ]);
-    _creativesV2PhashCache.set(r.thumbnail!, hash);
-    _creativesV2BottomHashCache.set(r.thumbnail!, bottomHash);
+    const fp = await _computeClientFingerprint(r.thumbnail!);
+    _creativesV2PhashCache.set(r.thumbnail!, fp?.hash ?? null);
+    _creativesV2BottomHashCache.set(r.thumbnail!, fp?.bottomHash ?? null);
+    _creativesV2GrayCache.set(r.thumbnail!, fp?.gray ?? null);
   })).then(() => {
     _creativesV3PhashInFlight = false;
     renderCreativesV3();
