@@ -1439,7 +1439,7 @@ function _tagChipsHtml(r: { accountId: string; assetKey: string; theme?: string 
   const chip = (field: 'theme' | 'ugcStatus', value: string, label: string, on: boolean, onCls: string) =>
     `<button type="button" class="tag-chip ${on ? onCls : 'tag-chip-off'}" aria-pressed="${on}" title="${on ? 'Click to clear' : 'Click to tag'}"
       onclick="event.stopPropagation();window._toggleCreativeTag('${acc}','${key}','${field}','${value}')">${label}</button>`;
-  return `<div class="flex flex-col gap-1 mb-2" onclick="event.stopPropagation()">
+  return `<div class="flex flex-col gap-1 mb-2" data-tag-chips="${r.accountId.replace(/"/g, '&quot;')}|${r.assetKey.replace(/"/g, '&quot;')}" onclick="event.stopPropagation()">
     <div class="flex flex-wrap gap-1">${THEME_OPTIONS.map(o => chip('theme', o.value, _CHIP_THEME_SHORT[o.value] || o.label, r.theme === o.value, 'tag-chip-theme')).join('')}</div>
     <div class="flex flex-wrap gap-1">${UGC_OPTIONS.map(o => chip('ugcStatus', o.value, o.label, r.ugcStatus === o.value, 'tag-chip-ugc')).join('')}</div>
   </div>`;
@@ -4830,67 +4830,72 @@ if (typeof window !== 'undefined') {
   // in-memory row so the badge/dropdown reflects it without a full refetch.
   (window as any)._saveCreativeTag = (accountId: string, assetKey: string, field: 'theme' | 'ugcStatus', value: string) =>
     (window as any)._saveCreativeTags(accountId, assetKey, { [field]: value || null });
-  // Saves one or both tags in a single request (the route accepts theme and
-  // ugcStatus together) — quick-tag mode sets both from one card click.
-  (window as any)._saveCreativeTags = async (accountId: string, assetKey: string, fields: { theme?: string | null; ugcStatus?: string | null }) => {
-    try {
-      // When cross-account creative tagging merged this card from more than
-      // one account (see mergeInto/contributingAccountIds), propagate the
-      // tag to every contributing account's own row, not just the one
-      // `accountId` this dropdown's onclick happened to be rendered with.
-      // MUST include _staticAssets/_staticAssetsV3 (non-DCO creatives,
-      // where most VIDEO ads actually live — see the merge in
-      // renderCreativesV2/V3 that combines dcoVideos + staticVideos into
-      // one `videos` array) alongside _dcoAssets/_dcoAssetsV3 — omitting
-      // them here meant a static video's card was never found, so
-      // contributingAccountIds silently fell back to just [accountId].
-      const row: { assetKey: string; accountId: string; contributingAccountIds?: string[] } | undefined = [
-        ..._dcoAssets?.images || [], ..._dcoAssets?.videos || [],
-        ..._dcoAssetsV3?.images || [], ..._dcoAssetsV3?.videos || [],
-        ..._staticAssets || [], ..._staticAssetsV3 || [],
-      ].find(r => r.assetKey === assetKey && r.accountId === accountId);
-      const accountIds = row?.contributingAccountIds && row.contributingAccountIds.length > 1
-        ? row.contributingAccountIds
-        : [accountId];
-      const res = await fetch('/api/admin/creative-tags', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId, accountIds, assetKey, ...fields }),
-      });
-      if (!res.ok) {
-        const json = await res.json().catch(() => ({}));
-        throw new Error(json.error || 'Save failed');
+  // Saves one or both tags. Optimistic: the in-memory rows and the clicked
+  // card's chips update immediately, the request runs in the background
+  // (serialized per asset so fast repeat clicks land in order), and only a
+  // failure touches the UI again (reverts + error toast). The grid is NOT
+  // re-rendered — a full renderCreativesV2/V3 per click made tagging feel
+  // laggy, flashed the page, and (with "Incomplete tags only" on) shifted the
+  // next card under the cursor mid-click. Cards pick up merged/filtered state
+  // on the next natural render (filter/sort/tab/date change).
+  const _tagQueue = new Map<string, Promise<void>>();
+  const _patchTagRows = (assetKey: string, fields: { theme?: string | null; ugcStatus?: string | null }) => {
+    // Same arrays as the row lookup — a static (non-DCO) video's tags live in
+    // _staticAssets/_staticAssetsV3, not the DCO arrays (2026-09-15 bug).
+    const patch = (row: { assetKey: string; theme?: string | null; ugcStatus?: string | null }) => { if (row.assetKey === assetKey) Object.assign(row, fields); };
+    if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
+    if (_dcoAssetsV3) { _dcoAssetsV3.images.forEach(patch); _dcoAssetsV3.videos.forEach(patch); }
+    if (_staticAssets) { _staticAssets.forEach(patch); }
+    if (_staticAssetsV3) { _staticAssetsV3.forEach(patch); }
+  };
+  // Redraw just this card's chips in place (+ a brief outline flash as feedback).
+  const _refreshCardTags = (accountId: string, assetKey: string, flash: boolean) => {
+    const row = _findCreativeRow(accountId, assetKey);
+    const id = `${accountId}|${assetKey}`;
+    document.querySelectorAll<HTMLElement>('[data-tag-chips]').forEach(el => {
+      if (el.dataset.tagChips !== id) return;
+      const card = el.closest('[data-tag-card]');
+      el.outerHTML = _tagChipsHtml({ accountId, assetKey, theme: row?.theme ?? null, ugcStatus: row?.ugcStatus ?? null });
+      if (flash && card) { card.classList.remove('tag-flash'); void (card as HTMLElement).offsetWidth; card.classList.add('tag-flash'); }
+    });
+  };
+  (window as any)._saveCreativeTags = (accountId: string, assetKey: string, fields: { theme?: string | null; ugcStatus?: string | null }) => {
+    // When cross-account creative tagging merged this card from more than
+    // one account (see mergeInto/contributingAccountIds), propagate the
+    // tag to every contributing account's own row, not just the one
+    // `accountId` this card was rendered with.
+    const row = [
+      ..._dcoAssets?.images || [], ..._dcoAssets?.videos || [],
+      ..._dcoAssetsV3?.images || [], ..._dcoAssetsV3?.videos || [],
+      ..._staticAssets || [], ..._staticAssetsV3 || [],
+    ].find(r => r.assetKey === assetKey && r.accountId === accountId) as { contributingAccountIds?: string[]; theme?: string | null; ugcStatus?: string | null } | undefined;
+    const accountIds = row?.contributingAccountIds && row.contributingAccountIds.length > 1 ? row.contributingAccountIds : [accountId];
+    const prev: { theme?: string | null; ugcStatus?: string | null } = {};
+    if (fields.theme !== undefined) prev.theme = row?.theme ?? null;
+    if (fields.ugcStatus !== undefined) prev.ugcStatus = row?.ugcStatus ?? null;
+    _patchTagRows(assetKey, fields);
+    _refreshCardTags(accountId, assetKey, true);
+    const key = `${accountId}|${assetKey}`;
+    const run = (_tagQueue.get(key) || Promise.resolve()).then(async () => {
+      try {
+        const res = await fetch('/api/admin/creative-tags', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ accountId, accountIds, assetKey, ...fields }),
+        });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json.error || 'Save failed');
+        }
+      } catch (e) {
+        _patchTagRows(assetKey, prev);
+        _refreshCardTags(accountId, assetKey, false);
+        showNotification(`Tag not saved — ${e instanceof Error ? e.message : 'Save failed'}`, 'error');
       }
-      // Same reasoning as the row lookup above — a static (non-DCO) video's
-      // theme/ugcStatus lives in _staticAssets/_staticAssetsV3, not
-      // _dcoAssets/_dcoAssetsV3. Found live 2026-09-15: videos specifically
-      // kept reverting to untagged after the DCO-only patch shipped,
-      // because most of this account's videos are static, not DCO — the
-      // save succeeded and even the DCO-array patch ran fine, it just
-      // never touched the array the visible video card actually reads from.
-      const patch = (row: { assetKey: string; theme?: string | null; ugcStatus?: string | null }) => { if (row.assetKey === assetKey) Object.assign(row, fields); };
-      if (_dcoAssets) { _dcoAssets.images.forEach(patch); _dcoAssets.videos.forEach(patch); }
-      if (_dcoAssetsV3) { _dcoAssetsV3.images.forEach(patch); _dcoAssetsV3.videos.forEach(patch); }
-      if (_staticAssets) { _staticAssets.forEach(patch); }
-      if (_staticAssetsV3) { _staticAssetsV3.forEach(patch); }
-      // Re-render whichever grid is actually visible — without this, the
-      // patched theme/ugcStatus sits correctly in memory but the DOM keeps
-      // showing whatever was last rendered (the native <select>'s own
-      // post-click value only LOOKS current) until some unrelated event
-      // happens to trigger a re-render (a phash-hash batch finishing, a
-      // tab switch, a date change). Found live 2026-09-15: admins saw a
-      // just-tagged creative revert to blank because the client-side merge
-      // (_mergeCreativesByPhash) only re-runs inside render*(), and
-      // nothing was calling it right after a successful save — the tag was
-      // safe in memory and in the DB the whole time, the rendered card
-      // just hadn't caught up.
-      if (!document.getElementById('creatives-v2-view')?.classList.contains('hidden')) renderCreativesV2();
-      if (!document.getElementById('creatives-v3-view')?.classList.contains('hidden')) renderCreativesV3();
-      const saved = [fields.theme !== undefined ? `Theme ${fields.theme ? _themeLabel(fields.theme) : 'cleared'}` : '', fields.ugcStatus !== undefined ? `Type ${fields.ugcStatus ? _ugcLabel(fields.ugcStatus) : 'cleared'}` : ''].filter(Boolean).join(' · ');
-      showNotification(saved || 'Saved', 'success', 1500);
-    } catch (e) {
-      showNotification(e instanceof Error ? e.message : 'Save failed', 'error');
-    }
+    });
+    _tagQueue.set(key, run);
+    run.finally(() => { if (_tagQueue.get(key) === run) _tagQueue.delete(key); });
+    return run;
   };
 
   const _findCreativeRow = (accountId: string, assetKey: string) => [
