@@ -89,6 +89,21 @@ export async function GET(req: NextRequest) {
     const assetKeys = Array.from(new Set(mapRows.map(r => r.asset_key)));
     if (assetKeys.length === 0) return NextResponse.json({ data: [] });
 
+    // Raw stored weight is NOT a share of the ad's spend by itself — for a
+    // carousel it's already 1/N per slide (summing to 1 across the ad), but
+    // for a non-carousel ad with multiple mapped candidates (DCO/Advantage+)
+    // every row is stored as weight=1 (see metaSync.ts deriveAssets/zero-cost
+    // backfill comment), which would otherwise give each candidate image the
+    // ad's FULL spend instead of a split — inflating a DCO ad's totals by
+    // however many candidates it has. Normalizing each ad's weights to sum
+    // to 1 fixes DCO (1,1,1 -> 1/3 each) while leaving carousels unchanged
+    // (1/N,...,1/N already sums to 1).
+    const weightSumByAdId = new Map<string, number>();
+    for (const m of mapRows) {
+      const w = parseFloat(m.weight) || 1;
+      weightSumByAdId.set(m.ad_id, (weightSumByAdId.get(m.ad_id) || 0) + w);
+    }
+
     const assetRows = await query<{ asset_key: string; type: string; thumbnail: string | null; video_source: string | null; video_id: string | null; body: string | null; title: string | null; phash: string | null; theme: string | null; ugc_status: string | null; has_bytes: boolean }>(
       `SELECT asset_key, type, thumbnail, video_source, video_id, body, title, phash, theme, ugc_status,
               (thumbnail_bytes IS NOT NULL) AS has_bytes
@@ -154,7 +169,9 @@ export async function GET(req: NextRequest) {
       const metrics = metricsByAdId.get(m.ad_id);
       const asset = assetByKey.get(m.asset_key);
       if (!metrics || !asset) continue;
-      const weight = parseFloat(m.weight) || 1;
+      const rawWeight = parseFloat(m.weight) || 1;
+      const weightSum = weightSumByAdId.get(m.ad_id) || 1;
+      const weight = rawWeight / weightSum;
       const canonicalKey = canonicalKeyOf.get(m.asset_key) || m.asset_key;
 
       let row = rows.get(canonicalKey);
