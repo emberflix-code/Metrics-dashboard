@@ -208,6 +208,30 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
     await pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS created_time TIMESTAMPTZ`).catch(() => {});
     await pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS optimization_goal TEXT`).catch(() => {});
 
+    // Manual per-campaign override for which Meta action counts as a "result".
+    // Ads Manager labels a small minority of campaigns "Leads (form)" and then
+    // reports form leads only, but NOTHING the API exposes predicts which ones:
+    // optimization_goal, created_time, objective, destination_type and
+    // promoted_object were all tested against a known-good Sep 2026 export and
+    // all five fail identically (182 false positives out of 184). So the only
+    // exact route is to name the campaigns by hand. Rows here are read by
+    // getResultsRules and win over the account-wide default.
+    //   rule: 'form' = onsite_conversion.lead_grouped only
+    //         'lead' = Meta's combined `lead` action (the default)
+    // Changing a row needs a results re-sync of the affected date range before
+    // stored figures move; the rule is applied at write time, not read time.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS meta_campaign_results_override (
+        account_id  TEXT NOT NULL,
+        campaign_id TEXT NOT NULL,
+        rule        TEXT NOT NULL CHECK (rule IN ('form', 'lead')),
+        note        TEXT NOT NULL DEFAULT '',
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        PRIMARY KEY (account_id, campaign_id)
+      )
+    `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS meta_daily_insights (
         account_id     TEXT NOT NULL,

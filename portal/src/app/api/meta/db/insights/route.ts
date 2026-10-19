@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getClientDbScope, matchesCampaignFilter } from '@/lib/meta';
 import { query } from '@/lib/db';
+import { usesAdsManagerBasis, qualifyingCampaignIds } from '@/lib/resultsBasis';
 
 // Every response below carries the dashboard's live campaign/spend/leads
 // numbers — a stale cached copy (browser heuristic caching, or an
@@ -82,17 +83,25 @@ export async function GET(req: NextRequest) {
       // string as "match everything" so this is a no-op for unfiltered
       // clients.
       {
-        const campaignRows = await query<{ campaign_name: string; reach: string; impressions: string; spend: string; link_clicks: string; results: string }>(
-          `SELECT campaign_name, SUM(reach)::text AS reach, SUM(impressions)::text AS impressions,
+        // Grouped by campaign_id as well as name so the impression floor below
+        // can be judged per campaign (names repeat across deleted/active
+        // copies). Finer grouping does not change the totals — everything that
+        // passes the filter is summed either way.
+        const campaignRows = await query<{ campaign_id: string; campaign_name: string; reach: string; impressions: string; spend: string; link_clicks: string; results: string }>(
+          `SELECT campaign_id, campaign_name, SUM(reach)::text AS reach, SUM(impressions)::text AS impressions,
                   SUM(spend)::text AS spend, SUM(link_clicks)::text AS link_clicks, SUM(results)::text AS results
            FROM meta_daily_insights
            WHERE account_id = $1 AND level = 'campaign' AND date BETWEEN $2 AND $3
-           GROUP BY campaign_name`,
+           GROUP BY campaign_id, campaign_name`,
           [accountId, since, until]
         );
+        // Ads Manager's "Impressions > 1" export filter — see lib/resultsBasis.ts.
+        const floorApplies = usesAdsManagerBasis(accountId);
+        const qualifying = floorApplies ? qualifyingCampaignIds(campaignRows) : null;
         const totals = { reach: 0, impressions: 0, spend: 0, linkClicks: 0, results: 0 };
         for (const r of campaignRows) {
           if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) continue;
+          if (qualifying && !qualifying.has(r.campaign_id)) continue;
           totals.reach += parseInt(r.reach, 10) || 0;
           totals.impressions += parseInt(r.impressions, 10) || 0;
           totals.spend += parseFloat(r.spend) || 0;
@@ -120,9 +129,27 @@ export async function GET(req: NextRequest) {
       [accountId, dbLevel, since, until]
     );
 
+    // Same Ads Manager impression floor as the level=account branch, and it
+    // must be decided from the CAMPAIGN-level table over the whole range, not
+    // from `rows`: at level=adset/ad a campaign's impressions are split across
+    // children, and in the time_increment=1 branch they are split across days,
+    // so judging either in isolation would drop rows Ads Manager keeps.
+    let qualifying: Set<string> | null = null;
+    if (usesAdsManagerBasis(accountId)) {
+      const campaignImpressions = await query<{ campaign_id: string; impressions: string }>(
+        `SELECT campaign_id, SUM(impressions)::text AS impressions
+         FROM meta_daily_insights
+         WHERE account_id = $1 AND level = 'campaign' AND date BETWEEN $2 AND $3
+         GROUP BY campaign_id`,
+        [accountId, since, until]
+      );
+      qualifying = qualifyingCampaignIds(campaignImpressions);
+    }
+
     const filtered = rows.filter(r => {
       if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) return false;
       if (campaignIdIn && !campaignIdIn.includes(r.campaign_id)) return false;
+      if (qualifying && !qualifying.has(r.campaign_id)) return false;
       return true;
     });
 

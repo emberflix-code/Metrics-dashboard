@@ -10,6 +10,7 @@ import { refreshCampaignAttribution } from './marketerScope';
 import { extractGeoRows, geoKeyQuery } from './targetingGeo';
 import { resolveGeoKeys } from './geocode';
 import { extractCopy, copyHash, normalizeCopyText, type CopyKind } from './adCopy';
+import { usesAdsManagerBasis } from './resultsBasis';
 
 // Session-free Meta → Postgres sync for the DB-backed dashboard cache.
 // Mirrors getClientConnection()'s token resolution but without a session —
@@ -506,20 +507,18 @@ export async function syncEntities(accountId: string, token: string): Promise<nu
 // looked clean. No date cutoff can rescue it: the affected campaigns are
 // all LEAD_GENERATION and were created after any plausible cutoff.
 //
-// So every campaign in scope now resolves to 'lead'. The ResultsRule type,
-// getResultsRules() and resultsUnderRule() are kept — six call sites in
-// metaSync.ts and marketer/campaignStats.ts rely on them, and they are the
-// hook if a genuinely form-only account ever turns up — but today the
-// classifier has one outcome. Verify any reinstated branch per campaign
-// against a fresh export, not against an account total.
-const ADS_MANAGER_RESULTS_ACCOUNTS = new Set([
-  '4594093867301854', // GymMembersNow AF Regional Omega
-  '216024513873696',  // GymMembersNow AF #4299 - Grand Parkway, TX (Matthew McCool)
-  '156873523271047',  // GymMembersNow - AF Multiple FZ's (Legacy) #1
-  '886442192224283',  // GymMembersNow - AF Multiple FZ's (Legacy) #2
-  '9135921576479804', // GymMembersNow AF Regional Aaron Meier
-  '794347999225743',  // GymMembersNow AF Regional Rob Jent
-]);
+// So every campaign in scope resolves to 'lead' unless a row in
+// meta_campaign_results_override names it. Five candidate discriminators were
+// tested against the user's Sep 2026 exports (the `Result type` column is
+// ground truth) and every one of them fails on the same 182 campaigns:
+//   optimization_goal  — the "Leads" cohort is all LEAD_GENERATION too
+//   created_time       — form 07-31..09-28 vs "Leads" 08-27..09-15, overlapping
+//   objective          — OUTCOME_LEADS for all 197
+//   destination_type   — ON_AD for 12/12 form AND 182/184 "Leads"
+//   promoted_object    — page for 12/12 form AND 182/184 "Leads"
+// The two groups are configured identically, so Ads Manager's label is simply
+// not derivable here. Do not reintroduce a heuristic; add an override row.
+// The account list lives in lib/resultsBasis.ts because the read path shares it.
 type ResultsRule = 'form' | 'lead';
 interface ResultsRules { byCampaign: Map<string, ResultsRule>; byAd: Map<string, ResultsRule> }
 const RESULTS_RULES_TTL_MS = 15 * 60_000;
@@ -528,17 +527,34 @@ const _resultsRulesCache = new Map<string, { expires: number; rules: ResultsRule
 export function invalidateResultsRules(accountId: string): void { _resultsRulesCache.delete(accountId); }
 
 // null = account not in scope, caller keeps resolveResultsFromActions.
-// Every in-scope campaign resolves to 'lead' (combined pixel + form), which
-// is what Ads Manager reports — see the withdrawn form-only branch above.
+// In-scope campaigns resolve to 'lead' (combined pixel + form) unless an
+// override row names them — see the withdrawn form-only branch above.
 export async function getResultsRules(accountId: string): Promise<ResultsRules | null> {
-  if (!ADS_MANAGER_RESULTS_ACCOUNTS.has(accountId)) return null;
+  if (!usesAdsManagerBasis(accountId)) return null;
   const hit = _resultsRulesCache.get(accountId);
   if (hit && hit.expires > Date.now()) return hit.rules;
-  // Empty maps: every call site resolves a miss to 'lead', which is now the
-  // only outcome, so there is nothing to read from meta_entities. This also
-  // drops the three full-table entity scans this used to do per sync (~8,400
-  // campaigns + 20,000 ad sets on Omega alone).
+  // Only the overridden campaigns go in the maps; every call site resolves a
+  // miss to 'lead', which is the default. That keeps this off the three
+  // full-table entity scans the old classifier did per sync (~8,400 campaigns
+  // + 20,000 ad sets on Omega alone) — an override list is a handful of rows.
   const rules: ResultsRules = { byCampaign: new Map(), byAd: new Map() };
+  const overrides = await query<{ campaign_id: string; rule: ResultsRule }>(
+    `SELECT campaign_id, rule FROM meta_campaign_results_override WHERE account_id = $1`, [accountId]
+  ).catch(() => [] as { campaign_id: string; rule: ResultsRule }[]);
+  if (overrides.length) {
+    for (const o of overrides) rules.byCampaign.set(o.campaign_id, o.rule);
+    // The creatives breakdown resolves by ad id, so fan the campaign's rule
+    // out to its ads. Scoped to the overridden campaigns, not the whole account.
+    const ads = await query<{ entity_id: string; campaign_id: string | null }>(
+      `SELECT entity_id, campaign_id FROM meta_entities
+       WHERE account_id = $1 AND level = 'ad' AND campaign_id = ANY($2)`,
+      [accountId, overrides.map(o => o.campaign_id)]
+    ).catch(() => [] as { entity_id: string; campaign_id: string | null }[]);
+    for (const a of ads) {
+      const r = a.campaign_id && rules.byCampaign.get(a.campaign_id);
+      if (r) rules.byAd.set(a.entity_id, r);
+    }
+  }
   _resultsRulesCache.set(accountId, { expires: Date.now() + RESULTS_RULES_TTL_MS, rules });
   return rules;
 }
