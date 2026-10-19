@@ -560,7 +560,7 @@ export async function getResultsRules(accountId: string): Promise<ResultsRules |
 }
 
 export function resultsUnderRule(actions: { action_type: string; value: string }[] | undefined, rule: ResultsRule): number {
-  const wanted = rule === 'form' ? 'onsite_conversion.lead_grouped' : 'lead';
+  const wanted = rule === 'form' ? ONSITE_LEAD_ACTION : COMBINED_LEAD_ACTION;
   const hit = (actions || []).find(a => a.action_type === wanted);
   return hit ? (parseInt(hit.value || '0', 10) || 0) : 0;
 }
@@ -572,7 +572,54 @@ interface InsightRow {
   ad_id?: string; ad_name?: string;
   reach?: string; impressions?: string; spend?: string; inline_link_clicks?: string;
   actions?: { action_type: string; value: string }[];
+  // Ads Manager's own Results column. `indicator` is the action it chose
+  // ("actions:lead", "actions:offsite_conversion.fb_pixel_lead", ...) and
+  // matches the `Result type` column of a BM export exactly; `values[0].value`
+  // matches its `Results`. Campaign level only — see resultsIndicator below.
+  results?: { indicator?: string; values?: { value?: string }[] }[];
   date_start?: string;
+}
+
+// The two lead actions this sync can count. `lead` is Meta's combined figure
+// (pixel + form) and is what every stored `results` value uses; onsite-only is
+// reachable solely through a meta_campaign_results_override row.
+const ONSITE_LEAD_ACTION = 'onsite_conversion.lead_grouped';
+const COMBINED_LEAD_ACTION = 'lead';
+
+// DISABLED 2026-10-19 — do not switch on without re-reading this.
+// `fields=results` reports on Meta's DEFAULT attribution window (its payload
+// says so: "attribution_windows":["default"]) and ignores the
+// action_attribution_windows=["7d_click","1d_view","1d_ev"] this sync requests
+// for `actions`. So its value is drawn from a narrower window than every other
+// metric we store, and using it lowered Omega's Sep 21-29 by 44-88 leads a day
+// (-604 for the range) against live, while days written by the previous code
+// matched exactly. Probing a single campaign unfiltered hid this because that
+// probe requested no attribution windows either, so both numbers were
+// "default" and agreed (92 == 92).
+// To revisit: find out whether `results` can be requested with explicit
+// attribution windows. If it cannot, it is unusable here regardless of how
+// well its `indicator` matches Ads Manager's Result type, because parity on
+// one column is not worth an inconsistent attribution basis.
+const USE_META_RESULTS_FIELD = false;
+
+function resultsIndicator(r: InsightRow): string | null {
+  return r.results?.[0]?.indicator || null;
+}
+// "actions:lead" -> "lead". Anything not under the actions: namespace is left
+// alone rather than guessed at, so an unfamiliar indicator falls back instead
+// of silently resolving to 0.
+function indicatorActionType(indicator: string | null): string | null {
+  if (!indicator) return null;
+  return indicator.startsWith('actions:') ? indicator.slice('actions:'.length) || null : null;
+}
+function metaResultsValue(r: InsightRow): number | null {
+  const raw = r.results?.[0]?.values?.[0]?.value;
+  if (raw === undefined || raw === null) return null;
+  return parseInt(raw, 10) || 0;
+}
+function actionValue(actions: InsightRow['actions'], actionType: string): number {
+  const hit = (actions || []).find(a => a.action_type === actionType);
+  return hit ? (parseInt(hit.value || '0', 10) || 0) : 0;
 }
 
 // Campaign IDs for this account, read from meta_entities (populated by
@@ -630,7 +677,10 @@ function chunkArray<T>(arr: T[], size: number): T[][] {
 
 async function fetchInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[] | null): Promise<InsightRow[]> {
   const fieldsByLevel = {
-    campaign: 'campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions',
+    // `results` is requested at campaign level only: Meta does not serve it at
+    // ad-set or ad level (verified — absent on every row, including form ads
+    // with 4 and 18 leads), so those levels inherit the campaign's indicator.
+    campaign: 'campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions,results',
     adset: 'adset_id,adset_name,campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions',
     ad: 'ad_id,ad_name,adset_id,adset_name,campaign_id,campaign_name,reach,impressions,spend,inline_link_clicks,actions',
   };
@@ -857,7 +907,46 @@ async function persistInsightRows(accountId: string, level: 'campaign' | 'adset'
     entityId: string; date: string; campaignId: string; campaignName: string;
     adsetId: string; adsetName: string; adName: string;
     reach: number; impressions: number; spend: number; linkClicks: number; results: number;
+    resultsIndicator: string | null;
   }
+
+  // Ad-set and ad rows carry no `results` field of their own, so they take the
+  // action their CAMPAIGN used — read from the campaign rows written earlier in
+  // this same sync (syncInsights walks campaign -> adset -> ad). Rows with no
+  // results that day store NULL, so IS NOT NULL picks the campaign's real
+  // indicator rather than a zero-result day's blank.
+  const indicatorByCampaign = new Map<string, string>();
+  if (level !== 'campaign' && resultsRules) {
+    const dates = Array.from(new Set(rows.map(r => r.date_start).filter(Boolean))) as string[];
+    if (dates.length) {
+      const found = await query<{ campaign_id: string; results_indicator: string }>(
+        `SELECT DISTINCT campaign_id, results_indicator FROM meta_daily_insights
+         WHERE account_id = $1 AND level = 'campaign' AND date = ANY($2::date[])
+           AND results_indicator IS NOT NULL`,
+        [accountId, dates]
+      ).catch(() => [] as { campaign_id: string; results_indicator: string }[]);
+      for (const f of found) indicatorByCampaign.set(f.campaign_id, f.results_indicator);
+    }
+  }
+
+  // Precedence: a manual override row wins (normally there are none — it is an
+  // escape hatch), then Meta's own Results figure, then onsite as the fallback
+  // the form-only campaigns need.
+  const resolveResults = (r: InsightRow): number => {
+    if (!resultsRules) return resolveResultsFromActions(r.actions, r.campaign_name);
+    const override = r.campaign_id ? resultsRules.byCampaign.get(r.campaign_id) : undefined;
+    if (override) return resultsUnderRule(r.actions, override);
+    if (USE_META_RESULTS_FIELD) {
+      if (level === 'campaign') {
+        const direct = metaResultsValue(r);
+        if (direct !== null) return direct;
+        return actionValue(r.actions, COMBINED_LEAD_ACTION);
+      }
+      const inherited = indicatorActionType(indicatorByCampaign.get(r.campaign_id || '') || null);
+      return actionValue(r.actions, inherited || COMBINED_LEAD_ACTION);
+    }
+    return actionValue(r.actions, COMBINED_LEAD_ACTION);
+  };
   // Keyed by `${entityId}|${date}` and summed on collision — the row-cap
   // fallback can halve a campaign batch and re-fetch, and campaign batches
   // are not guaranteed disjoint across retries, so the same (entity, day)
@@ -874,11 +963,8 @@ async function persistInsightRows(accountId: string, level: 'campaign' | 'adset'
     const impressions = parseInt(r.impressions || '0', 10) || 0;
     const spend = parseFloat(r.spend || '0') || 0;
     const linkClicks = parseInt(r.inline_link_clicks || '0', 10) || 0;
-    // Ads Manager decides the result type per CAMPAIGN, so ad-set and ad rows
-    // inherit their campaign's rule — keeps every level summing to the same total.
-    const results = resultsRules
-      ? resultsUnderRule(r.actions, (r.campaign_id && resultsRules.byCampaign.get(r.campaign_id)) || 'lead')
-      : resolveResultsFromActions(r.actions, r.campaign_name);
+    const results = resolveResults(r);
+    const indicator = level === 'campaign' ? resultsIndicator(r) : null;
     const existing = preparedByKey.get(key);
     if (existing) {
       existing.reach += reach;
@@ -886,6 +972,9 @@ async function persistInsightRows(accountId: string, level: 'campaign' | 'adset'
       existing.spend += spend;
       existing.linkClicks += linkClicks;
       existing.results += results;
+      // Same (entity, day) twice only happens via the row-cap retry path, where
+      // both copies describe the same campaign — keep whichever carries one.
+      existing.resultsIndicator = existing.resultsIndicator || indicator;
     } else {
       preparedByKey.set(key, {
         entityId, date: r.date_start,
@@ -893,6 +982,7 @@ async function persistInsightRows(accountId: string, level: 'campaign' | 'adset'
         adsetId: r.adset_id || '', adsetName: r.adset_name || '',
         adName: r.ad_name || '',
         reach, impressions, spend, linkClicks, results,
+        resultsIndicator: indicator,
       });
     }
   }
@@ -903,15 +993,16 @@ async function persistInsightRows(accountId: string, level: 'campaign' | 'adset'
   // chunks) generate enough Postgres activity to trip Railway's log-rate cap.
   for (const batch of chunkArrayGeneric(prepared, DB_BATCH_SIZE)) {
     await query(
-      `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, synced_at)
-       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, now()
-       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[])
-         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results)
+      `INSERT INTO meta_daily_insights (account_id, level, entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_indicator, synced_at)
+       SELECT $1, $2, entity_id, date::date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_indicator, now()
+       FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::bigint[], $11::bigint[], $12::numeric[], $13::bigint[], $14::bigint[], $15::text[])
+         AS t(entity_id, date, campaign_id, campaign_name, adset_id, adset_name, ad_name, reach, impressions, spend, link_clicks, results, results_indicator)
        ON CONFLICT (account_id, level, entity_id, date) DO UPDATE SET
          campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
          adset_id = EXCLUDED.adset_id, adset_name = EXCLUDED.adset_name, ad_name = EXCLUDED.ad_name,
          reach = EXCLUDED.reach, impressions = EXCLUDED.impressions, spend = EXCLUDED.spend,
-         link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results, synced_at = now()`,
+         link_clicks = EXCLUDED.link_clicks, results = EXCLUDED.results,
+         results_indicator = EXCLUDED.results_indicator, synced_at = now()`,
       [
         accountId, level,
         batch.map(p => p.entityId), batch.map(p => p.date),
@@ -919,6 +1010,7 @@ async function persistInsightRows(accountId: string, level: 'campaign' | 'adset'
         batch.map(p => p.adsetId), batch.map(p => p.adsetName), batch.map(p => p.adName),
         batch.map(p => p.reach), batch.map(p => p.impressions),
         batch.map(p => p.spend), batch.map(p => p.linkClicks), batch.map(p => p.results),
+        batch.map(p => p.resultsIndicator),
       ]
     );
   }

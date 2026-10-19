@@ -208,6 +208,14 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS data_source TEXT NOT NU
     await pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS created_time TIMESTAMPTZ`).catch(() => {});
     await pool.query(`ALTER TABLE meta_entities ADD COLUMN IF NOT EXISTS optimization_goal TEXT`).catch(() => {});
 
+    // Which action Meta itself used for this campaign-day's Results figure, as
+    // the raw `indicator` string from insights `fields=results` (e.g.
+    // "actions:lead", "actions:offsite_conversion.fb_pixel_lead"). Written for
+    // diagnostics only — see USE_META_RESULTS_FIELD in metaSync.ts for why the
+    // field's VALUE is not trusted (it reports on the default attribution
+    // window, not the windows this sync requests). Campaign-level rows only.
+    await pool.query(`ALTER TABLE meta_daily_insights ADD COLUMN IF NOT EXISTS results_indicator TEXT`).catch(() => {});
+
     // Manual per-campaign override for which Meta action counts as a "result".
     // Ads Manager labels a small minority of campaigns "Leads (form)" and then
     // reports form leads only, but NOTHING the API exposes predicts which ones:
