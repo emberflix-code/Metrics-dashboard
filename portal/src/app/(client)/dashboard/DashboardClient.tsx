@@ -1430,6 +1430,10 @@ function _ugcLabel(v: string | null | undefined): string {
 // the whole brush clears it again (toggle). Module state like the other
 // Creatives toggles so the plain-HTML card templates can read it.
 let _quickTagOn = false;
+// "Edit tags" switch (admin view only, remembered per browser): off = cards
+// look exactly like the client's own view (read-only pills, only when a tag
+// is set, no Quick tag bar); on = tag chips + Quick tag bar.
+let _tagEditMode = false;
 let _quickTagTheme: string | null = null;
 let _quickTagUgc: string | null = null;
 
@@ -2421,7 +2425,7 @@ function renderCreativesV2() {
     // get the edit dropdowns to set/change/clear them. Whole thing hidden
     // (badges AND dropdowns, admin included) when _hideCreativeTagging is on
     // — see Props.hideCreativeTagging.
-    const themeUgcLine = _hideCreativeTagging ? '' : _isAdminView
+    const themeUgcLine = _hideCreativeTagging ? '' : (_isAdminView && _tagEditMode)
       ? _tagChipsHtml(r)
       : (r.theme || r.ugcStatus)
         ? `<div class="flex items-center gap-1 mb-2 flex-wrap">
@@ -2755,7 +2759,7 @@ function renderCreativesV3() {
     const nameLine = '';
     // Whole thing hidden (badges AND dropdowns, admin included) when
     // _hideCreativeTagging is on — see Props.hideCreativeTagging.
-    const themeUgcLine = _hideCreativeTagging ? '' : _isAdminView
+    const themeUgcLine = _hideCreativeTagging ? '' : (_isAdminView && _tagEditMode)
       ? _tagChipsHtml(r)
       : (r.theme || r.ugcStatus)
         ? `<div class="flex items-center gap-1 mb-2 flex-wrap">
@@ -4977,7 +4981,7 @@ if (typeof window !== 'undefined') {
   // Card click: in quick-tag mode apply the brush (or clear it when the card
   // already carries the whole brush); otherwise open the asset modal as before.
   (window as any)._cardClick = (accountId: string, assetKey: string) => {
-    if (!(_quickTagOn && _isAdminView && !_hideCreativeTagging)) { (window as any)._openAsset(assetKey); return; }
+    if (!(_quickTagOn && _tagEditMode && _isAdminView && !_hideCreativeTagging)) { (window as any)._openAsset(assetKey); return; }
     if (!_quickTagTheme && !_quickTagUgc) { showNotification('Pick a Theme and/or Type in the Quick tag bar first', 'error', 2500); return; }
     const row = _findCreativeRow(accountId, assetKey);
     const hasAll = (!_quickTagTheme || row?.theme === _quickTagTheme) && (!_quickTagUgc || row?.ugcStatus === _quickTagUgc);
@@ -5281,6 +5285,13 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
   _ltvValue = ltvValue;
   _dataSourceByAccount = dataSourceByAccount;
   _isAdminView = isAdminView;
+  useEffect(() => {
+    if (!isAdminView) return;
+    try { _tagEditMode = localStorage.getItem('gmn-tag-edit') === '1'; } catch { /* storage blocked */ }
+    const btn = document.getElementById('tag-edit-toggle');
+    if (btn) { btn.textContent = _tagEditMode ? 'Edit tags: ON' : 'Edit tags: OFF'; btn.classList.toggle('active-sort-btn', _tagEditMode); }
+    document.getElementById('quick-tag-bar')?.classList.toggle('hidden', !_tagEditMode);
+  }, [isAdminView]);
   _showCreativeCampaignBreakdown = showCreativeCampaignBreakdown;
   // Bytes only ever exist on the cached sync path — hide the tab even if
   // the admin toggle is on when any of this client's accounts is still on
@@ -6011,7 +6022,32 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                 </div>
               </div>
               {_isAdminView && !hideCreativeTagging && (
-                <div id="quick-tag-bar" className="quick-tag-bar flex items-center gap-1.5 flex-wrap rounded-lg px-2 py-1.5 mt-2">
+                <div className="mt-2">
+                  <button
+                    id="tag-edit-toggle"
+                    className="sort-btn"
+                    title="Off: cards look exactly like the client's view (tag pills only where a tag is set). On: show the tag buttons and the Quick tag bar."
+                    onClick={(e) => {
+                      _tagEditMode = !_tagEditMode;
+                      try { localStorage.setItem('gmn-tag-edit', _tagEditMode ? '1' : '0'); } catch { /* storage blocked */ }
+                      e.currentTarget.textContent = _tagEditMode ? 'Edit tags: ON' : 'Edit tags: OFF';
+                      e.currentTarget.classList.toggle('active-sort-btn', _tagEditMode);
+                      document.getElementById('quick-tag-bar')?.classList.toggle('hidden', !_tagEditMode);
+                      if (!_tagEditMode && _quickTagOn) {
+                        _quickTagOn = false;
+                        const qt = document.getElementById('quick-tag-toggle');
+                        if (qt) { qt.textContent = 'Quick tag: OFF'; qt.classList.remove('active-sort-btn'); }
+                        document.body.classList.remove('quick-tag-on');
+                        document.getElementById('quick-tag-bar')?.classList.remove('on');
+                      }
+                      if (!document.getElementById('creatives-v2-view')?.classList.contains('hidden')) renderCreativesV2();
+                      if (!document.getElementById('creatives-v3-view')?.classList.contains('hidden')) renderCreativesV3();
+                    }}
+                  >Edit tags: OFF</button>
+                </div>
+              )}
+              {_isAdminView && !hideCreativeTagging && (
+                <div id="quick-tag-bar" className="hidden quick-tag-bar flex items-center gap-1.5 flex-wrap rounded-lg px-2 py-1.5 mt-2">
                   <button
                     id="quick-tag-toggle"
                     className="sort-btn"
