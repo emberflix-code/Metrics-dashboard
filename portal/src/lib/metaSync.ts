@@ -891,8 +891,48 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
 
 async function syncInsightsChunk(accountId: string, token: string, level: 'campaign' | 'adset' | 'ad', since: string, until: string, campaignIds: string[], deadline?: number): Promise<{ written: number; hadGaps: boolean }> {
   const { rows, hadGaps } = await fetchInsightsChunkWithRowCapFallback(accountId, token, level, since, until, campaignIds, deadline);
+  await repairZeroDeliveryDays(token, level, rows, deadline);
   const written = await persistInsightRows(accountId, level, rows);
   return { written, hadGaps };
+}
+
+// Meta occasionally serves the time_increment=1 breakdown with spend 0 and
+// impressions 0 on days that really delivered, while clicks and leads still
+// come through — impossible for real delivery. Hit Alloy BM2
+// (3023829647843614) account-wide for Oct 12-20 2026: 93 campaigns cached
+// at $0 for nine days while Ads Manager showed ~$36k; querying a single day
+// on its own returned the real figures. Re-query just those entity-days one
+// day at a time and swap the real spend/impressions/reach in, keeping each
+// row's own date, ids, clicks and results. Capped (and deadline-aware) so a
+// genuine zero-delivery edge case can't balloon one chunk; anything past the
+// cap is retried by the next sync's 7-day top-up.
+const ZERO_DELIVERY_REPAIR_CAP = 300;
+async function repairZeroDeliveryDays(token: string, level: 'campaign' | 'adset' | 'ad', rows: InsightRow[], deadline?: number): Promise<void> {
+  const idField = ({ campaign: 'campaign_id', adset: 'adset_id', ad: 'ad_id' } as const)[level];
+  const suspect = rows.filter(r =>
+    r[idField] && r.date_start &&
+    !(parseFloat(r.spend || '0') > 0) && !(parseInt(r.impressions || '0', 10) > 0) &&
+    parseInt(r.inline_link_clicks || '0', 10) > 0
+  ).slice(0, ZERO_DELIVERY_REPAIR_CAP);
+  for (const r of suspect) {
+    if (deadline !== undefined && Date.now() > deadline) return;
+    const u = new URL(`${GRAPH}/${r[idField]}/insights`);
+    u.searchParams.set('fields', 'reach,impressions,spend');
+    u.searchParams.set('time_range', JSON.stringify({ since: r.date_start, until: r.date_start }));
+    u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
+    u.searchParams.set('access_token', token);
+    try {
+      const [fixed] = await fetchMetaWithRetry<InsightRow>(u);
+      if (fixed && parseFloat(fixed.spend || '0') > 0) {
+        console.log(`[sync] zero-delivery repair ${level} ${r[idField]} ${r.date_start}: spend 0 -> ${fixed.spend}`);
+        r.spend = fixed.spend;
+        r.impressions = fixed.impressions;
+        r.reach = fixed.reach;
+      }
+    } catch {
+      // Leave the row as Meta served it; the next sync's 7-day top-up retries.
+    }
+  }
 }
 
 // Dedupes + batch-upserts raw insight rows into meta_daily_insights. Split
