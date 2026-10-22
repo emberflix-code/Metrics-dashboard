@@ -829,6 +829,96 @@ async function fetchBreakdownChunkWithRowCapFallback(accountId: string, token: s
   return { rows: out, hadGaps };
 }
 
+// A synchronous breakdown result is treated as truncated when it accounts
+// for less than this share of the window's real account-level spend. Well
+// under 1.0 on purpose: image+video breakdown rows legitimately fall short
+// of account spend (ads with no asset rows, non-DCO ads), and each
+// breakdown type only covers its own slice. This only needs to catch the
+// pathological case — Omega's was 18% of account spend.
+const BREAKDOWN_TRUNCATION_RATIO = 0.5;
+const ASYNC_JOB_POLL_MS = 4_000;
+const ASYNC_JOB_MAX_POLLS = 75;      // ~5 min ceiling per job
+
+// Account-level spend for a window — the ground truth a breakdown result is
+// checked against. Cached per (account, window) since several breakdown
+// types ask about the same window. null = couldn't determine (never treated
+// as evidence of truncation).
+const _accountSpendCache = new Map<string, number | null>();
+async function accountSpendForWindow(accountId: string, token: string, since: string, until: string, deadline?: number): Promise<number | null> {
+  const key = `${accountId}|${since}|${until}`;
+  const hit = _accountSpendCache.get(key);
+  if (hit !== undefined) return hit;
+  if (deadline !== undefined && Date.now() > deadline) return null;
+  let value: number | null = null;
+  try {
+    const u = new URL(`${GRAPH}/act_${accountId}/insights`);
+    u.searchParams.set('level', 'account');
+    u.searchParams.set('fields', 'spend');
+    u.searchParams.set('time_range', JSON.stringify({ since, until }));
+    u.searchParams.set('access_token', token);
+    const rows = await fetchMetaWithRetry<{ spend?: string }>(u, false, deadline);
+    value = rows.length > 0 ? (parseFloat(rows[0].spend || '0') || 0) : 0;
+  } catch {
+    value = null; // a failed probe must not be read as "no spend"
+  }
+  if (_accountSpendCache.size > 500) _accountSpendCache.clear();
+  _accountSpendCache.set(key, value);
+  return value;
+}
+
+// Meta's async report jobs: POST the insights query, poll until the job
+// completes, then page the finished report. Slower per call than a
+// synchronous request, but it is the only way to get a complete result on
+// accounts where the synchronous endpoint truncates (see the caller).
+// Returns null when the job can't be completed, so the caller can fall
+// back to whatever the synchronous path produced.
+async function fetchBreakdownViaAsyncJob(accountId: string, token: string, breakdown: BreakdownKind, since: string, until: string, deadline?: number): Promise<BreakdownRow[] | null> {
+  try {
+    const body = new URLSearchParams({
+      level: 'ad',
+      breakdowns: breakdown,
+      fields: 'ad_id,campaign_name,spend,impressions,inline_link_clicks,reach,actions',
+      time_range: JSON.stringify({ since, until }),
+      time_increment: '1',
+      limit: '500',
+      action_attribution_windows: ATTRIBUTION_WINDOWS,
+      access_token: token,
+    });
+    const started = await (await fetch(`${GRAPH}/act_${accountId}/insights`, {
+      method: 'POST', body, signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    })).json() as { report_run_id?: string; error?: { message?: string } };
+    if (started.error || !started.report_run_id) {
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, error: `async job start failed: ${started.error?.message ?? 'no report_run_id'}` }));
+      return null;
+    }
+    const runId = started.report_run_id;
+
+    for (let i = 0; i < ASYNC_JOB_MAX_POLLS; i++) {
+      if (deadline !== undefined && Date.now() > deadline) return null;
+      await new Promise(r => setTimeout(r, ASYNC_JOB_POLL_MS));
+      const u = new URL(`${GRAPH}/${runId}`);
+      u.searchParams.set('fields', 'async_status,async_percent_completion');
+      u.searchParams.set('access_token', token);
+      const st = await (await fetch(u.toString(), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })).json() as { async_status?: string; error?: { message?: string } };
+      if (st.error) return null;
+      if (st.async_status === 'Job Completed') break;
+      if (st.async_status === 'Job Failed' || st.async_status === 'Job Skipped') {
+        console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, error: `async job ${st.async_status}` }));
+        return null;
+      }
+      if (i === ASYNC_JOB_MAX_POLLS - 1) return null;
+    }
+
+    const results = new URL(`${GRAPH}/${runId}/insights`);
+    results.searchParams.set('limit', '500');
+    results.searchParams.set('access_token', token);
+    return await fetchMetaWithRetry<BreakdownRow>(results, true, deadline);
+  } catch (err) {
+    console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, error: `async job failed: ${err instanceof Error ? err.message : String(err)}` }));
+    return null;
+  }
+}
+
 // Covers ARCHIVED campaigns' breakdown data, which fetchBreakdownChunkWithRowCapFallback
 // structurally cannot reach: confirmed via direct Graph API testing (2026-08-22) that
 // Meta's insights breakdown endpoint silently returns `{data: []}` for an ARCHIVED
@@ -850,13 +940,47 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
     const u = new URL(`${GRAPH}/act_${accountId}/insights`);
     u.searchParams.set('level', 'ad');
     u.searchParams.set('breakdowns', breakdown);
-    u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,actions');
+    // Same field list as the filtered path above (reach included) so rows
+    // from either fetch merge without one source missing a column.
+    u.searchParams.set('fields', 'ad_id,campaign_name,spend,impressions,inline_link_clicks,reach,actions');
     u.searchParams.set('time_range', JSON.stringify({ since, until }));
     u.searchParams.set('time_increment', '1');
     u.searchParams.set('limit', '500');
     u.searchParams.set('action_attribution_windows', ATTRIBUTION_WINDOWS);
     u.searchParams.set('access_token', token);
-    out.push(...await fetchMetaWithRetry<BreakdownRow>(u));
+    const sync = await fetchMetaWithRetry<BreakdownRow>(u);
+
+    // Synchronous paging silently TRUNCATES on very large accounts: Meta
+    // stops returning a `paging.next` long before the data is exhausted,
+    // with no error at all, so the caller records a successful sync over a
+    // partial month. Confirmed live 2026-09-25 on AF Regional Omega, Jan
+    // 1-7 image_asset: this path returned 500 rows / $4,479 while an async
+    // report job returned 3,295 rows / $23,190 against $24,789 of real
+    // account spend. Same failure the Apps Script "Meta Pull" sheet hit,
+    // and the same fix — see project memory "Creatives Metrics sheet".
+    //
+    // Cross-check the synchronous result against account-level spend for
+    // the window; when it's materially short, re-run the window as an
+    // async report job and prefer that. Accounts that already return
+    // complete data (every account except Omega, verified) never trip
+    // this and keep the cheaper synchronous path.
+    const truthSpend = await accountSpendForWindow(accountId, token, since, until, deadline);
+    if (truthSpend !== null && truthSpend > 0) {
+      const syncSpend = sync.reduce((s, r) => s + (parseFloat(r.spend || '0') || 0), 0);
+      if (syncSpend < truthSpend * BREAKDOWN_TRUNCATION_RATIO) {
+        console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'breakdown:truncationSuspected', breakdown, since, until, syncRows: sync.length, syncSpend: Number(syncSpend.toFixed(2)), accountSpend: Number(truthSpend.toFixed(2)) }));
+        const viaJob = await fetchBreakdownViaAsyncJob(accountId, token, breakdown, since, until, deadline);
+        if (viaJob && viaJob.length > sync.length) {
+          console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'breakdown:asyncJobRecovered', breakdown, since, until, syncRows: sync.length, jobRows: viaJob.length }));
+          return { rows: viaJob, hadGaps: false };
+        }
+        // Job failed or returned no more than the sync did — keep what we
+        // have but mark the chunk gapped so the watermark doesn't advance
+        // past a window we know is short.
+        hadGaps = true;
+      }
+    }
+    out.push(...sync);
   } catch (err) {
     if (err instanceof RowCapError && daysBetween(since, until) > 0) {
       // Narrow by date instead of campaign ID (no campaign filter to halve
