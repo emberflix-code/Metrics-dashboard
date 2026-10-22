@@ -52,7 +52,7 @@ Most "the numbers look wrong" moments are sync lag, not performance. Before any 
 - `coverage.warning` set means ad-set or ad totals cover less than 95% of campaign spend. Judge that level on ratios only (CPL, CTR, click-to-lead), not totals. If each ad set has one ad, use the ad-set level instead.
 - `totals.prior_is_partial: true` means the prior period had spend on fewer than half its days (usually a new campaign). The period-over-period % change is then meaningless. Use `totals.current_halves` to see the real trend inside the current window.
 - `status: error`, or `last_synced_at` older than ~36h, means the data is stale. Lead with that.
-- Omega (4594093867301854) and five other AF accounts count `results` with an Ads Manager-matching rule (form-only for new LEAD_GENERATION campaigns). The stored `results` already has this applied, so don't recompute it.
+- Stored `results` = Meta's combined `lead` action, the number Ads Manager's "Results" column shows (the earlier form-only rule for new LEAD_GENERATION campaigns was withdrawn on 2026-10-19). Don't recompute it from actions.
 
 ### 3b. Use the lead count the client's dashboard uses
 

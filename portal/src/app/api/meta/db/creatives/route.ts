@@ -87,6 +87,25 @@ export async function GET(req: NextRequest) {
     }
     if (metricsByAdId.size === 0) return NextResponse.json({ data: [] });
 
+    // Leave out ads Meta already reports per creative (they have rows in
+    // meta_asset_breakdown_daily for this range): the asset-breakdown route
+    // shows those exactly, per image/video. Here, every candidate image of
+    // such a Dynamic Creative ad is mapped with weight=1, so each one got the
+    // ad's FULL spend — the repeated "$275.39 on every card" pattern, all of
+    // it a duplicate of spend already counted in the DCO view (confirmed on
+    // AF Corporate, Sep 2026: all 50 such cards, $14,697.42, came from 29
+    // ads that are all in the breakdown data). An even 1/N split would only
+    // hide the duplicate behind made-up per-image numbers, so drop the ads.
+    // Scoped to the range: an ad whose breakdown rows haven't synced yet
+    // stays here until they do.
+    const breakdownAdRows = await query<{ ad_id: string }>(
+      `SELECT DISTINCT ad_id FROM meta_asset_breakdown_daily
+       WHERE account_id = $1 AND date BETWEEN $2 AND $3 AND ad_id = ANY($4)`,
+      [accountId, since, until, Array.from(metricsByAdId.keys())]
+    );
+    for (const r of breakdownAdRows) metricsByAdId.delete(r.ad_id);
+    if (metricsByAdId.size === 0) return NextResponse.json({ data: [] });
+
     const adIds = Array.from(metricsByAdId.keys());
     const mapRows = await query<{ asset_key: string; ad_id: string; weight: string }>(
       `SELECT asset_key, ad_id, weight::text AS weight FROM meta_creative_asset_ad_map WHERE account_id = $1 AND ad_id = ANY($2)`,
