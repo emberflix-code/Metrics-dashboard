@@ -893,20 +893,21 @@ async function fetchBreakdownViaAsyncJob(accountId: string, token: string, break
     }
     const runId = started.report_run_id;
 
+    const giveUp = (why: string) => {
+      console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, error: `async job ${why}` }));
+      return null;
+    };
     for (let i = 0; i < ASYNC_JOB_MAX_POLLS; i++) {
-      if (deadline !== undefined && Date.now() > deadline) return null;
+      if (deadline !== undefined && Date.now() > deadline) return giveUp('abandoned: sync deadline reached');
       await new Promise(r => setTimeout(r, ASYNC_JOB_POLL_MS));
       const u = new URL(`${GRAPH}/${runId}`);
       u.searchParams.set('fields', 'async_status,async_percent_completion');
       u.searchParams.set('access_token', token);
       const st = await (await fetch(u.toString(), { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) })).json() as { async_status?: string; error?: { message?: string } };
-      if (st.error) return null;
+      if (st.error) return giveUp(`status poll failed: ${st.error.message ?? 'unknown'}`);
       if (st.async_status === 'Job Completed') break;
-      if (st.async_status === 'Job Failed' || st.async_status === 'Job Skipped') {
-        console.error('[META-SYNC-ERR]', JSON.stringify({ accountId, breakdown, since, until, error: `async job ${st.async_status}` }));
-        return null;
-      }
-      if (i === ASYNC_JOB_MAX_POLLS - 1) return null;
+      if (st.async_status === 'Job Failed' || st.async_status === 'Job Skipped') return giveUp(st.async_status);
+      if (i === ASYNC_JOB_MAX_POLLS - 1) return giveUp('still running after poll limit');
     }
 
     const results = new URL(`${GRAPH}/${runId}/insights`);
@@ -932,6 +933,29 @@ async function fetchBreakdownViaAsyncJob(accountId: string, token: string, break
 // as its row-cap defense. On AF Regional Omega, 94% of campaigns (7,737/8,198) are
 // ARCHIVED, so this isn't a minor edge case — most historical months' breakdown data
 // was silently unreachable until this existed.
+// Whether a window needs fetchArchivedBreakdownChunkUnfiltered at all. That
+// pass exists only for campaigns that are ARCHIVED now but spent in the
+// window; when the stored campaign-level insights show such campaigns
+// spent nothing there, the filtered pass already has every ad and the
+// unfiltered pass is pure cost. On Omega it is worse than cost: a recent
+// single day of video_asset exceeds Meta's row cap even unfiltered (and the
+// async job's result paging fails the same way), so the pass errored every
+// run and kept the chunk gapped. Campaign insights sync before breakdowns,
+// so a window with no campaign rows at all (insights not synced that far
+// back) still runs the pass, as before.
+async function archivedBreakdownPassNeeded(accountId: string, since: string, until: string): Promise<boolean> {
+  const [r] = await query<{ total: string | null; archived: string | null }>(
+    `SELECT SUM(i.spend) AS total, SUM(i.spend) FILTER (WHERE e.effective_status = 'ARCHIVED') AS archived
+     FROM meta_daily_insights i
+     LEFT JOIN meta_entities e ON e.account_id = i.account_id AND e.level = 'campaign' AND e.entity_id = i.entity_id
+     WHERE i.account_id = $1 AND i.level = 'campaign' AND i.date BETWEEN $2 AND $3`,
+    [accountId, since, until]
+  );
+  const total = parseFloat(r?.total ?? '0') || 0;
+  const archived = parseFloat(r?.archived ?? '0') || 0;
+  return total <= 0 || archived > 0;
+}
+
 async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: string, breakdown: BreakdownKind, since: string, until: string, deadline?: number): Promise<RowCapFallbackResult<BreakdownRow>> {
   const out: BreakdownRow[] = [];
   let hadGaps = false;
@@ -974,10 +998,13 @@ async function fetchArchivedBreakdownChunkUnfiltered(accountId: string, token: s
           console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'breakdown:asyncJobRecovered', breakdown, since, until, syncRows: sync.length, jobRows: viaJob.length }));
           return { rows: viaJob, hadGaps: false };
         }
-        // Job failed or returned no more than the sync did — keep what we
-        // have but mark the chunk gapped so the watermark doesn't advance
-        // past a window we know is short.
-        hadGaps = true;
+        // A completed job that returns no more than the sync did confirms
+        // the sync was complete — the shortfall is real, not truncation.
+        // Typical for video_asset on Omega, where videos carry only ~5-14% of
+        // spend (checked live 2026-10-26: job and sync both 321 rows /
+        // $1,697 for Oct 24-25). Only a failed job leaves the chunk gapped.
+        console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: viaJob ? 'breakdown:asyncJobConfirmedSync' : 'breakdown:asyncJobUnavailable', breakdown, since, until, syncRows: sync.length, jobRows: viaJob ? viaJob.length : null }));
+        if (!viaJob) hadGaps = true;
       }
     }
     out.push(...sync);
@@ -2409,7 +2436,7 @@ async function syncCreatives(
       // rangeCampaignIds above — see the comment there). Only run when this
       // account actually has archived campaigns, so accounts without any
       // (the common case) pay zero extra API cost.
-      if (archivedCampaignIdSet.size > 0) {
+      if (archivedCampaignIdSet.size > 0 && await archivedBreakdownPassNeeded(accountId, chunk.since, chunk.until)) {
         const archivedResult = await fetchArchivedBreakdownChunkUnfiltered(accountId, token, breakdown, chunk.since, chunk.until, deadline);
         console.log('[SYNC-DIAG]', JSON.stringify({ accountId, step: 'runBreakdownRange:unit:archivedDone', breakdown, chunkIdx, rowCount: archivedResult.rows.length, hadGaps: archivedResult.hadGaps }));
         // fetchArchivedBreakdownChunkUnfiltered returns EVERY ad's rows for
@@ -3159,7 +3186,7 @@ export async function syncCopyBreakdowns(accountId: string, token: string, yeste
     await runPooled(units, SYNC_CONCURRENCY, async ({ breakdown, kind, chunkIdx, chunk }) => {
       const { rows, hadGaps } = await fetchBreakdownChunkWithRowCapFallback(accountId, token, breakdown, chunk.since, chunk.until, rangeCampaignIds, deadline);
       if (hadGaps) gapped[chunkIdx] = true;
-      if (archivedCampaignIdSet.size > 0) {
+      if (archivedCampaignIdSet.size > 0 && await archivedBreakdownPassNeeded(accountId, chunk.since, chunk.until)) {
         const archived = await fetchArchivedBreakdownChunkUnfiltered(accountId, token, breakdown, chunk.since, chunk.until, deadline);
         const covered = new Set(rows.map(r => r.ad_id).filter(Boolean));
         rows.push(...archived.rows.filter(r => r.ad_id && !covered.has(r.ad_id)));
