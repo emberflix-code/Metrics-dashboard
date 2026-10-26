@@ -4728,20 +4728,17 @@ if (typeof window !== 'undefined') {
       ? `https://business.facebook.com/adsmanager/manage/ads?selected_ad_ids=${encodeURIComponent(c.sampleAdId)}`
       : null;
     let media: string;
-    if (c.type === 'video' && c.videoSource) {
-      // Playable.
-      media = `<video src="${c.videoSource}" poster="${c.thumbnail || ''}" controls preload="metadata" playsinline class="w-full h-full object-contain bg-slate-950"></video>`;
-    } else if (c.type === 'video') {
-      // Video ad but Meta blocked source lookup (cross-account, code 100/subcode 33).
-      // Show the poster + a clear explainer so the user knows why it isn't playing
-      // and can jump to Ads Manager where Meta authenticates them directly.
+    // Video ad Meta won't play for us (cross-account, code 100/subcode 33): the
+    // poster + a clear explainer, with a jump to Ads Manager where Meta
+    // authenticates the viewer directly.
+    const unavailableVideo = (): string => {
       const poster = c.thumbnail
         ? `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="absolute inset-0 w-full h-full object-contain bg-slate-950 opacity-60" />`
         : '';
       const link = adsManagerUrl
         ? `<a href="${adsManagerUrl}" target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-blue-400 hover:text-blue-300 text-xs font-medium mt-2">View in Ads Manager <i data-lucide="external-link" class="w-3 h-3"></i></a>`
         : '';
-      media = `
+      return `
         <div class="relative w-full h-full bg-slate-950">
           ${poster}
           <div class="relative z-10 w-full h-full flex flex-col items-center justify-center text-center px-4">
@@ -4751,6 +4748,25 @@ if (typeof window !== 'undefined') {
             ${link}
           </div>
         </div>`;
+    };
+    if (c.type === 'video' && ((c.videoId && c.accountId) || c.videoSource)) {
+      // The stored video_source is a Meta CDN URL that expires a few days after
+      // the sync fetched it (Alloy Centennial: 7 of 8 videos dead), so play
+      // through the route that asks Meta for a fresh source on every open and
+      // falls back to the stored URL. If Meta refuses both, the <source> errors
+      // and the player is swapped for the explainer kept in the <template>.
+      const src = c.videoId && c.accountId
+        ? `/api/gmn-report/video/${encodeURIComponent(c.accountId)}/${encodeURIComponent(c.videoId)}`
+        : (c.videoSource as string);
+      media = `
+        <div class="w-full h-full">
+          <video poster="${c.thumbnail || ''}" controls preload="metadata" playsinline class="w-full h-full object-contain bg-slate-950">
+            <source src="${src}" onerror="const w=this.closest('video').parentElement;w.innerHTML=w.querySelector('template').innerHTML;if(window.lucide)window.lucide.createIcons()">
+          </video>
+          <template>${unavailableVideo()}</template>
+        </div>`;
+    } else if (c.type === 'video') {
+      media = unavailableVideo();
     } else if (c.thumbnail) {
       media = `<img src="${c.thumbnail}" alt="" referrerpolicy="no-referrer" class="w-full h-full object-contain bg-slate-950" />`;
     } else {
