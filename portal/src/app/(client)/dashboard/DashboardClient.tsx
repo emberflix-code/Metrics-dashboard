@@ -4102,7 +4102,7 @@ async function fetchMetaCampaigns() {
       const byEntity: Record<string, any> = {};
       await runPooled(mainWindows, 4, async (w) => {
         const chunkRange = JSON.stringify({ since: w.s, until: w.u });
-        let url: string|null = `${metaApiBase(accountId)}/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(chunkRange)}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+        let url: string|null = `${metaApiBase(accountId)}/insights?account_id=${encodeURIComponent(accountId)}&fields=${encodeURIComponent(lvl.insightFields)}&level=${_currentLevel}&time_range=${encodeURIComponent(chunkRange)}&floor_range=${encodeURIComponent(JSON.stringify({since,until}))}&limit=100&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
         let isFirstPage = true;
         while (url) {
           const fetchUrl: string = isFirstPage ? url : `/api/meta/next-page?url=${encodeURIComponent(url)}`;
@@ -4206,7 +4206,7 @@ async function fetchMetaCampaigns() {
         const trendUnits: { acc: string; w: { s: string; u: string } }[] = [];
         for (const acc of accountIds) for (const w of windows) trendUnits.push({ acc, w });
         await runPooled(trendUnits, 4, async ({ acc, w }) => {
-          let tUrl: string|null = `${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,campaign_name,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+          let tUrl: string|null = `${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,campaign_name,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&floor_range=${encodeURIComponent(JSON.stringify({since,until}))}&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
           let tFirst=true;
           while (tUrl) {
             const tFetch: string=tFirst?tUrl:`/api/meta/next-page?url=${encodeURIComponent(tUrl)}`; tFirst=false;
@@ -4306,7 +4306,7 @@ async function fetchMetaCampaigns() {
             const cUnits: { acc: string; w: { s: string; u: string } }[] = [];
             for (const acc of accountIds) for (const w of cWindows) cUnits.push({ acc, w });
             await runPooled(cUnits, 4, async ({ acc, w }) => {
-              let ctUrl: string|null=`${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,campaign_name,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
+              let ctUrl: string|null=`${metaApiBase(acc)}/insights?account_id=${encodeURIComponent(acc)}&fields=${encodeURIComponent('campaign_id,campaign_name,spend,actions')}&level=campaign&time_range=${encodeURIComponent(JSON.stringify({since:w.s,until:w.u}))}&time_increment=1&floor_range=${encodeURIComponent(JSON.stringify({since:cr.since,until:cr.until}))}&limit=500&action_attribution_windows=${encodeURIComponent('["7d_click","1d_view","1d_ev"]')}`;
               let ctFirst=true;
               while (ctUrl) {
                 const ctFetch: string=ctFirst?ctUrl:`/api/meta/next-page?url=${encodeURIComponent(ctUrl)}`; ctFirst=false;

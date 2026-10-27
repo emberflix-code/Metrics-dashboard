@@ -59,6 +59,24 @@ export async function GET(req: NextRequest) {
     } catch { /* leave empty — query below returns nothing */ }
     if (!since || !until) return NextResponse.json({ data: [], paging: null }, NO_STORE);
 
+    // The impression floor (lib/resultsBasis.ts) must be judged per campaign
+    // over the user's WHOLE selected range. The dashboard fetches long ranges
+    // in 7-day chunks, so each chunk sends the full selection as `floor_range`;
+    // judging the floor per chunk instead dropped late-attributed leads that a
+    // campaign picked up in a week it had 0 impressions (Omega Jul–Sep 2026:
+    // 13 leads, card 14,067 vs 14,080). Only honoured when it encloses the
+    // requested range — anything else falls back to the request's own range.
+    let floorSince = since, floorUntil = until;
+    try {
+      const fr = JSON.parse(sp.get('floor_range') || '{}');
+      if (typeof fr.since === 'string' && typeof fr.until === 'string'
+          && /^\d{4}-\d{2}-\d{2}$/.test(fr.since) && /^\d{4}-\d{2}-\d{2}$/.test(fr.until)
+          && fr.since <= since && fr.until >= until) {
+        floorSince = fr.since;
+        floorUntil = fr.until;
+      }
+    } catch { /* malformed — keep the request's own range */ }
+
     // Optional explicit campaign.id IN [...] constraint (ad-ID discovery call).
     let campaignIdIn: string[] | null = null;
     const filteringRaw = sp.get('filtering');
@@ -96,8 +114,18 @@ export async function GET(req: NextRequest) {
           [accountId, since, until]
         );
         // Ads Manager's "Impressions > 1" export filter — see lib/resultsBasis.ts.
+        // Judged over floor_range when the caller sent a wider one.
         const floorApplies = usesAdsManagerBasis(accountId);
-        const qualifying = floorApplies ? qualifyingCampaignIds(campaignRows) : null;
+        const floorRows = !floorApplies ? []
+          : (floorSince === since && floorUntil === until) ? campaignRows
+          : await query<{ campaign_id: string; impressions: string }>(
+              `SELECT campaign_id, SUM(impressions)::text AS impressions
+               FROM meta_daily_insights
+               WHERE account_id = $1 AND level = 'campaign' AND date BETWEEN $2 AND $3
+               GROUP BY campaign_id`,
+              [accountId, floorSince, floorUntil]
+            );
+        const qualifying = floorApplies ? qualifyingCampaignIds(floorRows) : null;
         const totals = { reach: 0, impressions: 0, spend: 0, linkClicks: 0, results: 0 };
         for (const r of campaignRows) {
           if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) continue;
@@ -141,7 +169,7 @@ export async function GET(req: NextRequest) {
          FROM meta_daily_insights
          WHERE account_id = $1 AND level = 'campaign' AND date BETWEEN $2 AND $3
          GROUP BY campaign_id`,
-        [accountId, since, until]
+        [accountId, floorSince, floorUntil]
       );
       qualifying = qualifyingCampaignIds(campaignImpressions);
     }
