@@ -303,9 +303,10 @@ interface CreativeRow {
   // show_creative_campaign_breakdown flag is on.
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
-  // Every campaign name this creative ran in (uncapped, unlike `campaigns`) —
-  // read by Creatives v3's campaign search. Optional: v1/v2 routes don't send it.
-  campaignNames?: string[];
+  // Every campaign this creative ran in (uncapped, unlike `campaigns`), as
+  // [name, spend, results, impressions, linkClicks] — Creatives v3's campaign
+  // search filters AND re-totals cards from it. Optional: v1/v2 routes don't send it.
+  campaignStats?: [string, number, number, number, number][];
   // Theme/UGC tagging (see AssetBreakdownRow below) reuses this same card
   // template for static (non-DCO) assets too. /api/meta/creatives never
   // returns these — they're stamped client-side (accountId) or left null
@@ -367,7 +368,7 @@ interface AssetBreakdownRow {
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
-  campaignNames?: string[]; // see CreativeRow.campaignNames
+  campaignStats?: [string, number, number, number, number][]; // see CreativeRow.campaignStats
   hidden: boolean;
   // Admin-only Bookings/Joins ESTIMATE (spend-share attribution via the KPI
   // sheet, same method as the Theme Breakdown tab) — only ever rendered on
@@ -2562,7 +2563,7 @@ function renderCreativesV3() {
     ads: s.ads,
     campaigns: s.campaigns,
     campaignsTruncated: s.campaignsTruncated,
-    campaignNames: s.campaignNames,
+    campaignStats: s.campaignStats,
     hidden: s.thumbnail === null,
     accountId: s.accountId,
     theme: s.theme,
@@ -2586,17 +2587,15 @@ function renderCreativesV3() {
   const staticVideos = staticAsBreakdown.filter(r => r.type === 'video');
   let images = [...dcoImages, ...staticImages];
   let videos = [...dcoVideos, ...staticVideos];
-  // Campaign search: keep a card when ANY campaign it ran in matches, using
-  // the table's own matcher (all/any/none mode, chips + typed text). v3 used
-  // to reuse v1's _dcoVisibleAdIds, which only the v1 Creatives tab ever
-  // rebuilt — so v3 ignored typing and could stay stuck on an older search.
-  // Matched on names, not ad ids: Omega only syncs campaign-level insights,
-  // so there are no ad rows to map a search onto.
+  // Campaign search: show only creatives that ran in a matching campaign
+  // (the table's own matcher — all/any/none mode, chips + typed text), and
+  // re-total each card from ONLY those campaigns, so a search for one club
+  // shows that club's spend/leads per creative rather than the creative's
+  // account-wide totals. Matched on campaign names, not ad ids: Omega only
+  // syncs campaign-level insights, so there are no ad rows to map onto.
   if (_v3SearchActive()) {
-    const keep = (r: AssetBreakdownRow) =>
-      (r.campaignNames ?? (r.campaigns || []).map(c => c.name)).some(n => _matchesSearch(n));
-    images = images.filter(keep);
-    videos = videos.filter(keep);
+    images = images.map(_scopeCreativeToSearch).filter((r): r is AssetBreakdownRow => r !== null);
+    videos = videos.map(_scopeCreativeToSearch).filter((r): r is AssetBreakdownRow => r !== null);
   }
 
   _ensureCreativesV3Phashes(images);
@@ -3129,6 +3128,48 @@ function renderStaticAssets() {
   }
 }
 
+// Card re-totaled from only the campaigns that match the search, or null when
+// none match. Reach and the admin bookings/joins estimates can't be split per
+// campaign, so they're blanked (shown as unavailable) rather than left at the
+// creative's account-wide value. Rows without campaignStats (never expected
+// from the v3 routes) keep their totals and are matched on the capped list.
+function _scopeCreativeToSearch(r: AssetBreakdownRow): AssetBreakdownRow | null {
+  const stats = r.campaignStats;
+  if (!stats) return (r.campaigns || []).some(c => _matchesSearch(c.name)) ? r : null;
+  const hit = stats.filter(c => _matchesSearch(c[0])).sort((a, b) => b[1] - a[1]);
+  if (hit.length === 0) return null;
+  let spend = 0, results = 0, impressions = 0, linkClicks = 0;
+  for (const [, sp, re, im, lc] of hit) { spend += sp; results += re; impressions += im; linkClicks += lc; }
+  spend = Math.round(spend * 100) / 100;
+  const adCountByName = new Map((r.campaigns || []).map(c => [c.name, c.adCount] as const));
+  return {
+    ...r,
+    spend, results, impressions, linkClicks,
+    ctr: impressions > 0 ? Math.round((linkClicks / impressions) * 10000) / 100 : 0,
+    cpl: results > 0 ? Math.round((spend / results) * 100) / 100 : 0,
+    reach: null,
+    bookings: null, cpb: null, joins: null, cpj: null,
+    campaignStats: hit,
+    campaigns: hit.slice(0, 50).map(([name, sp, re, im, lc]) => ({ name, adCount: adCountByName.get(name) ?? 0, spend: sp, results: re, impressions: im, linkClicks: lc })),
+    campaignsTruncated: hit.length > 50,
+  };
+}
+
+// Sum two [name, spend, results, impressions, linkClicks] lists by campaign
+// name (cross-account merges). Always returns a new array.
+function _mergeCampaignStats(
+  a: [string, number, number, number, number][] | undefined,
+  b: [string, number, number, number, number][],
+): [string, number, number, number, number][] {
+  const byName = new Map<string, [string, number, number, number, number]>();
+  for (const c of [...(a || []), ...b]) {
+    const cur = byName.get(c[0]);
+    if (!cur) byName.set(c[0], [c[0], c[1], c[2], c[3], c[4]]);
+    else { cur[1] = Math.round((cur[1] + c[1]) * 100) / 100; cur[2] += c[2]; cur[3] += c[3]; cur[4] += c[4]; }
+  }
+  return Array.from(byName.values());
+}
+
 // True while the campaign search box has any chip or typed text.
 function _v3SearchActive(): boolean {
   const input = (document.getElementById('search-input') as HTMLInputElement)?.value?.trim() || '';
@@ -3260,7 +3301,7 @@ async function fetchDcoAssetsV3() {
           existing.untaggedSiblingSpend = Math.round((existing.untaggedSiblingSpend + a.untaggedSiblingSpend) * 100) / 100;
           // New array, never push into `existing`'s — the spread above shares
           // the first account's array with its original response row.
-          if (a.campaignNames?.length) existing.campaignNames = Array.from(new Set([...(existing.campaignNames || []), ...a.campaignNames]));
+          if (a.campaignStats?.length) existing.campaignStats = _mergeCampaignStats(existing.campaignStats, a.campaignStats);
         }
       };
       mergeInto(imageMap, r.images || []);
@@ -3337,7 +3378,7 @@ async function fetchStaticAssetsV3() {
         existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
         existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
         if (!existing.thumbnail && row.thumbnail) existing.thumbnail = row.thumbnail;
-        if (row.campaignNames?.length) existing.campaignNames = Array.from(new Set([...(existing.campaignNames || []), ...row.campaignNames]));
+        if (row.campaignStats?.length) existing.campaignStats = _mergeCampaignStats(existing.campaignStats, row.campaignStats);
       }
     }
     _staticAssetsV3 = Array.from(merged.values());

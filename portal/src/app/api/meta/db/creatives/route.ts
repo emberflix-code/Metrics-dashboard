@@ -28,9 +28,11 @@ interface CreativeRow {
   // returned them.
   theme: string | null;
   ugcStatus: string | null;
-  // Every campaign this creative's ads ran in for the range — used by the
-  // dashboard's campaign search (Creatives v3) to keep or hide the card.
-  campaignNames: string[];
+  // Every campaign this creative's ads ran in for the range, as
+  // [name, spend, results, impressions, linkClicks] (weighted like the card's
+  // own totals) — Creatives v3's campaign search keeps the card only if a
+  // campaign matches and re-totals it from the matching campaigns.
+  campaignStats: [string, number, number, number, number][];
 }
 
 // DB-backed mirror of /api/meta/creatives. Joins meta_creative_assets +
@@ -216,7 +218,7 @@ export async function GET(req: NextRequest) {
           ads: [],
           theme: themeUgcByCanonical.get(canonicalKey)?.theme ?? null,
           ugcStatus: themeUgcByCanonical.get(canonicalKey)?.ugcStatus ?? null,
-          campaignNames: [],
+          campaignStats: [],
         };
         rows.set(canonicalKey, row);
       }
@@ -225,7 +227,14 @@ export async function GET(req: NextRequest) {
       row.impressions += metrics.impressions * weight;
       row.linkClicks += metrics.linkClicks * weight;
       row.reach += Math.round(metrics.reach * weight);
-      if (metrics.campaignName && !row.campaignNames.includes(metrics.campaignName)) row.campaignNames.push(metrics.campaignName);
+      if (metrics.campaignName) {
+        let cs = row.campaignStats.find(c => c[0] === metrics.campaignName);
+        if (!cs) { cs = [metrics.campaignName, 0, 0, 0, 0]; row.campaignStats.push(cs); }
+        cs[1] += metrics.spend * weight;
+        cs[2] += metrics.results * weight;
+        cs[3] += metrics.impressions * weight;
+        cs[4] += metrics.linkClicks * weight;
+      }
       if (!row.ads.find(a => a.id === m.ad_id)) {
         row.ads.push({
           id: m.ad_id,
@@ -262,6 +271,8 @@ export async function GET(req: NextRequest) {
         reach: Math.round(r.reach),
         ctr: Math.round(ctr * 100) / 100,
         cpl: Math.round(cpl * 100) / 100,
+        campaignStats: r.campaignStats.map(([n, sp, re, im, lc]) =>
+          [n, Math.round(sp * 100) / 100, Math.round(re * 100) / 100, Math.round(im), Math.round(lc)] as [string, number, number, number, number]),
         ads: r.ads.map(a => ({
           ...a,
           spend: Math.round(a.spend * 100) / 100,
