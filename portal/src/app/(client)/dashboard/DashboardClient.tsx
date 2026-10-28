@@ -303,6 +303,9 @@ interface CreativeRow {
   // show_creative_campaign_breakdown flag is on.
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
+  // Every campaign name this creative ran in (uncapped, unlike `campaigns`) —
+  // read by Creatives v3's campaign search. Optional: v1/v2 routes don't send it.
+  campaignNames?: string[];
   // Theme/UGC tagging (see AssetBreakdownRow below) reuses this same card
   // template for static (non-DCO) assets too. /api/meta/creatives never
   // returns these — they're stamped client-side (accountId) or left null
@@ -364,6 +367,7 @@ interface AssetBreakdownRow {
   ads: { id: string; name: string; status: string; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
+  campaignNames?: string[]; // see CreativeRow.campaignNames
   hidden: boolean;
   // Admin-only Bookings/Joins ESTIMATE (spend-share attribution via the KPI
   // sheet, same method as the Theme Breakdown tab) — only ever rendered on
@@ -2558,6 +2562,7 @@ function renderCreativesV3() {
     ads: s.ads,
     campaigns: s.campaigns,
     campaignsTruncated: s.campaignsTruncated,
+    campaignNames: s.campaignNames,
     hidden: s.thumbnail === null,
     accountId: s.accountId,
     theme: s.theme,
@@ -2581,9 +2586,15 @@ function renderCreativesV3() {
   const staticVideos = staticAsBreakdown.filter(r => r.type === 'video');
   let images = [...dcoImages, ...staticImages];
   let videos = [...dcoVideos, ...staticVideos];
-  if (_dcoVisibleAdIds) {
-    const visible = _dcoVisibleAdIds;
-    const keep = (r: AssetBreakdownRow) => r.adIds.some(id => visible.has(id));
+  // Campaign search: keep a card when ANY campaign it ran in matches, using
+  // the table's own matcher (all/any/none mode, chips + typed text). v3 used
+  // to reuse v1's _dcoVisibleAdIds, which only the v1 Creatives tab ever
+  // rebuilt — so v3 ignored typing and could stay stuck on an older search.
+  // Matched on names, not ad ids: Omega only syncs campaign-level insights,
+  // so there are no ad rows to map a search onto.
+  if (_v3SearchActive()) {
+    const keep = (r: AssetBreakdownRow) =>
+      (r.campaignNames ?? (r.campaigns || []).map(c => c.name)).some(n => _matchesSearch(n));
     images = images.filter(keep);
     videos = videos.filter(keep);
   }
@@ -3118,6 +3129,20 @@ function renderStaticAssets() {
   }
 }
 
+// True while the campaign search box has any chip or typed text.
+function _v3SearchActive(): boolean {
+  const input = (document.getElementById('search-input') as HTMLInputElement)?.value?.trim() || '';
+  return _searchChips.length > 0 || input.length > 0;
+}
+// Search edits re-render v3 straight from the already-loaded cards (no
+// refetch). Debounced since typing fires on every keystroke.
+let _v3SearchTimer: ReturnType<typeof setTimeout> | null = null;
+function _scheduleCreativesV3SearchRender() {
+  if (document.getElementById('creatives-v3-view')?.classList.contains('hidden')) return;
+  if (_v3SearchTimer) clearTimeout(_v3SearchTimer);
+  _v3SearchTimer = setTimeout(() => { _v3SearchTimer = null; renderCreativesV3(); }, 250);
+}
+
 // ── Creatives v3 fetches — deliberately hit the DB-backed routes directly
 // (never metaApiBase/the live route) with ?thumbnailMode=bytes, regardless
 // of this client's data_source. v3's tab is only ever shown when every
@@ -3233,6 +3258,9 @@ async function fetchDcoAssetsV3() {
           existing.cpj = existing.joins && existing.joins > 0 ? Math.round((existing.spend / existing.joins) * 100) / 100 : null;
           existing.untaggedSiblingCount += a.untaggedSiblingCount;
           existing.untaggedSiblingSpend = Math.round((existing.untaggedSiblingSpend + a.untaggedSiblingSpend) * 100) / 100;
+          // New array, never push into `existing`'s — the spread above shares
+          // the first account's array with its original response row.
+          if (a.campaignNames?.length) existing.campaignNames = Array.from(new Set([...(existing.campaignNames || []), ...a.campaignNames]));
         }
       };
       mergeInto(imageMap, r.images || []);
@@ -3309,6 +3337,7 @@ async function fetchStaticAssetsV3() {
         existing.ctr = existing.impressions > 0 ? Math.round((existing.linkClicks / existing.impressions) * 10000) / 100 : 0;
         existing.cpl = existing.results > 0 ? Math.round((existing.spend / existing.results) * 100) / 100 : 0;
         if (!existing.thumbnail && row.thumbnail) existing.thumbnail = row.thumbnail;
+        if (row.campaignNames?.length) existing.campaignNames = Array.from(new Set([...(existing.campaignNames || []), ...row.campaignNames]));
       }
     }
     _staticAssetsV3 = Array.from(merged.values());
@@ -4715,7 +4744,7 @@ if (typeof window !== 'undefined') {
   // search term reflects in the cards above the table exactly like it
   // already does in the table itself (renderTable already respects search
   // via _matchesSearch/getFiltered; the cards previously did not).
-  (window as any)._refreshKpiCardsForSearch = () => { const data=getFiltered().map(calcMetrics); renderCards(getSelectedTotals(data),_selectedRows.size); };
+  (window as any)._refreshKpiCardsForSearch = () => { const data=getFiltered().map(calcMetrics); renderCards(getSelectedTotals(data),_selectedRows.size); _scheduleCreativesV3SearchRender(); };
   (window as any)._handleSelectAll = (checked: boolean) => { const data=getFiltered(); if (checked) data.forEach(c=>_selectedRows.add(c.id||c.name)); else _selectedRows.clear(); renderTable(); };
   (window as any)._clearDrilldown = () => { _drilldownParentIds.clear(); _drilldownParentLevel=null; _selectedRows.clear(); renderTable(); };
   (window as any)._dpSelectPreset = (key: string) => { _dpActivePreset=key; const r=_dpPresetRange(key); if (r){_dpSince=r.since;_dpUntil=r.until;} _dpSelecting=false;_dpHover=null; const base=new Date(_dpSince!+'T00:00:00');_dpLY=base.getFullYear();_dpLM=base.getMonth(); dpPopulatePresets();dpPopulateSelects();dpRenderBothCals();dpRenderCompareRange(); };

@@ -41,6 +41,11 @@ interface AssetSummary {
   // /api/meta/asset-breakdown/route.ts for the shape and cap rationale.
   campaigns: { name: string; adCount: number; spend: number; results: number; impressions: number; linkClicks: number }[];
   campaignsTruncated: boolean;
+  // EVERY campaign name this asset ran in for the range — `campaigns` above is
+  // capped at CAMPAIGNS_CAP for the detail modal, but the dashboard's campaign
+  // search (Creatives v3) must see all of them: a template creative runs in
+  // 160+ campaigns on Omega, so matching against the top 50 would miss it.
+  campaignNames: string[];
   hidden: boolean;
   // Admin-only estimate — see the comment above the attribution block below
   // for the method (same spend-share split as the Theme Breakdown tab's
@@ -408,7 +413,7 @@ export async function GET(req: NextRequest) {
           ugcStatus: themeUgcByCanonical.get(canonicalKey)?.ugcStatus ?? null,
           spend: 0, results: 0, impressions: 0, linkClicks: 0,
           ctr: 0, cpl: 0, reach: null,
-          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, hidden: false,
+          adCount: 0, adIds: [], ads: [], campaigns: [], campaignsTruncated: false, campaignNames: [], hidden: false,
           bookings: null, cpb: null, joins: null, cpj: null,
           untaggedSiblingCount: untaggedSiblingsByCanonical.get(canonicalKey)?.count ?? 0,
           untaggedSiblingSpend: untaggedSiblingsByCanonical.get(canonicalKey)?.spend ?? 0,
@@ -489,6 +494,7 @@ export async function GET(req: NextRequest) {
           adIds: Array.from(row._adIdSet),
           campaigns,
           campaignsTruncated,
+          campaignNames: allCampaigns.map(c => c.name),
           hidden: row.thumbnail === null,
           bookings: hasBookingsData ? Math.round(bookings!) : null,
           cpb: hasBookingsData && bookings! > 0 ? Math.round((row.spend / bookings!) * 100) / 100 : null,

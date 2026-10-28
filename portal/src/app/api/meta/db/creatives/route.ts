@@ -28,6 +28,9 @@ interface CreativeRow {
   // returned them.
   theme: string | null;
   ugcStatus: string | null;
+  // Every campaign this creative's ads ran in for the range — used by the
+  // dashboard's campaign search (Creatives v3) to keep or hide the card.
+  campaignNames: string[];
 }
 
 // DB-backed mirror of /api/meta/creatives. Joins meta_creative_assets +
@@ -66,7 +69,7 @@ export async function GET(req: NextRequest) {
       [accountId, since, until]
     );
 
-    const metricsByAdId = new Map<string, { spend: number; impressions: number; linkClicks: number; reach: number; results: number; adName: string }>();
+    const metricsByAdId = new Map<string, { spend: number; impressions: number; linkClicks: number; reach: number; results: number; adName: string; campaignName: string }>();
     for (const r of insightRows) {
       if (!matchesCampaignFilter(r.campaign_name || '', campaignFilter, accountId)) continue;
       const existing = metricsByAdId.get(r.entity_id);
@@ -76,7 +79,7 @@ export async function GET(req: NextRequest) {
       const reach = parseInt(r.reach, 10) || 0;
       const results = parseInt(r.results, 10) || 0;
       if (!existing) {
-        metricsByAdId.set(r.entity_id, { spend, impressions, linkClicks, reach, results, adName: r.ad_name || '' });
+        metricsByAdId.set(r.entity_id, { spend, impressions, linkClicks, reach, results, adName: r.ad_name || '', campaignName: r.campaign_name || '' });
       } else {
         existing.spend += spend;
         existing.impressions += impressions;
@@ -213,6 +216,7 @@ export async function GET(req: NextRequest) {
           ads: [],
           theme: themeUgcByCanonical.get(canonicalKey)?.theme ?? null,
           ugcStatus: themeUgcByCanonical.get(canonicalKey)?.ugcStatus ?? null,
+          campaignNames: [],
         };
         rows.set(canonicalKey, row);
       }
@@ -221,6 +225,7 @@ export async function GET(req: NextRequest) {
       row.impressions += metrics.impressions * weight;
       row.linkClicks += metrics.linkClicks * weight;
       row.reach += Math.round(metrics.reach * weight);
+      if (metrics.campaignName && !row.campaignNames.includes(metrics.campaignName)) row.campaignNames.push(metrics.campaignName);
       if (!row.ads.find(a => a.id === m.ad_id)) {
         row.ads.push({
           id: m.ad_id,
