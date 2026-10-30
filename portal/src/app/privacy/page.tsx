@@ -144,7 +144,10 @@ export default function PrivacyPolicyPage() {
           </p>
         </Section>
 
-        <footer className="border-t border-slate-800 pt-6 text-xs text-slate-500">
+        <footer className="flex gap-4 border-t border-slate-800 pt-6 text-xs text-slate-500">
+          <Link href="/terms" className="hover:text-slate-300">
+            Terms of Service
+          </Link>
           <Link href="/login" className="hover:text-slate-300">
             GMN Ads Portal sign in
           </Link>
