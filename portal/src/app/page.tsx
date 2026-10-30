@@ -36,11 +36,8 @@ function PublicHome() {
     <div className="min-h-screen bg-slate-950 px-4 py-12">
       <div className="mx-auto max-w-3xl space-y-12">
         <header className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
-            <div className="relative h-10 w-10 shrink-0">
-              <Image src="/gmn.png" alt="GMN Logo" fill className="object-contain" priority />
-            </div>
-            <span className="text-lg font-bold text-white">GMN Ads Portal</span>
+          <div className="rounded-xl bg-white px-3 py-2">
+            <Image src="/gmn-logo-full.png" alt="GMN — Gym Members Now" width={658} height={258} className="h-12 w-auto sm:h-14" priority />
           </div>
           <Link
             href="/login"

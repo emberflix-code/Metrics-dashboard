@@ -24,10 +24,10 @@ export default function TermsOfServicePage() {
   return (
     <div className="min-h-screen bg-slate-950 px-4 py-12">
       <div className="mx-auto max-w-3xl space-y-10">
-        <header className="flex items-center gap-4">
-          <div className="relative h-12 w-12 shrink-0">
-            <Image src="/gmn.png" alt="GMN Logo" fill className="object-contain" priority />
-          </div>
+        <header className="space-y-6">
+          <Link href="/" className="inline-block rounded-xl bg-white px-3 py-2">
+            <Image src="/gmn-logo-full.png" alt="GMN — Gym Members Now" width={658} height={258} className="h-12 w-auto" priority />
+          </Link>
           <div>
             <h1 className="text-2xl font-bold text-white">Terms of Service</h1>
             <p className="text-sm text-slate-400">GMN Ads Portal · Effective {EFFECTIVE_DATE}</p>
