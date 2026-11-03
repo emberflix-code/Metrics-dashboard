@@ -17,6 +17,7 @@ import ShowMetaLeadNamesToggle from './ShowMetaLeadNamesToggle';
 import ActiveToggle from './ActiveToggle';
 import IsRollupToggle from './IsRollupToggle';
 import SheetConfigForm from './SheetConfigForm';
+import GoogleAdsConfigForm from './GoogleAdsConfigForm';
 import GhlConfigForm from './GhlConfigForm';
 import CpaConfigForm from './CpaConfigForm';
 import LtvConfigForm from './LtvConfigForm';
@@ -41,6 +42,9 @@ interface ClientDetail {
   sheet_id: string;
   sheet_tab: string;
   google_sheet_tab: string;
+  google_data_source: 'sheet' | 'api';
+  google_ads_customer_ids: string[];
+  google_campaign_filter: string;
   use_sheet_for_leads: boolean;
   leads_source: 'meta' | 'sheet' | 'ghl';
   show_bookings: boolean;
@@ -113,6 +117,7 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
   const [client] = await query<ClientDetail>(`
     SELECT c.id, c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
            c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
+           c.google_data_source, c.google_ads_customer_ids, c.google_campaign_filter,
            c.leads_source, c.show_bookings, c.show_book_rate, c.ghl_location_id, c.ghl_leads_tag,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
            c.cpa_sheet_id, c.cpa_sheet_tab, c.show_cpa, c.retainer_mode, c.retainer_flat_amount,
@@ -190,6 +195,20 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
       }
     }
   }
+
+  // Google Ads API sync status across this client's Google accounts — the
+  // oldest "synced through" date is what its dashboard can rely on.
+  const googleSyncRows = (client.google_ads_customer_ids?.length ?? 0) > 0
+    ? await query<{ synced_through: string | null; last_error: string | null }>(
+        `SELECT to_char(last_success_until, 'YYYY-MM-DD') AS synced_through, last_error
+         FROM google_ads_sync_state WHERE customer_id = ANY($1)`,
+        [client.google_ads_customer_ids]
+      ).catch(() => [] as { synced_through: string | null; last_error: string | null }[])
+    : [];
+  const googleSyncedThrough = googleSyncRows.length === client.google_ads_customer_ids.length && googleSyncRows.every(r => r.synced_through)
+    ? googleSyncRows.map(r => r.synced_through as string).sort()[0]
+    : null;
+  const googleLastError = googleSyncRows.find(r => r.last_error)?.last_error ?? null;
 
   const retainerDbRows = await query<{ month: string; amount: string }>(
     `SELECT to_char(month, 'YYYY-MM') AS month, amount FROM client_retainers WHERE client_id = $1 ORDER BY month DESC`,
@@ -382,6 +401,22 @@ export default async function ClientDetailPage({ params }: { params: { id: strin
             currentGoogleSheetTab={client.google_sheet_tab ?? ''}
             currentLeadsSource={client.leads_source ?? 'meta'}
             hasGhlToken={!!client.has_ghl_token}
+          />
+        </div>
+
+        {/* Google Ads API */}
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h2 className="text-base font-semibold text-white mb-1">Google Ads</h2>
+          <p className="text-sm text-slate-400 mb-5">
+            Where this client&apos;s Google Ads dashboard gets its numbers.
+          </p>
+          <GoogleAdsConfigForm
+            clientId={client.id}
+            currentDataSource={client.google_data_source ?? 'sheet'}
+            currentCustomerIds={client.google_ads_customer_ids ?? []}
+            currentCampaignFilter={client.google_campaign_filter ?? ''}
+            syncedThrough={googleSyncedThrough}
+            lastError={googleLastError}
           />
         </div>
 

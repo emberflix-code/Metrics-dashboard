@@ -17,6 +17,8 @@ interface Props {
   showAccount: boolean;  // admin toggle: show ad account column
   platform?: 'meta' | 'google'; // data source — defaults to meta
   hasGoogleAds?: boolean;       // is the Google Ads view available for this client?
+  hasMeta?: boolean;            // false for Google-only clients — hides the Meta/Google switch
+  googleDataSource?: 'sheet' | 'api'; // Google view source: google_sheet_tab, or the Google Ads API cache (adds Joins/Bookings)
   metaUrl?: string;             // link target for "View Meta" switch (on /dashboard/google)
   googleUrl?: string;           // link target for "View Google Ads" switch (on /dashboard)
   useSheetForLeads?: boolean;   // when true, Meta dashboard KPI reads leads from sheet_tab
@@ -140,6 +142,9 @@ let _isInitialized = false;
 let _hasLoadedOnce = false;
 let _showAccount = false;
 let _platform: 'meta' | 'google' = 'meta';
+// Google view source — 'api' rows (/api/google-ads/daily) also carry Google's
+// join and book-a-tour conversions, shown as Joins / Bookings cards.
+let _googleDataSource: 'sheet' | 'api' = 'sheet';
 // When true (set from server config), the Meta dashboard's "Leads" KPI total
 // is sourced from the client's sheet_tab via /api/sheets/meta instead of
 // Meta's pixel actions. Per-row data stays Meta-attributed.
@@ -627,7 +632,10 @@ function _dpPresetRange(key: string): { since: string; until: string } | null {
 function _dpRY() { return _dpLM===11 ? _dpLY+1 : _dpLY; }
 function _dpRM() { return _dpLM===11 ? 0 : _dpLM+1; }
 
-function fmt(n: number) { return n.toLocaleString('en-US'); }
+// At most 2 decimals: Meta/sheet counts are whole numbers, Google Ads
+// conversions are fractional (data-driven attribution) and the Google Ads UI
+// shows them to 2 places.
+function fmt(n: number) { return n.toLocaleString('en-US', { maximumFractionDigits: 2 }); }
 function fmtUsd(n: number) { return '$' + n.toLocaleString('en-US', {minimumFractionDigits:2,maximumFractionDigits:2}); }
 function fmtPct(n: number) { return n.toFixed(2) + '%'; }
 function shortName(name: string, max = 22) { return name.length > max ? name.slice(0, max-1) + '…' : name; }
@@ -916,8 +924,9 @@ function getSelectedTotals(data: any[]) {
   const src = _selectedRows.size>0 ? data.filter(c=>_selectedRows.has(c.id||c.name)) : data;
   return src.reduce((a,c)=>({
     reach:a.reach+c.reach, impressions:a.impressions+c.impressions,
-    results:a.results+c.results, spent:a.spent+c.spent, linkClicks:a.linkClicks+c.linkClicks
-  }),{reach:0,impressions:0,results:0,spent:0,linkClicks:0});
+    results:a.results+c.results, spent:a.spent+c.spent, linkClicks:a.linkClicks+c.linkClicks,
+    joins:a.joins+(c.joins||0), bookings:a.bookings+(c.bookings||0)
+  }),{reach:0,impressions:0,results:0,spent:0,linkClicks:0,joins:0,bookings:0});
 }
 
 // ── renderCards ───────────────────────────────────────────────────────────────
@@ -1121,6 +1130,14 @@ function renderCards(t: any, selCount=0) {
     cards.push({label:'Bookings', value:fmt(bookingsSum), icon:'calendar-check', color:'teal', delta:''});
     cards.push({label:'Joins', value:fmt(joinsSum), icon:'user-plus', color:'sky', delta:''});
   }
+  // Google Ads API source: Google's own join and book-a-tour conversions.
+  // Fractional (data-driven attribution), same as the Leads card's value.
+  if (_platform === 'google' && _googleDataSource === 'api') {
+    const joins = Math.round((t.joins || 0) * 100) / 100;
+    const bookings = Math.round((t.bookings || 0) * 100) / 100;
+    cards.push({label:'Joins',    value:fmt(joins),    icon:'user-plus',      color:'sky',  delta:makeDelta(joins,_comparisonTotals?.joins)});
+    cards.push({label:'Bookings', value:fmt(bookings), icon:'calendar-check', color:'teal', delta:makeDelta(bookings,_comparisonTotals?.bookings)});
+  }
   const colors: Record<string,string> = {blue:'from-blue-500/20 to-blue-500/5 border-blue-500/20',indigo:'from-indigo-500/20 to-indigo-500/5 border-indigo-500/20',emerald:'from-emerald-500/20 to-emerald-500/5 border-emerald-500/20',amber:'from-amber-500/20 to-amber-500/5 border-amber-500/20',rose:'from-rose-500/20 to-rose-500/5 border-rose-500/20',violet:'from-violet-500/20 to-violet-500/5 border-violet-500/20',teal:'from-teal-500/20 to-teal-500/5 border-teal-500/20',sky:'from-sky-500/20 to-sky-500/5 border-sky-500/20'};
   const iconColors: Record<string,string> = {blue:'text-blue-400',indigo:'text-indigo-400',emerald:'text-emerald-400',amber:'text-amber-400',rose:'text-rose-400',violet:'text-violet-400',teal:'text-teal-400',sky:'text-sky-400'};
   const selBadge = selCount>0 ? `<span class="text-[10px] text-blue-400 font-normal normal-case">${selCount} selected</span>` : '';
@@ -1211,7 +1228,9 @@ function renderTable() {
   if (data.length===0) {
     tbody.innerHTML=''; tfoot.innerHTML=''; noRes.classList.remove('hidden');
     document.getElementById('table-leads-mismatch')?.classList.add('hidden');
-    renderCards({reach:0,impressions:0,spent:0,linkClicks:0,results:0}); return;
+    renderCards({reach:0,impressions:0,spent:0,linkClicks:0,results:0});
+    if (_platform === 'google' && _googleDataSource === 'api') renderGoogleBreakdowns();
+    return;
   }
   noRes.classList.add('hidden');
 
@@ -1325,6 +1344,8 @@ function renderTable() {
   </tr>`;
 
   renderCards(getSelectedTotals(data), _selectedRows.size);
+  // Google Ads breakdown panel follows the same campaign search / filters.
+  if (_platform === 'google' && _googleDataSource === 'api') renderGoogleBreakdowns();
   if (_currentView==='analytics') renderAnalytics();
   // Account / delivery / search / row-selection changes all route through
   // renderTable() with no refetch, so the Insights tab (which analyses the
@@ -4506,12 +4527,178 @@ async function fetchMetaCampaigns() {
   }
 }
 
-// Google Ads data source — entire dashboard reads from a single sheet tab.
+// ── Google Ads breakdowns (Keyword / Promo / Headline / Description) ─────────
+// Google Ads API source only (/api/google-ads/breakdowns), for the selected
+// date range. Rows arrive per campaign so the panel follows the same campaign
+// search / delivery filter as the table (re-rendered from renderTable()),
+// then are summed per keyword / promo / asset. Same Leads / Bookings / Joins
+// conversions as the KPI cards.
+type GoogleBreakdownRow = { name: string; campaignType: string; campaign: string; spend: number; impressions: number; clicks: number; leads: number; joins: number; bookings: number; displayGap?: boolean };
+type GoogleBreakdownTab = 'keywords' | 'promos' | 'headlines' | 'descriptions';
+let _gbData: Record<GoogleBreakdownTab, GoogleBreakdownRow[]> | null = null;
+let _gbTab: GoogleBreakdownTab = 'keywords';
+let _gbSort: { col: string; dir: 1 | -1 } = { col: 'leads', dir: -1 };
+let _gbShowAll = false;
+let _gbRequest = 0;
+const GB_TOP_N = 25;
+
+async function loadGoogleBreakdowns(since: string, until: string) {
+  const el = document.getElementById('google-breakdowns-content');
+  if (!el) return;
+  const req = ++_gbRequest;
+  el.innerHTML = '<div class="text-xs text-slate-500 py-6 text-center">Loading breakdowns…</div>';
+  try {
+    const res = await fetch(`/api/google-ads/breakdowns?since=${encodeURIComponent(since)}&until=${encodeURIComponent(until)}`);
+    const json = await res.json();
+    if (req !== _gbRequest) return; // a newer date range was requested meanwhile
+    if (json.error) throw new Error(json.error);
+    _gbData = { keywords: json.keywords || [], promos: json.promos || [], headlines: json.headlines || [], descriptions: json.descriptions || [] };
+    renderGoogleBreakdowns();
+  } catch (err) {
+    if (req !== _gbRequest) return;
+    el.innerHTML = `<div class="text-xs text-red-400 py-6 text-center">Could not load breakdowns: ${esc(err instanceof Error ? err.message : String(err))}</div>`;
+  }
+}
+
+function gbDerived(r: GoogleBreakdownRow) {
+  return {
+    ...r,
+    cpm: r.impressions > 0 ? (r.spend / r.impressions) * 1000 : 0,
+    cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
+    ctr: r.impressions > 0 ? (r.clicks / r.impressions) * 100 : 0,
+    cpl: r.leads > 0 ? r.spend / r.leads : 0,
+    cpb: r.bookings > 0 ? r.spend / r.bookings : 0,
+    cpj: r.joins > 0 ? r.spend / r.joins : 0,
+  };
+}
+
+// Rows of one tab for the campaigns currently shown in the table, summed per
+// item (keyword text + campaign type, promo, or asset text + campaign type).
+// The Display Network leftover rows collapse into a single row.
+function gbAggregate(tab: GoogleBreakdownTab): { items: GoogleBreakdownRow[]; gap: GoogleBreakdownRow | null } {
+  if (!_gbData) return { items: [], gap: null };
+  const visible = new Set(getFiltered().map((c: any) => c.name));
+  const byKey = new Map<string, GoogleBreakdownRow>();
+  for (const r of _gbData[tab]) {
+    if (!visible.has(r.campaign)) continue;
+    const key = r.displayGap ? '__gap__' : tab === 'promos' ? r.name : `${r.name.toLowerCase()}|${r.campaignType}`;
+    const o = byKey.get(key);
+    if (!o) { byKey.set(key, { ...r, campaignType: r.displayGap ? '' : r.campaignType, campaign: '' }); continue; }
+    o.spend += r.spend; o.impressions += r.impressions; o.clicks += r.clicks; o.leads += r.leads; o.joins += r.joins; o.bookings += r.bookings;
+  }
+  const gap = byKey.get('__gap__') ?? null;
+  byKey.delete('__gap__');
+  return { items: Array.from(byKey.values()), gap };
+}
+
+function renderGoogleBreakdowns() {
+  const el = document.getElementById('google-breakdowns-content');
+  if (!el || !_gbData) return;
+  const fmtConv = (n: number) => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const costPer = (n: number) => n > 0 ? fmtUsd(n) : '<span class="text-slate-600">—</span>';
+  const isPromo = _gbTab === 'promos';
+  const isAsset = _gbTab === 'headlines' || _gbTab === 'descriptions';
+  const nameLabel = { keywords: 'Keyword', promos: 'Promo', headlines: 'Headline', descriptions: 'Description' }[_gbTab];
+  const cols: { key: string; label: string; num?: boolean }[] = [
+    { key: 'name', label: nameLabel },
+    ...(isPromo ? [] : [{ key: 'campaignType', label: 'Campaign Type' }]),
+    { key: 'spend', label: 'Spend', num: true },
+    { key: 'impressions', label: 'Impr.', num: true },
+    { key: 'cpm', label: 'CPM', num: true },
+    { key: 'cpc', label: 'CPC', num: true },
+    { key: 'ctr', label: 'CTR', num: true },
+    { key: 'leads', label: 'Leads', num: true },
+    { key: 'cpl', label: 'CPL', num: true },
+    { key: 'bookings', label: 'Bookings', num: true },
+    { key: 'cpb', label: 'CPB', num: true },
+    { key: 'joins', label: 'Joins', num: true },
+    { key: 'cpj', label: 'CPJ', num: true },
+    ...(isPromo ? [{ key: 'share', label: '% of Spend', num: true }] : []),
+  ];
+  const { items, gap } = gbAggregate(_gbTab);
+  const all = gap ? [...items, gap] : items;
+  const totalSpend = all.reduce((s, r) => s + r.spend, 0);
+  const share = (r: GoogleBreakdownRow) => ({ ...gbDerived(r), share: totalSpend > 0 ? (r.spend / totalSpend) * 100 : 0 });
+  const rows = items.map(share);
+  const { col, dir } = _gbSort;
+  rows.sort((a: any, b: any) => {
+    const av = a[col], bv = b[col];
+    if (typeof av === 'string') return dir * av.localeCompare(bv);
+    // cost-per columns: rows with no conversions (0) always sort last
+    if (['cpl', 'cpb', 'cpj', 'cpc', 'cpm'].includes(col)) {
+      if (!av && !bv) return 0; if (!av) return 1; if (!bv) return -1;
+    }
+    return dir * (av - bv);
+  });
+  const shown = _gbShowAll ? rows : rows.slice(0, GB_TOP_N);
+  const cell = (r: any, key: string) => {
+    switch (key) {
+      case 'name': return `<td class="px-3 py-2 text-xs max-w-[320px] ${r.displayGap ? 'text-slate-400 italic' : 'text-slate-200'}">${esc(r.name)}${r.displayGap ? ' <span class="not-italic text-slate-500" title="These Search campaigns can also show ads on Google\'s Display Network (websites and apps). Google doesn\'t attribute that spend to any keyword, so it is listed here to make the keyword total match the campaign total.">ⓘ</span>' : ''}</td>`;
+      case 'campaignType': return `<td class="px-3 py-2 text-slate-400 text-xs whitespace-nowrap">${esc(r.campaignType)}</td>`;
+      case 'spend': return `<td class="px-3 py-2 text-right font-mono text-xs text-emerald-300">${fmtUsd(r.spend)}</td>`;
+      case 'impressions': return `<td class="px-3 py-2 text-right font-mono text-xs">${fmt(r.impressions)}</td>`;
+      case 'cpm': return `<td class="px-3 py-2 text-right font-mono text-xs">${costPer(r.cpm)}</td>`;
+      case 'cpc': return `<td class="px-3 py-2 text-right font-mono text-xs">${costPer(r.cpc)}</td>`;
+      case 'ctr': return `<td class="px-3 py-2 text-right font-mono text-xs">${fmtPct(r.ctr)}</td>`;
+      case 'leads': return `<td class="px-3 py-2 text-right font-mono text-xs text-amber-300">${fmtConv(r.leads)}</td>`;
+      case 'cpl': return `<td class="px-3 py-2 text-right font-mono text-xs">${costPer(r.cpl)}</td>`;
+      case 'bookings': return `<td class="px-3 py-2 text-right font-mono text-xs text-teal-300">${fmtConv(r.bookings)}</td>`;
+      case 'cpb': return `<td class="px-3 py-2 text-right font-mono text-xs">${costPer(r.cpb)}</td>`;
+      case 'joins': return `<td class="px-3 py-2 text-right font-mono text-xs text-sky-300">${fmtConv(r.joins)}</td>`;
+      case 'cpj': return `<td class="px-3 py-2 text-right font-mono text-xs">${costPer(r.cpj)}</td>`;
+      case 'share': return `<td class="px-3 py-2 text-right font-mono text-xs">${fmtPct(r.share)}</td>`;
+    }
+    return '<td></td>';
+  };
+  // The Display Network row stays pinned under the keywords, whatever the sort.
+  const gapRow = gap ? `<tr class="border-b border-slate-800/60 bg-slate-800/20">${cols.map(c => cell(share(gap), c.key)).join('')}</tr>` : '';
+  // Keywords (+ the Display Network row) and promos partition the spend, so
+  // their totals equal the campaign totals. A headline/description is credited
+  // with every conversion of the ads it served in, so asset rows overlap and
+  // their total is larger than the campaigns' (the note above says so).
+  let totalRow = '';
+  if (all.length > 0) {
+    const t = gbDerived(all.reduce((a, r) => ({ ...a, spend: a.spend + r.spend, impressions: a.impressions + r.impressions, clicks: a.clicks + r.clicks, leads: a.leads + r.leads, joins: a.joins + r.joins, bookings: a.bookings + r.bookings }),
+      { name: 'Total', campaignType: '', campaign: '', spend: 0, impressions: 0, clicks: 0, leads: 0, joins: 0, bookings: 0 }));
+    totalRow = `<tr class="border-t border-slate-700 bg-slate-800/40 font-semibold">${cols.map(c => c.key === 'name'
+      ? `<td class="px-3 py-2 text-xs text-blue-300 uppercase tracking-wider">Total (${items.length})</td>`
+      : c.key === 'campaignType' ? '<td></td>' : cell({ ...t, share: 100 }, c.key)).join('')}</tr>`;
+  }
+  const arrow = (k: string) => _gbSort.col === k ? (_gbSort.dir === 1 ? ' ↑' : ' ↓') : '';
+  const tabs = (['keywords', 'promos', 'headlines', 'descriptions'] as GoogleBreakdownTab[]).map(t =>
+    `<button class="text-xs px-3 py-1 rounded transition-colors ${t === _gbTab ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}" onclick="window._gbSetTab('${t}')">${{ keywords: 'Keywords', promos: 'Promos', headlines: 'Headlines', descriptions: 'Descriptions' }[t]} <span class="opacity-60">${gbAggregate(t).items.length}</span></button>`).join('');
+  const note = isAsset
+    ? '<p class="text-[11px] text-slate-500 mb-2">Asset performance is measured relatively, not as absolute conversion totals — Google credits each headline/description with every conversion of the ads it appeared in. Rows overlap, so the Total here is larger than the campaign totals.</p>'
+    : isPromo ? '<p class="text-[11px] text-slate-500 mb-2">Promo is read from the offer code in the campaign name (JF1, 2MF, 7DP, 1DP, ROTY, PreSale), or from the offer page the campaign&apos;s ads link to when the name has no code.</p>'
+    : gap ? '<p class="text-[11px] text-slate-500 mb-2">Why is there a &ldquo;Display Network&rdquo; row? Some of these Search campaigns can also show ads on Google&apos;s Display Network (websites and apps). Those clicks don&apos;t come from a searched keyword, so Google doesn&apos;t attribute their cost to any keyword. The row lists that spend so the keyword total matches the campaign total.</p>' : '';
+  el.innerHTML = `
+    <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
+      <div class="flex items-center bg-slate-800/60 rounded-lg p-0.5 border border-slate-700">${tabs}</div>
+      ${rows.length > GB_TOP_N ? `<button class="text-xs text-blue-400 hover:text-blue-300" onclick="window._gbToggleAll()">${_gbShowAll ? `Show top ${GB_TOP_N}` : `Show all ${rows.length}`}</button>` : ''}
+    </div>
+    ${note}
+    ${all.length === 0 ? '<div class="text-xs text-slate-500 py-6 text-center">No data for this date range and campaign search.</div>' : `
+    <div class="overflow-x-auto scrollbar-thin">
+      <table class="w-full text-left">
+        <thead><tr class="border-b border-slate-800">${cols.map(c => `<th class="px-3 py-2 text-[10px] font-semibold uppercase tracking-wider text-slate-500 cursor-pointer hover:text-slate-300 whitespace-nowrap ${c.num ? 'text-right' : ''}" onclick="window._gbSetSort('${c.key}')">${c.label}${arrow(c.key)}</th>`).join('')}</tr></thead>
+        <tbody>${shown.map(r => `<tr class="border-b border-slate-800/60 hover:bg-slate-800/30">${cols.map(c => cell(r, c.key)).join('')}</tr>`).join('')}${gapRow}${totalRow}</tbody>
+      </table>
+    </div>`}`;
+}
+
+// Google Ads data source — the entire dashboard reads one row set: either the
+// client's Google Ads sheet tab, or (googleDataSource='api') the Google Ads API
+// cache, whose rows also carry joins/bookings and the campaign's real status.
+const GOOGLE_STATUS: Record<string, string> = { ENABLED: 'ACTIVE', PAUSED: 'PAUSED', REMOVED: 'ARCHIVED' };
 async function loadGoogleSheetData(since: string, until: string) {
-  const res = await fetch('/api/sheets/google');
+  const res = await fetch(_googleDataSource === 'api' ? '/api/google-ads/daily' : '/api/sheets/google');
   const json = await res.json();
   if (json.error) throw new Error(json.error);
-  const allRows: { campaign: string; day: string; spend: number; leads: number; impressions: number; linkClicks: number }[] = json.rows || [];
+  const allRows: { campaign: string; day: string; spend: number; leads: number; impressions: number; linkClicks: number; joins?: number; bookings?: number; status?: string; campaignId?: string }[] = json.rows || [];
+  // Sum at full precision (API rows carry cost to the micro and fractional
+  // conversions) and only strip float noise; fmtUsd/fmt round for display.
+  // Rounding each addition to the cent drifts multi-day totals off Google's.
+  const add = (a: number, b: number) => Math.round((a + b) * 1e6) / 1e6;
 
   // 1. Build per-campaign aggregates for the table + KPI cards.
   const inRange = allRows.filter(r => r.day >= since && r.day <= until);
@@ -4521,13 +4708,15 @@ async function loadGoogleSheetData(since: string, until: string) {
       byCampaign[r.campaign] = {
         id: r.campaign, name: r.campaign, campaignId: r.campaign,
         campaignName: r.campaign, adsetName: '', adName: '',
-        adsetId: '', account: 'google', status: 'ACTIVE',
-        reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0,
+        adsetId: '', account: 'google', status: r.status ? (GOOGLE_STATUS[r.status] || r.status) : 'ACTIVE',
+        reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0, joins: 0, bookings: 0,
       };
     }
     const c = byCampaign[r.campaign];
-    c.spent = Math.round((c.spent + r.spend) * 100) / 100;
-    c.results += r.leads;
+    c.spent = add(c.spent, r.spend);
+    c.results = add(c.results, r.leads);
+    c.joins = add(c.joins, r.joins || 0);
+    c.bookings = add(c.bookings, r.bookings || 0);
     c.impressions += r.impressions;
     c.linkClicks += r.linkClicks;
   }
@@ -4540,8 +4729,8 @@ async function loadGoogleSheetData(since: string, until: string) {
   for (const r of inRange) {
     if (!byDay[r.day]) byDay[r.day] = { date: r.day, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
     const d = byDay[r.day];
-    d.spend = Math.round((d.spend + r.spend) * 100) / 100;
-    d.results += r.leads;
+    d.spend = add(d.spend, r.spend);
+    d.results = add(d.results, r.leads);
     d.impressions += r.impressions;
     d.linkClicks += r.linkClicks;
   }
@@ -4560,17 +4749,19 @@ async function loadGoogleSheetData(since: string, until: string) {
     if (cr) {
       _comparisonRange = cr;
       const compRows = allRows.filter(r => r.day >= cr.since && r.day <= cr.until);
-      const cTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0 };
+      const cTot = { reach: 0, impressions: 0, spent: 0, linkClicks: 0, results: 0, joins: 0, bookings: 0 };
       const cByDay: Record<string, any> = {};
       for (const r of compRows) {
         cTot.impressions += r.impressions;
-        cTot.spent = Math.round((cTot.spent + r.spend) * 100) / 100;
+        cTot.spent = add(cTot.spent, r.spend);
         cTot.linkClicks += r.linkClicks;
-        cTot.results += r.leads;
+        cTot.results = add(cTot.results, r.leads);
+        cTot.joins = add(cTot.joins, r.joins || 0);
+        cTot.bookings = add(cTot.bookings, r.bookings || 0);
         if (!cByDay[r.day]) cByDay[r.day] = { date: r.day, spend: 0, results: 0, impressions: 0, linkClicks: 0 };
         const d = cByDay[r.day];
-        d.spend = Math.round((d.spend + r.spend) * 100) / 100;
-        d.results += r.leads;
+        d.spend = add(d.spend, r.spend);
+        d.results = add(d.results, r.leads);
         d.impressions += r.impressions;
         d.linkClicks += r.linkClicks;
       }
@@ -4587,6 +4778,7 @@ async function loadGoogleSheetData(since: string, until: string) {
 
   renderTable();
   if (_currentView === 'analytics') renderAnalytics();
+  if (_googleDataSource === 'api') void loadGoogleBreakdowns(since, until);
   showNotification(`Loaded ${allMapped.length} campaign${allMapped.length!==1?'s':''}`, 'success');
   const statusEl = document.getElementById('data-status');
   if (statusEl) {
@@ -4785,6 +4977,9 @@ if (typeof window !== 'undefined') {
   // search term reflects in the cards above the table exactly like it
   // already does in the table itself (renderTable already respects search
   // via _matchesSearch/getFiltered; the cards previously did not).
+  (window as any)._gbSetTab = (t: GoogleBreakdownTab) => { _gbTab = t; _gbShowAll = false; renderGoogleBreakdowns(); };
+  (window as any)._gbSetSort = (col: string) => { _gbSort = _gbSort.col === col ? { col, dir: (_gbSort.dir === 1 ? -1 : 1) } : { col, dir: (col === 'name' || col === 'campaignType' || ['cpl', 'cpb', 'cpj', 'cpc', 'cpm'].includes(col)) ? 1 : -1 }; renderGoogleBreakdowns(); };
+  (window as any)._gbToggleAll = () => { _gbShowAll = !_gbShowAll; renderGoogleBreakdowns(); };
   (window as any)._refreshKpiCardsForSearch = () => { const data=getFiltered().map(calcMetrics); renderCards(getSelectedTotals(data),_selectedRows.size); _scheduleCreativesV3SearchRender(); };
   (window as any)._handleSelectAll = (checked: boolean) => { const data=getFiltered(); if (checked) data.forEach(c=>_selectedRows.add(c.id||c.name)); else _selectedRows.clear(); renderTable(); };
   (window as any)._clearDrilldown = () => { _drilldownParentIds.clear(); _drilldownParentLevel=null; _selectedRows.clear(); renderTable(); };
@@ -5355,9 +5550,10 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, showGmnReport = false, hideCreativeTagging = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, hasMeta = true, googleDataSource = 'sheet', metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, showGmnReport = false, hideCreativeTagging = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
+  _googleDataSource = googleDataSource;
   _useSheetForLeads = useSheetForLeads;
   _leadsSource = leadsSource;
   _showBookings = showBookings;
@@ -5445,17 +5641,17 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
           <div className="max-w-[1600px] mx-auto px-4 sm:px-6 py-3 flex items-center justify-between gap-4 flex-wrap">
             <div className="flex items-center gap-3">
               <img src="/gmnlogo.png" alt="Logo" className="w-9 h-9 rounded-lg object-contain" />
-              <h1 className="text-lg font-bold text-white tracking-tight">Meta Ads Dashboard</h1>
+              <h1 className="text-lg font-bold text-white tracking-tight">{platform === 'google' ? 'Google Ads Dashboard' : 'Meta Ads Dashboard'}</h1>
               <span className="text-[10px] font-mono bg-amber-500/20 text-amber-400 px-2 py-0.5 rounded-full uppercase tracking-wider">{clientName}</span>
             </div>
             <div className="flex items-center gap-3">
               <div className="flex items-center gap-2 text-xs text-slate-400">
                 <i data-lucide="info" className="w-3.5 h-3.5"></i>
-                <span id="data-status">Connecting to Meta API...</span>
+                <span id="data-status">{platform === 'google' ? 'Loading Google Ads…' : 'Connecting to Meta API...'}</span>
               </div>
               <div className="flex items-center gap-2">
                 {/* Platform switch — shown when this client has both Meta and Google Ads. */}
-                {hasGoogleAds && (
+                {hasGoogleAds && hasMeta && (
                   <div className="flex items-center bg-slate-800/60 rounded-lg p-0.5 border border-slate-700">
                     <a
                       href={metaUrl || '/dashboard'}
@@ -5670,7 +5866,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
 
         {/* Summary Cards */}
         <div className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-3">
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 xl:grid-cols-7 gap-3" id="cards-grid"></div>
+          {/* Google Ads API view always has 8 cards (adds Joins + Bookings) — one row at xl. */}
+          <div className={`grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 ${platform === 'google' && googleDataSource === 'api' ? 'xl:grid-cols-8' : 'xl:grid-cols-7'} gap-3`} id="cards-grid"></div>
         </div>
 
         {/* Table */}
@@ -6226,10 +6423,22 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               <div id="insights-content"></div>
             </div>
           </div>
+
+          {/* Google Ads API breakdowns — Keyword / Promo / Headline / Description */}
+          {platform === 'google' && googleDataSource === 'api' && (
+            <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-5 mt-6">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-2 mb-3">
+                <i data-lucide="layers" className="w-3.5 h-3.5 text-blue-400"></i> Google Ads Breakdowns
+              </h3>
+              <div id="google-breakdowns-content"></div>
+            </div>
+          )}
         </div>
 
         <footer className="max-w-[1600px] mx-auto w-full px-4 sm:px-6 py-4 text-center text-[11px] text-slate-600 border-t border-slate-800/50">
-          Live data from Meta Marketing API. All times in account timezone.
+          {platform === 'google' && googleDataSource === 'api'
+            ? 'Data from the Google Ads API, synced daily. All times in account timezone.'
+            : 'Live data from Meta Marketing API. All times in account timezone.'}
           <span className="ml-2 font-mono opacity-60" title="Deployed build">{_versionLabel()}</span>
         </footer>
       </div>

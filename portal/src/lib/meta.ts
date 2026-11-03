@@ -68,8 +68,8 @@ export async function getClientConnection(): Promise<ClientConnection> {
 
   // Optional per-client scope: clients.ad_account_ids restricts which accounts
   // this client can see. If empty/null, the client sees every agency account.
-  const [client] = await query<{ campaign_filter: string; ad_account_ids: string[] | null }>(
-    `SELECT c.campaign_filter, c.ad_account_ids
+  const [client] = await query<{ campaign_filter: string; ad_account_ids: string[] | null; google_data_source: string }>(
+    `SELECT c.campaign_filter, c.ad_account_ids, c.google_data_source
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -78,7 +78,9 @@ export async function getClientConnection(): Promise<ClientConnection> {
   );
 
   let scopedAccounts = allAccounts;
-  if (client?.ad_account_ids && client.ad_account_ids.length > 0) {
+  if (isGoogleOnlyClient(client)) {
+    scopedAccounts = [];
+  } else if (client?.ad_account_ids && client.ad_account_ids.length > 0) {
     const allowed = new Set(client.ad_account_ids);
     scopedAccounts = allAccounts.filter(a => allowed.has(a.id));
   }
@@ -103,6 +105,17 @@ export async function getClientConnection(): Promise<ClientConnection> {
   };
 }
 
+/**
+ * A client with no ad accounts whose Google dashboard reads from the Google
+ * Ads API is Google-only (e.g. a club group running only Google Ads). For
+ * everyone else an empty ad_account_ids still means "every agency account"
+ * (the Gym-Members-Now rollup relies on that), so this check is what keeps a
+ * Google-only login from seeing the whole agency's Meta data.
+ */
+export function isGoogleOnlyClient(client: { ad_account_ids: string[] | null; google_data_source?: string | null } | undefined): boolean {
+  return !!client && (client.ad_account_ids?.length ?? 0) === 0 && client.google_data_source === 'api';
+}
+
 export interface ClientDbScope {
   /** Every ad account ID this client is allowed to see (already resolved — never empty-means-all). */
   accountIds: string[];
@@ -123,8 +136,8 @@ export async function getClientDbScope(): Promise<ClientDbScope> {
   const session = await getServerSession(authOptions);
   if (!session) throw new Error('Unauthorized');
 
-  const [client] = await query<{ campaign_filter: string; ad_account_ids: string[] | null }>(
-    `SELECT c.campaign_filter, c.ad_account_ids
+  const [client] = await query<{ campaign_filter: string; ad_account_ids: string[] | null; google_data_source: string }>(
+    `SELECT c.campaign_filter, c.ad_account_ids, c.google_data_source
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -133,7 +146,7 @@ export async function getClientDbScope(): Promise<ClientDbScope> {
   );
 
   let accountIds = client?.ad_account_ids ?? [];
-  if (accountIds.length === 0) {
+  if (accountIds.length === 0 && !isGoogleOnlyClient(client)) {
     const rows = await query<{ account_ids: string[] }>(`SELECT account_ids FROM agency_bm_connections`);
     accountIds = Array.from(new Set(rows.flatMap(r => r.account_ids || [])));
   }
@@ -152,11 +165,11 @@ export async function getClientDbScope(): Promise<ClientDbScope> {
  * the client row directly instead of resolving it from session.user.id.
  */
 export async function getAdminClientMetaScope(
-  client: { ad_account_ids: string[] | null; campaign_filter: string },
+  client: { ad_account_ids: string[] | null; campaign_filter: string; google_data_source?: string | null },
   agencyAccountIds?: string[]
 ): Promise<ClientDbScope> {
   let accountIds = client.ad_account_ids ?? [];
-  if (accountIds.length === 0) {
+  if (accountIds.length === 0 && !isGoogleOnlyClient(client)) {
     if (agencyAccountIds) {
       accountIds = agencyAccountIds;
     } else {

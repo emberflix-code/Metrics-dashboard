@@ -3,6 +3,7 @@ import { authOptions } from '@/lib/auth';
 import { redirect } from 'next/navigation';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
+import { isGoogleOnlyClient } from '@/lib/meta';
 import DashboardClient from './DashboardClient';
 import ImpersonationBanner from '@/components/ImpersonationBanner';
 
@@ -19,6 +20,8 @@ interface ClientRow {
   sheet_id: string;
   sheet_tab: string;
   google_sheet_tab: string;
+  google_data_source: 'sheet' | 'api';
+  google_ads_customer_ids: string[];
   use_sheet_for_leads: boolean;
   leads_source: 'meta' | 'sheet' | 'ghl';
   show_bookings: boolean;
@@ -86,6 +89,7 @@ export default async function DashboardPage({
   const [client] = await query<ClientRow>(
     `SELECT c.name, c.campaign_filter, c.ad_account_ids, c.show_account,
             c.sheet_id, c.sheet_tab, c.google_sheet_tab, c.use_sheet_for_leads,
+            c.google_data_source, c.google_ads_customer_ids,
             c.leads_source, c.show_bookings, c.show_book_rate,
             (length(c.ghl_token_enc) > 0) AS has_ghl_token, c.data_source,
             c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value, c.show_meta_lead_names,
@@ -98,6 +102,15 @@ export default async function DashboardPage({
      LIMIT 1`,
     [session.user.id]
   );
+
+  // Google-only clients (no Meta accounts, Google dashboard on the API) have
+  // no Meta view — an empty ad_account_ids would otherwise mean "every
+  // agency account" below. Send them straight to their Google dashboard.
+  if (isGoogleOnlyClient(client)) {
+    redirect(`/dashboard/google${autoLoginToken ? `?_al=${encodeURIComponent(autoLoginToken)}` : ''}`);
+  }
+  const hasGoogleAds = !!client?.google_sheet_tab
+    || (client?.google_data_source === 'api' && (client?.google_ads_customer_ids?.length ?? 0) > 0);
 
   // Server-side resolver: collapse "wants source X but it's not configured"
   // into a usable source. Order: ghl → sheet → meta. The dashboard reads the
@@ -153,7 +166,7 @@ export default async function DashboardPage({
         campaignFilter={client?.campaign_filter ?? ''}
         showAccount={client?.show_account ?? false}
         platform="meta"
-        hasGoogleAds={!!client?.google_sheet_tab}
+        hasGoogleAds={hasGoogleAds}
         googleUrl="/dashboard/google"
         useSheetForLeads={resolvedLeadsSource === 'sheet'}
         leadsSource={resolvedLeadsSource}

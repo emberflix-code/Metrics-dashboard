@@ -28,6 +28,7 @@ interface ClientRow {
   email: string;
   ad_account_ids: string[] | null;
   campaign_filter: string;
+  google_data_source: string;
   data_source: 'live' | 'cached';
   leads_source: 'meta' | 'sheet' | 'ghl';
   has_ghl_token: boolean;
@@ -88,7 +89,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
   const groupBy: GroupByKey = (['prefix', 'marketing_type', 'offer'].includes(searchParams.group_by || '') ? searchParams.group_by : 'marketing_type') as GroupByKey;
 
   const clients = await query<ClientRow>(`
-    SELECT c.id, c.name, u.email, c.ad_account_ids, c.campaign_filter,
+    SELECT c.id, c.name, u.email, c.ad_account_ids, c.campaign_filter, c.google_data_source,
            c.data_source, c.leads_source,
            (length(c.ghl_token_enc) > 0) AS has_ghl_token,
            c.ghl_token_enc, c.ghl_location_id, c.ghl_leads_tag, c.active,
@@ -125,7 +126,7 @@ export default async function OverviewPage({ searchParams }: { searchParams: { p
 
   // Resolve each client's scope (accountIds + campaignFilter) up front.
   const scopes = await Promise.all(
-    clients.map(c => getAdminClientMetaScope({ ad_account_ids: c.ad_account_ids, campaign_filter: c.campaign_filter }, agencyAccountIds))
+    clients.map(c => getAdminClientMetaScope({ ad_account_ids: c.ad_account_ids, campaign_filter: c.campaign_filter, google_data_source: c.google_data_source }, agencyAccountIds))
   );
 
   // --- Spend + optional metrics: split by data_source, dedupe by unique account_id ---

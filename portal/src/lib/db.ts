@@ -619,6 +619,85 @@ pool.query(`CREATE TABLE IF NOT EXISTS marketer_campaign_client (
 )`).catch(() => {});
 pool.query(`CREATE INDEX IF NOT EXISTS idx_mcc_client ON marketer_campaign_client (client_id)`).catch(() => {});
 
+// ── Google Ads API (migration 037) ───────────────────────────────────────
+// Per-client Google dashboard source: 'sheet' (google_sheet_tab, the original
+// path) or 'api' (google_ads_daily, filled by the daily scheduler from the
+// accounts in google_ads_customer_ids, narrowed by google_campaign_filter —
+// same pipe-separated OR-substring rule as campaign_filter). See
+// src/lib/googleAds.ts. A client with google_data_source='api' and no
+// ad_account_ids is Google-only: it gets no Meta scope at all (see meta.ts).
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS google_data_source TEXT NOT NULL DEFAULT 'sheet'`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS google_ads_customer_ids TEXT[] NOT NULL DEFAULT '{}'`).catch(() => {});
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS google_campaign_filter TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`CREATE TABLE IF NOT EXISTS google_ads_campaigns (
+  customer_id    TEXT NOT NULL,
+  campaign_id    TEXT NOT NULL,
+  campaign_name  TEXT NOT NULL,
+  status         TEXT NOT NULL,
+  landing_offer  TEXT NOT NULL DEFAULT '',
+  updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (customer_id, campaign_id)
+)`).catch(() => {});
+// Offer slug of the campaign's landing page (Promo breakdown fallback).
+pool.query(`ALTER TABLE google_ads_campaigns ADD COLUMN IF NOT EXISTS landing_offer TEXT NOT NULL DEFAULT ''`).catch(() => {});
+pool.query(`CREATE TABLE IF NOT EXISTS google_ads_daily (
+  customer_id  TEXT NOT NULL,
+  campaign_id  TEXT NOT NULL,
+  date         DATE NOT NULL,
+  cost         NUMERIC(16,6) NOT NULL DEFAULT 0,
+  impressions  BIGINT NOT NULL DEFAULT 0,
+  clicks       BIGINT NOT NULL DEFAULT 0,
+  leads        NUMERIC(16,6) NOT NULL DEFAULT 0,
+  joins        NUMERIC(16,6) NOT NULL DEFAULT 0,
+  bookings     NUMERIC(16,6) NOT NULL DEFAULT 0,
+  synced_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (customer_id, campaign_id, date)
+)`).catch(() => {});
+// Keyword and responsive-search-ad headline/description breakdowns (same
+// sync, same window). Asset conversions are Google's per-asset figures: an
+// asset is credited with every conversion of the ads it served in, so asset
+// rows do not add up to campaign totals.
+pool.query(`CREATE TABLE IF NOT EXISTS google_ads_keyword_daily (
+  customer_id   TEXT NOT NULL,
+  campaign_id   TEXT NOT NULL,
+  ad_group_id   TEXT NOT NULL,
+  criterion_id  TEXT NOT NULL,
+  keyword_text  TEXT NOT NULL,
+  match_type    TEXT NOT NULL DEFAULT '',
+  date          DATE NOT NULL,
+  cost          NUMERIC(16,6) NOT NULL DEFAULT 0,
+  impressions   BIGINT NOT NULL DEFAULT 0,
+  clicks        BIGINT NOT NULL DEFAULT 0,
+  leads         NUMERIC(16,6) NOT NULL DEFAULT 0,
+  joins         NUMERIC(16,6) NOT NULL DEFAULT 0,
+  bookings      NUMERIC(16,6) NOT NULL DEFAULT 0,
+  PRIMARY KEY (customer_id, campaign_id, ad_group_id, criterion_id, date)
+)`).catch(() => {});
+pool.query(`CREATE TABLE IF NOT EXISTS google_ads_asset_daily (
+  customer_id  TEXT NOT NULL,
+  campaign_id  TEXT NOT NULL,
+  field_type   TEXT NOT NULL,
+  asset_id     TEXT NOT NULL,
+  asset_text   TEXT NOT NULL,
+  date         DATE NOT NULL,
+  cost         NUMERIC(16,6) NOT NULL DEFAULT 0,
+  impressions  BIGINT NOT NULL DEFAULT 0,
+  clicks       BIGINT NOT NULL DEFAULT 0,
+  leads        NUMERIC(16,6) NOT NULL DEFAULT 0,
+  joins        NUMERIC(16,6) NOT NULL DEFAULT 0,
+  bookings     NUMERIC(16,6) NOT NULL DEFAULT 0,
+  PRIMARY KEY (customer_id, campaign_id, field_type, asset_id, date)
+)`).catch(() => {});
+pool.query(`CREATE TABLE IF NOT EXISTS google_ads_sync_state (
+  customer_id          TEXT PRIMARY KEY,
+  status               TEXT NOT NULL DEFAULT 'idle',
+  last_success_until   DATE,
+  last_synced_at       TIMESTAMPTZ,
+  last_run_started_at  TIMESTAMPTZ,
+  time_zone            TEXT,
+  last_error           TEXT
+)`).catch(() => {});
+
 // Phase 1 — ad set targeting + geocoded club locations (migration 032).
 // `targeting` is Meta's raw ad set targeting spec (geo_locations,
 // custom_locations with lat/lng/radius, age/gender/interests...). Fetched

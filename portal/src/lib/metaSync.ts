@@ -1,6 +1,6 @@
 import { query } from './db';
 import { decrypt } from './crypto';
-import { resolveResultsFromActions } from './meta';
+import { resolveResultsFromActions, isGoogleOnlyClient } from './meta';
 import { computePhash } from './phash';
 import sharp from 'sharp';
 import { fetchMetaKpiSheetRows, type MetaKpiSheetRow } from './metaKpiSheet';
@@ -3692,12 +3692,12 @@ async function syncMetaKpiSheetCache(clientId: string): Promise<void> {
 }
 
 export async function syncClientAccounts(clientId: string): Promise<SyncAccountResult[]> {
-  const [client] = await query<{ ad_account_ids: string[] | null }>(
-    `SELECT ad_account_ids FROM clients WHERE id = $1`,
+  const [client] = await query<{ ad_account_ids: string[] | null; google_data_source: string }>(
+    `SELECT ad_account_ids, google_data_source FROM clients WHERE id = $1`,
     [clientId]
   );
   let accountIds = client?.ad_account_ids || [];
-  if (accountIds.length === 0) {
+  if (accountIds.length === 0 && !isGoogleOnlyClient(client)) {
     const rows = await query<{ account_ids: string[] }>(`SELECT account_ids FROM agency_bm_connections`);
     accountIds = Array.from(new Set(rows.flatMap(r => r.account_ids || [])));
   }

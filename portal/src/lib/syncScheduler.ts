@@ -18,6 +18,7 @@ import { query } from './db';
 import { syncAccount } from './metaSync';
 import { geocodePendingClients } from './geocode';
 import { syncBookingCalendars } from './bookingCalendars';
+import { getAllGoogleCustomerIds, syncGoogleAdsCustomer } from './googleAds';
 
 const RUN_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 const PAUSE_BETWEEN_ACCOUNTS_MS = 20_000; // same deliberate pacing as the manual backfill queue, to avoid Meta rate limits
@@ -149,6 +150,18 @@ async function runDailySync() {
       console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:account:threw', accountId, error: err instanceof Error ? err.message : String(err) }));
     }
     await new Promise(r => setTimeout(r, PAUSE_BETWEEN_ACCOUNTS_MS));
+  }
+
+  // Google Ads accounts for clients whose Google dashboard reads from the API
+  // (clients.google_data_source='api'). A few GAQL queries per account — no
+  // pacing needed, and a failure never touches the Meta results above.
+  try {
+    for (const customerId of await getAllGoogleCustomerIds()) {
+      const result = await syncGoogleAdsCustomer(customerId);
+      console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:google:done', result }));
+    }
+  } catch (err) {
+    console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:google:threw', error: err instanceof Error ? err.message : String(err) }));
   }
 
   // Recorded by ET CALENDAR DATE, not by whichever run started it — a

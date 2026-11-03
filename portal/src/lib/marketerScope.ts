@@ -50,7 +50,7 @@ export interface MarketerScope {
 }
 
 interface ClientDbRow {
-  id: string; name: string; active: boolean; is_rollup: boolean; ad_account_ids: string[] | null; campaign_filter: string;
+  id: string; name: string; active: boolean; is_rollup: boolean; ad_account_ids: string[] | null; campaign_filter: string; google_data_source: string;
   marketing_type: string; offer: string; coach_name: string; location_address: string;
   location_lat: number | null; location_lng: number | null; geocode_error: string | null; sort_order: number;
   has_ghl_token: boolean; ghl_location_id: string; ghl_leads_tag: string;
@@ -84,7 +84,7 @@ export async function loadMarketerScope(opts: { includeInactive?: boolean } = {}
               location_address, location_lat, location_lng, geocode_error, sort_order,
               (length(ghl_token_enc) > 0) AS has_ghl_token, ghl_location_id, ghl_leads_tag,
               booking_calendar_name, booking_platform, booking_calendar_link,
-              leads_source, sheet_id, sheet_tab
+              leads_source, sheet_id, sheet_tab, google_data_source
        FROM clients WHERE ($1::boolean OR active = true)
        ORDER BY active DESC, sort_order ASC, name ASC`,
       [!!opts.includeInactive]
@@ -93,7 +93,7 @@ export async function loadMarketerScope(opts: { includeInactive?: boolean } = {}
 
   const clients: MarketerClient[] = [];
   for (const r of rows) {
-    const scope = await getAdminClientMetaScope({ ad_account_ids: r.ad_account_ids, campaign_filter: r.campaign_filter }, agencyIds);
+    const scope = await getAdminClientMetaScope({ ad_account_ids: r.ad_account_ids, campaign_filter: r.campaign_filter, google_data_source: r.google_data_source }, agencyIds);
     clients.push({
       id: r.id,
       name: r.name,

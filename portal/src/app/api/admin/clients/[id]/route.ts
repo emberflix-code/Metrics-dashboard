@@ -11,6 +11,7 @@ import bcrypt from 'bcryptjs';
 const VALID_LEADS_SOURCES = new Set(['meta', 'sheet', 'ghl']);
 const VALID_DATA_SOURCES = new Set(['live', 'cached']);
 const VALID_RETAINER_MODES = new Set(['flat', 'monthly']);
+const VALID_GOOGLE_DATA_SOURCES = new Set(['sheet', 'api']);
 const MONTH_RE = /^\d{4}-\d{2}$/;
 
 export async function PATCH(req: NextRequest, { params }: { params: { id: string } }) {
@@ -28,7 +29,8 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
   // "owns" invalidates the persisted campaign -> client attribution
   // (see lib/marketerScope.ts). Recomputed after the writes below.
   const scopeChanged = body.campaign_filter !== undefined || body.ad_account_ids !== undefined
-    || body.active !== undefined || body.is_rollup !== undefined;
+    || body.active !== undefined || body.is_rollup !== undefined
+    || body.google_data_source !== undefined; // can make a client Google-only (no Meta scope)
 
   if (body.is_rollup !== undefined) {
     await query('UPDATE clients SET is_rollup = $1 WHERE id = $2', [!!body.is_rollup, params.id]);
@@ -140,6 +142,26 @@ export async function PATCH(req: NextRequest, { params }: { params: { id: string
 
   if (body.google_sheet_tab !== undefined) {
     await query('UPDATE clients SET google_sheet_tab = $1 WHERE id = $2', [String(body.google_sheet_tab).trim(), params.id]);
+  }
+
+  // Google Ads API source (see lib/googleAds.ts).
+  if (body.google_data_source !== undefined) {
+    if (!VALID_GOOGLE_DATA_SOURCES.has(body.google_data_source)) {
+      return NextResponse.json({ error: 'google_data_source must be sheet or api' }, { status: 400 });
+    }
+    await query('UPDATE clients SET google_data_source = $1 WHERE id = $2', [body.google_data_source, params.id]);
+  }
+
+  if (body.google_ads_customer_ids !== undefined) {
+    if (!Array.isArray(body.google_ads_customer_ids)) {
+      return NextResponse.json({ error: 'google_ads_customer_ids must be an array' }, { status: 400 });
+    }
+    const ids = Array.from(new Set(body.google_ads_customer_ids.map((id: unknown) => String(id).replace(/\D/g, '')).filter(Boolean)));
+    await query('UPDATE clients SET google_ads_customer_ids = $1 WHERE id = $2', [ids, params.id]);
+  }
+
+  if (body.google_campaign_filter !== undefined) {
+    await query('UPDATE clients SET google_campaign_filter = $1 WHERE id = $2', [String(body.google_campaign_filter).trim(), params.id]);
   }
 
   if (body.use_sheet_for_leads !== undefined) {
