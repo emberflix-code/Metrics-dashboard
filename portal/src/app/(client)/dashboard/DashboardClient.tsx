@@ -4652,12 +4652,13 @@ function renderGoogleBreakdowns() {
   };
   // The Display Network row stays pinned under the keywords, whatever the sort.
   const gapRow = gap ? `<tr class="border-b border-slate-800/60 bg-slate-800/20">${cols.map(c => cell(share(gap), c.key)).join('')}</tr>` : '';
-  // Keywords (+ the Display Network row) and promos partition the spend, so
-  // their totals equal the campaign totals. A headline/description is credited
-  // with every conversion of the ads it served in, so asset rows overlap and
-  // their total is larger than the campaigns' (the note above says so).
+  // Totals only where rows add up: keywords (+ the Display Network row) and
+  // promos partition the spend, so their totals equal the campaign totals. An
+  // ad shows 2 descriptions and up to 3 headlines at once and Google credits
+  // each of them with the whole click/cost/conversion, so asset rows overlap
+  // (~2x the campaign totals) — no Total row there; the note explains why.
   let totalRow = '';
-  if (all.length > 0) {
+  if (!isAsset && all.length > 0) {
     const t = gbDerived(all.reduce((a, r) => ({ ...a, spend: a.spend + r.spend, impressions: a.impressions + r.impressions, clicks: a.clicks + r.clicks, leads: a.leads + r.leads, joins: a.joins + r.joins, bookings: a.bookings + r.bookings }),
       { name: 'Total', campaignType: '', campaign: '', spend: 0, impressions: 0, clicks: 0, leads: 0, joins: 0, bookings: 0 }));
     totalRow = `<tr class="border-t border-slate-700 bg-slate-800/40 font-semibold">${cols.map(c => c.key === 'name'
@@ -4668,7 +4669,7 @@ function renderGoogleBreakdowns() {
   const tabs = (['keywords', 'promos', 'headlines', 'descriptions'] as GoogleBreakdownTab[]).map(t =>
     `<button class="text-xs px-3 py-1 rounded transition-colors ${t === _gbTab ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}" onclick="window._gbSetTab('${t}')">${{ keywords: 'Keywords', promos: 'Promos', headlines: 'Headlines', descriptions: 'Descriptions' }[t]} <span class="opacity-60">${gbAggregate(t).items.length}</span></button>`).join('');
   const note = isAsset
-    ? '<p class="text-[11px] text-slate-500 mb-2">Asset performance is measured relatively, not as absolute conversion totals — Google credits each headline/description with every conversion of the ads it appeared in. Rows overlap, so the Total here is larger than the campaign totals.</p>'
+    ? '<p class="text-[11px] text-slate-500 mb-2">Asset performance is measured relatively, not as absolute conversion totals. Each ad shows 2 descriptions and up to 3 headlines at the same time, and Google credits every one of them with that ad&apos;s full spend, clicks and conversions. <span class="text-slate-400">Adding these rows together will not match the campaign totals (it comes to roughly 2&ndash;3&times; higher), so there is no total here</span> &mdash; compare rows by CPL, CPB and CPJ instead. Campaign totals are in the table above and on the Keywords and Promos tabs.</p>'
     : isPromo ? '<p class="text-[11px] text-slate-500 mb-2">Promo is read from the offer code in the campaign name (JF1, 2MF, 7DP, 1DP, ROTY, PreSale), or from the offer page the campaign&apos;s ads link to when the name has no code.</p>'
     : gap ? '<p class="text-[11px] text-slate-500 mb-2">Why is there a &ldquo;Display Network&rdquo; row? Some of these Search campaigns can also show ads on Google&apos;s Display Network (websites and apps). Those clicks don&apos;t come from a searched keyword, so Google doesn&apos;t attribute their cost to any keyword. The row lists that spend so the keyword total matches the campaign total.</p>' : '';
   el.innerHTML = `
