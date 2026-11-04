@@ -575,9 +575,42 @@ pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS hide_creative_tagging B
 (async () => {
   try {
     await pool.query(`ALTER TABLE users DROP CONSTRAINT IF EXISTS users_role_check`);
-    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'client', 'marketer'))`);
+    await pool.query(`ALTER TABLE users ADD CONSTRAINT users_role_check CHECK (role IN ('admin', 'client', 'marketer', 'coach'))`);
   } catch { /* surfaced by the login path if it ever fails */ }
 })();
+
+// ── Coach dashboard (migration 038) ──────────────────────────────────────
+// `coach` logins see only the clients whose clients.coach_name lists them
+// (comma-separated free text, matched case-insensitively on users.coach_name).
+// See src/lib/coachAuth.ts and src/lib/coach/scope.ts.
+pool.query(`ALTER TABLE users ADD COLUMN IF NOT EXISTS coach_name TEXT NOT NULL DEFAULT ''`).catch(() => {});
+// Per-user UI preferences (the coach board's visible columns, grouping,
+// date range, collapsed groups). One JSONB value per (user, key).
+pool.query(`CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id     UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  pref_key    TEXT NOT NULL,
+  value       JSONB NOT NULL DEFAULT '{}',
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (user_id, pref_key)
+)`).catch(() => {});
+// Who opened which client dashboard "as the client", from where. No FK on
+// actor_id so the history survives a deleted coach login.
+pool.query(`CREATE TABLE IF NOT EXISTS impersonation_audit (
+  id           BIGSERIAL PRIMARY KEY,
+  actor_id     UUID NOT NULL,
+  actor_email  TEXT NOT NULL,
+  actor_role   TEXT NOT NULL,
+  client_id    UUID NOT NULL,
+  client_name  TEXT NOT NULL DEFAULT '',
+  source       TEXT NOT NULL,
+  ip           TEXT,
+  user_agent   TEXT,
+  started_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  ended_at     TIMESTAMPTZ
+)`).then(() => Promise.all([
+  pool.query(`CREATE INDEX IF NOT EXISTS impersonation_audit_actor_idx ON impersonation_audit (actor_id, started_at DESC)`),
+  pool.query(`CREATE INDEX IF NOT EXISTS impersonation_audit_client_idx ON impersonation_audit (client_id, started_at DESC)`),
+])).catch(() => {});
 
 // Rollup clients (Alloy Ops, AF Regional Omega, Omega - *, Anytime Fitness
 // Corporate) share ad accounts with the per-location clients and have no

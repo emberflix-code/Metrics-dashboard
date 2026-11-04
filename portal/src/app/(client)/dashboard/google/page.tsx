@@ -67,7 +67,7 @@ export default async function DashboardGooglePage({
   return (
     <>
       {impersonatedBy && (
-        <ImpersonationBanner adminEmail={impersonatedBy.email} clientName={clientName} />
+        <ImpersonationBanner adminEmail={impersonatedBy.email} clientName={clientName} actorRole={impersonatedBy.role} returnTo={impersonatedBy.returnTo} />
       )}
       <DashboardClient
         accountIds={[]}
@@ -79,7 +79,7 @@ export default async function DashboardGooglePage({
         hasGoogleAds={true}
         hasMeta={!isGoogleOnlyClient(client)}
         metaUrl="/dashboard"
-        isAdminView={!!impersonatedBy}
+        isAdminView={!!impersonatedBy && impersonatedBy.role !== 'coach'}
         autoLoginToken={autoLoginToken}
       />
     </>

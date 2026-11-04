@@ -2,10 +2,15 @@
 
 import { useState } from 'react';
 
-// Shown at the top of the client dashboard when an admin is viewing as
-// this client. Clicking Return posts to /api/admin/impersonate/stop which
-// swaps the session cookie back and redirects to that client's config page.
-export default function ImpersonationBanner({ adminEmail, clientName }: { adminEmail: string; clientName: string }) {
+// Shown at the top of the client dashboard when an admin or a coach is
+// viewing as this client. Clicking Back posts to /api/admin/impersonate/stop
+// which swaps the session cookie back and redirects — admins to the client's
+// config page (or the coach board, if they came from there), coaches to the
+// coach board.
+export default function ImpersonationBanner({ adminEmail, clientName, actorRole = 'admin', returnTo }: {
+  adminEmail: string; clientName: string; actorRole?: 'admin' | 'coach'; returnTo?: string;
+}) {
+  const backLabel = actorRole === 'coach' || returnTo === '/coach' ? 'Back to coach board' : 'Back to client config';
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -20,7 +25,7 @@ export default function ImpersonationBanner({ adminEmail, clientName }: { adminE
         setLoading(false);
         return;
       }
-      window.location.href = json.redirect || '/admin';
+      window.location.href = json.redirect || (actorRole === 'coach' ? '/coach' : '/admin');
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to return');
       setLoading(false);
@@ -42,7 +47,7 @@ export default function ImpersonationBanner({ adminEmail, clientName }: { adminE
             disabled={loading}
             className="px-3 py-1 text-xs font-medium bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/40 rounded-md disabled:opacity-50"
           >
-            {loading ? 'Returning…' : 'Back to client config'}
+            {loading ? 'Returning…' : backLabel}
           </button>
         </div>
       </div>

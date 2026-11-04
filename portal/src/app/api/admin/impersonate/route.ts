@@ -1,20 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getServerSession } from 'next-auth';
-import { encode } from 'next-auth/jwt';
 import { authOptions } from '@/lib/auth';
-import { query } from '@/lib/db';
-
-interface ClientUserRow {
-  user_id: string;
-  email: string;
-  client_id: string;
-}
+import { clientLogin, setImpersonationCookie, startImpersonationAudit } from '@/lib/impersonation';
 
 // Start impersonation: admin picks a client, we mint a fresh session token as
 // that client's user, but stash the admin's id/email inside so the return-to-
-// admin flow can restore the original session. Cookie config mirrors authOptions
-// so the token round-trips correctly (HTTPS Secure/SameSite=None in prod,
-// plain SameSite=Lax in dev).
+// admin flow can restore the original session (see lib/impersonation.ts).
 export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   if (!session || session.user.role !== 'admin') {
@@ -29,43 +20,21 @@ export async function POST(req: NextRequest) {
   const body = await req.json().catch(() => ({}));
   const clientId = String(body.clientId || '').trim();
   if (!clientId) return NextResponse.json({ error: 'Missing clientId' }, { status: 400 });
+  // Started from the coach board → "Back" returns there; otherwise to the client config page.
+  const returnTo = body.from === 'coach_board' ? '/coach' : `/admin/clients/${clientId}`;
 
-  const [row] = await query<ClientUserRow>(
-    `SELECT cu.user_id, u.email, cu.client_id
-     FROM client_users cu
-     JOIN users u ON u.id = cu.user_id
-     WHERE cu.client_id = $1
-     LIMIT 1`,
-    [clientId]
-  );
-  if (!row) return NextResponse.json({ error: 'Client user not found' }, { status: 404 });
+  const login = await clientLogin(clientId);
+  if (!login) return NextResponse.json({ error: 'Client user not found' }, { status: 404 });
+  if (!process.env.NEXTAUTH_SECRET) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
 
-  const secret = process.env.NEXTAUTH_SECRET;
-  if (!secret) return NextResponse.json({ error: 'Server misconfigured' }, { status: 500 });
-
-  const jwt = await encode({
-    token: {
-      id: row.user_id,
-      email: row.email,
-      role: 'client',
-      clientId: row.client_id,
-      impersonatedBy: { id: session.user.id, email: session.user.email || '' },
-    },
-    secret,
-    // 8h — long enough for a real support session, short enough to force a
-    // fresh admin sign-in before the day ends.
-    maxAge: 8 * 60 * 60,
+  const auditId = await startImpersonationAudit({
+    actorId: session.user.id, actorEmail: session.user.email || '', actorRole: 'admin',
+    clientId, clientName: login.client_name, source: body.from === 'coach_board' ? 'coach_board' : 'admin_config',
+    ip: req.headers.get('x-forwarded-for'), userAgent: req.headers.get('user-agent'),
   });
-
-  const isProd = (process.env.NEXTAUTH_URL || '').startsWith('https://');
-  const cookieName = isProd ? '__Secure-next-auth.session-token' : 'next-auth.session-token';
-  const res = NextResponse.json({ ok: true, redirect: '/dashboard' });
-  res.cookies.set(cookieName, jwt, {
-    httpOnly: true,
-    secure: isProd,
-    sameSite: isProd ? 'none' : 'lax',
-    path: '/',
-    maxAge: 8 * 60 * 60,
-  });
+  const res = NextResponse.json({ ok: true, redirect: body.redirect === '/dashboard/google' ? '/dashboard/google' : '/dashboard' });
+  // 8h — long enough for a real support session, short enough to force a
+  // fresh admin sign-in before the day ends.
+  await setImpersonationCookie(res, login, { id: session.user.id, email: session.user.email || '', role: 'admin', returnTo, auditId }, 8 * 60 * 60);
   return res;
 }

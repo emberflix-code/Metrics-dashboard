@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import BmConnectionsManager from './BmConnectionsManager';
 import PageTokenManager from './PageTokenManager';
 import MarketersManager from './MarketersManager';
+import CoachesManager from './CoachesManager';
 
 export default async function SettingsPage() {
   const session = await getServerSession(authOptions);
@@ -39,6 +40,15 @@ export default async function SettingsPage() {
             <a href="/marketer" className="text-blue-300 hover:text-blue-200">/marketer</a> (targeting overlap, asset library, alerts) and can tag creatives, but has no access to this admin panel or to client settings.
           </p>
           <MarketersManager />
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl p-6">
+          <h1 className="text-lg font-bold text-white mb-1">Coaches</h1>
+          <p className="text-sm text-slate-400 mb-5">
+            Logins for the <span className="font-mono text-slate-300">coach</span> role. A coach sees only the clients that list them as GMN Coach, on the{' '}
+            <a href="/coach" className="text-blue-300 hover:text-blue-200">coach board</a>: their numbers, a copyable auto-login link, and a button to open each client&apos;s dashboard. No access to this admin panel or to client settings.
+          </p>
+          <CoachesManager />
         </div>
       </div>
     </div>

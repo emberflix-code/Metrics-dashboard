@@ -158,6 +158,8 @@ export default async function DashboardPage({
         <ImpersonationBanner
           adminEmail={impersonatedBy.email}
           clientName={client?.name ?? session.user.email ?? 'Client'}
+          actorRole={impersonatedBy.role}
+          returnTo={impersonatedBy.returnTo}
         />
       )}
       <DashboardClient
@@ -199,7 +201,8 @@ export default async function DashboardPage({
         showMetaKpiSheet={!!(client?.show_meta_kpi_sheet && client?.meta_kpi_sheet_id)}
         hideCreativeTagging={!!client?.hide_creative_tagging}
         dataSourceByAccount={dataSourceByAccount}
-        isAdminView={!!impersonatedBy}
+        // Admin-only diagnostics + creative tag editing: never for a coach viewing the client.
+        isAdminView={!!impersonatedBy && impersonatedBy.role !== 'coach'}
         autoLoginToken={autoLoginToken}
       />
     </>

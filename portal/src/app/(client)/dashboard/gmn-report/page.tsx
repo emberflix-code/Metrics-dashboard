@@ -40,7 +40,7 @@ export default async function GmnReportPage({ searchParams }: { searchParams: { 
   return (
     <>
       {impersonatedBy && (
-        <ImpersonationBanner adminEmail={impersonatedBy.email} clientName={client.name} />
+        <ImpersonationBanner adminEmail={impersonatedBy.email} clientName={client.name} actorRole={impersonatedBy.role} returnTo={impersonatedBy.returnTo} />
       )}
       <GmnReportClient clientName={client.name} months={months} selectedMonth={requested ?? null} report={report} />
     </>

@@ -39,6 +39,8 @@ function LoginForm() {
       router.push('/admin');
     } else if (session?.user?.role === 'marketer') {
       router.push('/marketer');
+    } else if (session?.user?.role === 'coach') {
+      router.push('/coach');
     } else {
       router.push('/dashboard');
     }

@@ -11,6 +11,7 @@ export default async function RootPage() {
 
   if (session?.user.role === 'admin') redirect('/admin');
   if (session?.user.role === 'marketer') redirect('/marketer');
+  if (session?.user.role === 'coach') redirect('/coach');
   if (session) redirect('/dashboard');
 
   return <PublicHome />;

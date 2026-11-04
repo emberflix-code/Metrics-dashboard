@@ -26,7 +26,10 @@ export async function POST(req: NextRequest) {
   const session = await getServerSession(authOptions);
   // Marketers tag from the cross-account asset library (/marketer/assets) —
   // same write, same phash-cluster expansion, so they're allowed here too.
-  const isAdmin = session?.user.role === 'admin' || session?.user.role === 'marketer' || !!session?.user.impersonatedBy;
+  // An admin viewing a client dashboard may tag; a coach viewing one may not
+  // (tags are agency-wide data — coaches get the client's own view only).
+  const imp = session?.user.impersonatedBy;
+  const isAdmin = session?.user.role === 'admin' || session?.user.role === 'marketer' || (!!imp && imp.role !== 'coach');
   if (!session || !isAdmin) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

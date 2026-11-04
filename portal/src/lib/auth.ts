@@ -7,7 +7,7 @@ interface UserRow {
   id: string;
   email: string;
   password_hash: string;
-  role: 'admin' | 'client' | 'marketer';
+  role: 'admin' | 'client' | 'marketer' | 'coach';
   client_id: string | null;
 }
 
