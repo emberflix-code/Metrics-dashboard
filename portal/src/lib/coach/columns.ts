@@ -6,6 +6,8 @@
 // after the page renders, from the cache only. cost 'slow' = needs live GHL
 // calls, so it's opt-in and loaded separately.
 
+import { DEFAULT_RANGE } from './dateRange';
+
 export type ColumnKind = 'config' | 'metric';
 
 export interface BoardColumn {
@@ -68,16 +70,6 @@ export function sanitizeColumns(keys: unknown): string[] {
   return out;
 }
 
-export const RANGE_PRESETS = [
-  { key: 'yesterday', label: 'Yesterday' },
-  { key: '7', label: 'Last 7 days' },
-  { key: '14', label: 'Last 14 days' },
-  { key: '30', label: 'Last 30 days' },
-  { key: 'this_month', label: 'This month' },
-  { key: 'last_month', label: 'Last month' },
-] as const;
-export const RANGE_KEYS: string[] = RANGE_PRESETS.map(r => r.key);
-
 export const GROUP_BY_OPTIONS = [
   { key: 'marketing_type', label: 'Marketing Type' },
   { key: 'offer', label: 'Offer' },
@@ -92,8 +84,23 @@ export interface CoachBoardPrefs {
   range: string;
   collapsed: string[];
   coachFilter: string;
+  /** Rows whose per-row (eye) numbers stay shown: 'ghl:<clientId>' / 'cpa:<clientId>'. */
+  revealed: string[];
+  /** Column sort inside each group: '<key>:asc|desc', '' = by name. */
+  sort: string;
 }
 
 export function defaultPrefs(isAdmin: boolean): CoachBoardPrefs {
-  return { columns: defaultColumns(isAdmin), groupBy: 'marketing_type', range: '7', collapsed: [], coachFilter: '' };
+  return { columns: defaultColumns(isAdmin), groupBy: 'marketing_type', range: DEFAULT_RANGE, collapsed: [], coachFilter: '', revealed: [], sort: '' };
+}
+
+/** 'ghl:<id>' / 'cpa:<id>' entries only, capped. */
+export function sanitizeRevealed(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return Array.from(new Set(v.filter((x): x is string => typeof x === 'string' && /^(ghl|cpa):[0-9a-f-]{36}$/.test(x)))).slice(0, 300);
+}
+
+export function sanitizeSort(v: unknown): string {
+  const m = /^([a-z_]+):(asc|desc)$/.exec(String(v ?? ''));
+  return m && (m[1] === 'name' || COLUMN_BY_KEY.has(m[1])) ? m[0] : '';
 }

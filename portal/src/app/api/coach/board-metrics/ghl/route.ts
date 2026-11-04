@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getCoachSession, coachUnauthorized } from '@/lib/coachAuth';
 import { loadCoachClients } from '@/lib/coach/scope';
-import { RANGE_KEYS } from '@/lib/coach/columns';
-import { resolveDateRange } from '@/lib/dateRange';
+import { resolveRequestRange } from '@/lib/coach/dateRange';
 import { query } from '@/lib/db';
 import { decrypt } from '@/lib/crypto';
 import { getAdminClientMetaScope, getAccountTimezone } from '@/lib/meta';
@@ -20,8 +19,7 @@ export async function POST(req: NextRequest) {
   const ctx = await getCoachSession();
   if (!ctx) return coachUnauthorized();
   const body = await req.json().catch(() => ({}));
-  const preset = RANGE_KEYS.includes(String(body.range)) ? String(body.range) : '7';
-  const { since, until } = resolveDateRange({ preset }, '7');
+  const { since, until } = resolveRequestRange(body.range);
   const requested = new Set<string>(Array.isArray(body.clientIds) ? body.clientIds.map(String) : []);
 
   const scoped = (await loadCoachClients(ctx, { adminCoachFilter: typeof body.coachFilter === 'string' ? body.coachFilter : '' }))

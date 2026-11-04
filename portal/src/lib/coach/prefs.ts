@@ -2,7 +2,8 @@
 // range, collapsed groups; admins also their coach filter), stored per user
 // in user_preferences so they follow the coach to any browser.
 import { query } from '../db';
-import { defaultPrefs, sanitizeColumns, GROUP_BY_KEYS, RANGE_KEYS, type CoachBoardPrefs } from './columns';
+import { defaultPrefs, sanitizeColumns, sanitizeRevealed, sanitizeSort, GROUP_BY_KEYS, type CoachBoardPrefs } from './columns';
+import { normalizeRangeSpec } from './dateRange';
 
 export const BOARD_PREF_KEY = 'coach_board';
 
@@ -15,9 +16,11 @@ export async function loadBoardPrefs(userId: string, isAdmin: boolean): Promise<
   return {
     columns: columns.length ? columns : base.columns,
     groupBy: GROUP_BY_KEYS.includes(String(v.groupBy)) && (isAdmin || v.groupBy !== 'coach') ? String(v.groupBy) : base.groupBy,
-    range: RANGE_KEYS.includes(String(v.range)) ? String(v.range) : base.range,
+    range: v.range ? normalizeRangeSpec(v.range) : base.range,
     collapsed: Array.isArray(v.collapsed) ? v.collapsed.filter(x => typeof x === 'string').slice(0, 100) : [],
     coachFilter: isAdmin && typeof v.coachFilter === 'string' ? v.coachFilter : '',
+    revealed: sanitizeRevealed(v.revealed),
+    sort: sanitizeSort(v.sort),
   };
 }
 
@@ -26,7 +29,9 @@ export async function saveBoardPrefs(userId: string, isAdmin: boolean, body: Rec
   const patch: Partial<CoachBoardPrefs> = {};
   if (body.columns !== undefined) patch.columns = sanitizeColumns(body.columns);
   if (body.groupBy !== undefined && GROUP_BY_KEYS.includes(String(body.groupBy))) patch.groupBy = String(body.groupBy);
-  if (body.range !== undefined && RANGE_KEYS.includes(String(body.range))) patch.range = String(body.range);
+  if (body.range !== undefined) patch.range = normalizeRangeSpec(body.range);
+  if (body.revealed !== undefined) patch.revealed = sanitizeRevealed(body.revealed);
+  if (body.sort !== undefined) patch.sort = sanitizeSort(body.sort);
   if (Array.isArray(body.collapsed)) patch.collapsed = body.collapsed.filter((x: unknown) => typeof x === 'string').map(x => (x as string).slice(0, 100)).slice(0, 100);
   if (isAdmin && typeof body.coachFilter === 'string') patch.coachFilter = body.coachFilter.slice(0, 100);
   await query(
