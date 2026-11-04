@@ -26,6 +26,11 @@ export interface CoachClient {
   googleCampaignFilter: string;
   googleSheetTab: string;
   hasGhlToken: boolean;
+  showCreativesV3: boolean;
+  showBookings: boolean;
+  /** CPA card on AND a CPA sheet tab configured (what the dashboard needs to show it). */
+  cpaEnabled: boolean;
+  ltvEnabled: boolean;
 }
 
 interface ClientRow {
@@ -34,6 +39,7 @@ interface ClientRow {
   leads_source: string; data_source: string; ad_account_ids: string[] | null; campaign_filter: string;
   google_data_source: string; google_ads_customer_ids: string[] | null; google_campaign_filter: string;
   google_sheet_tab: string; has_ghl_token: boolean;
+  show_creatives_v3: boolean; show_bookings: boolean; cpa_enabled: boolean; ltv_enabled: boolean;
 }
 
 // $1 = coach name. True when any comma-separated entry equals it (trimmed, case-insensitive).
@@ -58,7 +64,10 @@ export async function loadCoachClients(ctx: CoachContext, opts: { adminCoachFilt
     `SELECT c.id, c.name, c.active, c.is_rollup, c.marketing_type, c.offer, c.coach_name, c.client_contact_name,
             c.location_address, c.sort_order, c.leads_source, c.data_source, c.ad_account_ids, c.campaign_filter,
             c.google_data_source, c.google_ads_customer_ids, c.google_campaign_filter, c.google_sheet_tab,
-            (length(c.ghl_token_enc) > 0 AND length(c.ghl_location_id) > 0) AS has_ghl_token
+            (length(c.ghl_token_enc) > 0 AND length(c.ghl_location_id) > 0) AS has_ghl_token,
+            c.show_creatives_v3, c.show_bookings,
+            (c.show_cpa AND c.cpa_sheet_id <> '' AND c.cpa_sheet_tab <> '') AS cpa_enabled,
+            (c.show_ltv AND c.cpa_sheet_id <> '' AND c.cpa_sheet_tab <> '') AS ltv_enabled
      FROM clients c
      ${where.length ? 'WHERE ' + where.join(' AND ') : ''}
      ORDER BY c.sort_order ASC, c.name ASC`,
@@ -73,6 +82,8 @@ export async function loadCoachClients(ctx: CoachContext, opts: { adminCoachFilt
     googleDataSource: r.google_data_source || 'sheet', googleCustomerIds: r.google_ads_customer_ids || [],
     googleCampaignFilter: r.google_campaign_filter || '', googleSheetTab: r.google_sheet_tab || '',
     hasGhlToken: !!r.has_ghl_token,
+    showCreativesV3: !!r.show_creatives_v3, showBookings: !!r.show_bookings,
+    cpaEnabled: !!r.cpa_enabled, ltvEnabled: !!r.ltv_enabled,
   }));
 }
 

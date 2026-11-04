@@ -29,6 +29,11 @@ export default async function CoachPage() {
     hasGoogle: c.googleDataSource === 'api' ? c.googleCustomerIds.length > 0 : !!c.googleSheetTab,
     googleSource: c.googleDataSource === 'api' ? 'api' : c.googleSheetTab ? 'sheet' : null,
     hasGhl: c.hasGhlToken,
+    dataSource: c.dataSource,
+    showCreativesV3: c.showCreativesV3,
+    showBookings: c.showBookings,
+    cpaEnabled: c.cpaEnabled,
+    ltvEnabled: c.ltvEnabled,
   }));
 
   if (!ctx.isAdmin && !ctx.coachName) {

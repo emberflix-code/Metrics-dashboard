@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BOARD_COLUMNS, COLUMN_BY_KEY, CHEAP_METRIC_KEYS, GROUP_BY_OPTIONS, RANGE_PRESETS, defaultColumns, type CoachBoardPrefs } from '@/lib/coach/columns';
+import { BOARD_COLUMNS, COLUMN_BY_KEY, CHEAP_METRIC_KEYS, CPA_METRIC_KEYS, GROUP_BY_OPTIONS, RANGE_PRESETS, defaultColumns, type CoachBoardPrefs } from '@/lib/coach/columns';
 import { groupColorFor } from '@/lib/groupColors';
 
 export interface BoardClient {
@@ -18,6 +18,11 @@ export interface BoardClient {
   hasGoogle: boolean;
   googleSource: 'api' | 'sheet' | null;
   hasGhl: boolean;
+  dataSource: string;
+  showCreativesV3: boolean;
+  showBookings: boolean;
+  cpaEnabled: boolean;
+  ltvEnabled: boolean;
 }
 
 type Metrics = Record<string, number | null | undefined> & { error?: string };
@@ -30,7 +35,7 @@ const num = (n: number, dp = 0) => n.toLocaleString('en-US', { maximumFractionDi
 function formatMetric(key: string, v: number | null | undefined): string {
   if (v === null || v === undefined) return '—';
   switch (key) {
-    case 'spend': case 'cpl': case 'g_spend': case 'g_cpl': case 'total_spend': return money(v);
+    case 'spend': case 'cpl': case 'g_spend': case 'g_cpl': case 'total_spend': case 'cpa': case 'ltv': return money(v);
     case 'ctr': return v.toFixed(2) + '%';
     case 'g_leads': return num(v, 2);
     case 'spend_delta': return (v > 0 ? '+' : '') + v.toFixed(1) + '%';
@@ -124,28 +129,25 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
     return () => { if (!done) { ctrl.abort(); missing.forEach(k => loaded.delete(k)); } };
   }, [cheapVisible, range]);
 
-  // ── slow GHL columns: only when shown, only for clients with GHL in open groups ──
-  const ghlVisible = columns.includes('ghl_leads') || columns.includes('ghl_bookings');
-  const ghlRequested = useRef<Record<string, Set<string>>>({});
-  const [ghlLoading, setGhlLoading] = useState(false);
-  useEffect(() => {
-    if (!ghlVisible) return;
-    const asked = ghlRequested.current[range] || new Set<string>();
-    const ids = groups.filter(([k]) => !collapsed.includes(k)).flatMap(([, cs]) => cs).filter(c => c.hasGhl && !asked.has(c.id)).map(c => c.id);
-    if (!ids.length) return;
-    ids.forEach(id => asked.add(id));
-    ghlRequested.current[range] = asked;
-    setGhlLoading(true);
-    fetch('/api/coach/board-metrics/ghl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range, clientIds: ids }) })
-      .then(r => r.json())
-      .then(j => setMetrics(s => {
+  // ── slower columns (live GHL calls / CPA sheet reads): never loaded in bulk.
+  // Each cell has an eye button that loads that one client's numbers for the
+  // group (GHL → leads + bookings; CPA → won, CPA, LTV) for the current range.
+  const [revealing, setRevealing] = useState<Set<string>>(new Set());
+  const reveal = useCallback(async (kind: 'ghl' | 'cpa', clientId: string) => {
+    const key = `${range}|${kind}|${clientId}`;
+    setRevealing(s => new Set(s).add(key));
+    try {
+      const r = await fetch(`/api/coach/board-metrics/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ range, clientIds: [clientId] }) });
+      const j = await r.json();
+      const row: Metrics = (j.rows || {})[clientId] || { error: j.error || 'No data returned' };
+      setMetrics(s => {
         const cur = { ...(s[range] || {}) };
-        for (const [id, row] of Object.entries<Metrics>(j.rows || {})) cur[id] = { ...(cur[id] || {}), ...row };
+        cur[clientId] = { ...(cur[clientId] || {}), ...row, ...(row.error ? { [`${kind}_error`]: 1 } : {}) };
         return { ...s, [range]: cur };
-      }))
-      .catch(() => {})
-      .finally(() => setGhlLoading(false));
-  }, [ghlVisible, range, groups, collapsed]);
+      });
+    } catch { /* leave the eye so they can retry */ }
+    setRevealing(s => { const n = new Set(s); n.delete(key); return n; });
+  }, [range]);
 
   const shown = columns.map(k => COLUMN_BY_KEY.get(k)!).filter(Boolean);
   const rangeMetrics = metrics[range] || {};
@@ -165,14 +167,35 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
       case 'location': return <span className="text-slate-400">{c.locationAddress || '—'}</span>;
       case 'leads_source': return <span className="text-[11px] uppercase tracking-wide text-slate-400">{c.leadsSource}</span>;
       case 'channels': return <ChannelBadges c={c} staleMeta={!!staleMeta} staleGoogle={!!staleGoogle} info={info} />;
+      case 'data_source': return c.hasMeta
+        ? <span className={`text-[11px] px-1.5 py-0.5 rounded ${c.dataSource === 'cached' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300'}`}>{c.dataSource === 'cached' ? 'Cached' : 'Live'}</span>
+        : <span className="text-slate-700">—</span>;
+      case 'creatives_v3': return <Flag on={c.showCreativesV3} />;
+      case 'ghl': return <Flag on={c.hasGhl} />;
+      case 'bookings_on': return <Flag on={c.showBookings} />;
+      case 'cpa_on': return <Flag on={c.cpaEnabled} />;
+      case 'ltv_on': return <Flag on={c.ltvEnabled} />;
     }
     const col = COLUMN_BY_KEY.get(key);
     if (col?.kind !== 'metric') return null;
     if (col.cost === 'slow') {
-      if (!c.hasGhl) return <span className="text-slate-700" title="GHL not connected">n/a</span>;
-      if (m?.error) return <span className="text-rose-400" title={String(m.error)}>!</span>;
-      if (m?.[key] === undefined) return <span className="text-slate-600">{ghlLoading ? '…' : '—'}</span>;
-      return formatMetric(key, m[key] as number);
+      const kind: 'ghl' | 'cpa' = CPA_METRIC_KEYS.includes(key) ? 'cpa' : 'ghl';
+      const eligible = kind === 'cpa' ? (key === 'ltv' ? c.ltvEnabled : c.cpaEnabled) : c.hasGhl;
+      if (!eligible) {
+        const why = kind === 'cpa' ? (key === 'ltv' ? 'LTV is not on for this client' : 'CPA is not on for this client') : 'GHL is not connected for this client';
+        // No integration / no data for this client: leave the cell blank (reason on hover).
+        return <span className="inline-block w-4 h-4" title={why} />;
+      }
+      if (m?.[`${kind}_error`]) return <button type="button" onClick={() => reveal(kind, c.id)} className="text-rose-400" title={`${String(m.error)} — click to retry`}>!</button>;
+      if (m?.[key] !== undefined) return formatMetric(key, m[key] as number);
+      const busy = revealing.has(`${range}|${kind}|${c.id}`);
+      return (
+        <button type="button" onClick={() => reveal(kind, c.id)} disabled={busy}
+          title={kind === 'cpa' ? 'Show won sales, CPA and LTV for this client' : 'Show GHL leads and bookings for this client'}
+          className="inline-flex justify-end text-slate-400 hover:text-blue-300 disabled:opacity-60">
+          {busy ? <span className="text-slate-500">…</span> : <EyeIcon />}
+        </button>
+      );
     }
     // Channel not set up for this client: a dash, not a misleading $0.00.
     if (key.startsWith('g_') && !c.hasGoogle) return <span className="text-slate-700" title="No Google Ads set up">—</span>;
@@ -189,7 +212,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
   function groupTotal(cs: BoardClient[], key: string): string {
     const sum = (k: string) => cs.reduce((s, c) => s + (Number(rangeMetrics[c.id]?.[k]) || 0), 0);
     switch (key) {
-      case 'spend': case 'leads': case 'impressions': case 'reach': case 'link_clicks': case 'g_spend': case 'g_leads': case 'total_spend': case 'ghl_leads': case 'ghl_bookings':
+      case 'spend': case 'leads': case 'impressions': case 'reach': case 'link_clicks': case 'g_spend': case 'g_leads': case 'total_spend':
         return cs.some(c => rangeMetrics[c.id]?.[key] !== undefined) ? formatMetric(key, sum(key)) : '';
       case 'cpl': { const l = sum('leads'); return l > 0 && cs.some(c => rangeMetrics[c.id]?.spend !== undefined) ? money(sum('spend') / l) : ''; }
       case 'g_cpl': { const l = sum('g_leads'); return l > 0 ? money(sum('g_spend') / l) : ''; }
@@ -293,6 +316,19 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
   );
 }
 
+function Flag({ on }: { on: boolean }) {
+  return on ? <span className="text-emerald-300" title="On">✓</span> : <span className="text-slate-700" title="Off">—</span>;
+}
+
+function EyeIcon() {
+  return (
+    <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.5 12s3.5-7 9.5-7 9.5 7 9.5 7-3.5 7-9.5 7-9.5-7-9.5-7z" />
+      <circle cx="12" cy="12" r="3" strokeWidth={2} />
+    </svg>
+  );
+}
+
 function Select({ label, value, onChange, options }: { label: string; value: string; onChange: (v: string) => void; options: { value: string; label: string }[] }) {
   return (
     <label className="flex items-center gap-2 text-xs text-slate-400 border border-slate-700 rounded-lg px-2 py-1.5">
@@ -329,7 +365,7 @@ function ColumnPicker({ columns, setColumns, isAdmin, onClose }: { columns: stri
       {BOARD_COLUMNS.filter(c => c.kind === kind && (isAdmin || c.key !== 'coach')).map(c => (
         <label key={c.key} className="flex items-start gap-2 py-1 text-sm text-slate-200 cursor-pointer" title={c.help}>
           <input type="checkbox" checked={columns.includes(c.key)} onChange={() => toggle(c.key)} className="mt-0.5 accent-blue-500" />
-          <span>{c.label}{c.cost === 'slow' && <span className="ml-1 text-[10px] text-amber-300">slower</span>}</span>
+          <span>{c.label}{c.cost === 'slow' && <span className="ml-1 text-[10px] text-amber-300" title="Not loaded for every row — click the eye on a row to see it">per row</span>}</span>
         </label>
       ))}
     </div>
