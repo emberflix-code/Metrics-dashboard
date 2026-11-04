@@ -21,6 +21,7 @@ export default async function CoachPage() {
     isRollup: c.isRollup,
     marketingType: c.marketingType,
     offer: c.offer,
+    offerDetails: c.offerDetails,
     coachName: c.coachName,
     contactName: c.contactName,
     locationAddress: c.locationAddress,

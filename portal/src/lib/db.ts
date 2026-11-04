@@ -43,6 +43,9 @@ pool.query(`CREATE INDEX IF NOT EXISTS idx_clients_active ON clients (active)`).
 // overview table alongside name-prefix auto-detection.
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS marketing_type TEXT NOT NULL DEFAULT ''`).catch(() => {});
 pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer TEXT NOT NULL DEFAULT ''`).catch(() => {});
+// The marketing sheet's "Marketing Offer (Text)" column — the actual offer
+// when `offer` is "Unique Offer (Look at Other Marketing Offer Column)".
+pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer_details TEXT NOT NULL DEFAULT ''`).catch(() => {});
 
 // Marketing/coaching roster fields (see migration 030), mirrored from the
 // marketing team's Marketing_Coaching_Material spreadsheet: the owner/contact

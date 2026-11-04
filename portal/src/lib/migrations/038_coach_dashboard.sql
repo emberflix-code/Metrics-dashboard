@@ -34,3 +34,6 @@ CREATE TABLE IF NOT EXISTS impersonation_audit (
 );
 CREATE INDEX IF NOT EXISTS impersonation_audit_actor_idx ON impersonation_audit (actor_id, started_at DESC);
 CREATE INDEX IF NOT EXISTS impersonation_audit_client_idx ON impersonation_audit (client_id, started_at DESC);
+
+-- Marketing sheet "Marketing Offer (Text)" (shown when offer is "Unique Offer ...").
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer_details TEXT NOT NULL DEFAULT '';

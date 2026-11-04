@@ -12,6 +12,7 @@ export interface BoardClient {
   isRollup: boolean;
   marketingType: string;
   offer: string;
+  offerDetails: string;
   coachName: string;
   contactName: string;
   locationAddress: string;
@@ -50,9 +51,14 @@ function formatMetric(key: string, v: number | null | undefined): string {
   }
 }
 
+// The sheet's "Unique Offer (Look at Other Marketing Offer Column)" means the
+// real offer is in its "Marketing Offer (Text)" column (offerDetails).
+const isUniqueOffer = (c: BoardClient) => /^unique offer/i.test(c.offer.trim());
+const offerLabel = (c: BoardClient) => (isUniqueOffer(c) && c.offerDetails ? c.offerDetails : c.offer);
+
 function groupKeyOf(c: BoardClient, groupBy: string): string {
   if (c.isRollup) return 'Rollups (combined dashboards)';
-  if (groupBy === 'offer') return c.offer || '(no offer)';
+  if (groupBy === 'offer') return isUniqueOffer(c) ? 'Unique offers' : c.offer || '(no offer)';
   if (groupBy === 'coach') return c.coachName || '(no coach)';
   if (groupBy === 'none') return 'All clients';
   return c.marketingType || '(no marketing type)';
@@ -63,7 +69,7 @@ const eligibleFor = (c: BoardClient, kind: SlowKind) => (kind === 'cpa' ? c.cpaE
 
 function configText(c: BoardClient, key: string): string {
   switch (key) {
-    case 'offer': return c.offer;
+    case 'offer': return offerLabel(c);
     case 'marketing_type': return c.marketingType;
     case 'coach': return c.coachName;
     case 'contact': return c.contactName;
@@ -121,7 +127,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
         if (!names.includes(coachFilter.toLowerCase())) return false;
       }
       if (!term) return true;
-      return [c.name, c.offer, c.marketingType, c.coachName, c.contactName].some(v => v.toLowerCase().includes(term));
+      return [c.name, c.offer, c.offerDetails, c.marketingType, c.coachName, c.contactName].some(v => v.toLowerCase().includes(term));
     });
   }, [clients, search, isAdmin, coachFilter]);
 
@@ -320,7 +326,16 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
     const m = rangeMetrics[c.id];
     const dash = <span className="text-slate-600">—</span>;
     switch (key) {
-      case 'offer': return c.offer || dash;
+      case 'offer':
+        if (isUniqueOffer(c)) {
+          return (
+            <span className="inline-flex items-center gap-1.5 max-w-[320px]" title={c.offerDetails || 'Unique offer — no text in the Marketing Offer (Text) column'}>
+              <span className="shrink-0 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">Unique</span>
+              <span className="truncate">{c.offerDetails || <span className="text-slate-600">no details</span>}</span>
+            </span>
+          );
+        }
+        return c.offer || dash;
       case 'marketing_type': return c.marketingType || dash;
       case 'coach': return c.coachName || dash;
       case 'contact': return c.contactName || dash;

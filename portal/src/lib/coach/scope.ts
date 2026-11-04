@@ -13,6 +13,8 @@ export interface CoachClient {
   isRollup: boolean;
   marketingType: string;
   offer: string;
+  /** Sheet "Marketing Offer (Text)" — the real offer when `offer` is "Unique Offer ...". */
+  offerDetails: string;
   coachName: string;
   contactName: string;
   locationAddress: string;
@@ -34,7 +36,7 @@ export interface CoachClient {
 }
 
 interface ClientRow {
-  id: string; name: string; active: boolean; is_rollup: boolean; marketing_type: string; offer: string;
+  id: string; name: string; active: boolean; is_rollup: boolean; marketing_type: string; offer: string; offer_details: string;
   coach_name: string; client_contact_name: string; location_address: string; sort_order: number;
   leads_source: string; data_source: string; ad_account_ids: string[] | null; campaign_filter: string;
   google_data_source: string; google_ads_customer_ids: string[] | null; google_campaign_filter: string;
@@ -61,7 +63,7 @@ export async function loadCoachClients(ctx: CoachContext, opts: { adminCoachFilt
   if (coach !== null) { params.push(coach); where.push(COACH_MATCH_SQL); }
   if (!opts.includeInactive) where.push('c.active = true');
   const rows = await query<ClientRow>(
-    `SELECT c.id, c.name, c.active, c.is_rollup, c.marketing_type, c.offer, c.coach_name, c.client_contact_name,
+    `SELECT c.id, c.name, c.active, c.is_rollup, c.marketing_type, c.offer, c.offer_details, c.coach_name, c.client_contact_name,
             c.location_address, c.sort_order, c.leads_source, c.data_source, c.ad_account_ids, c.campaign_filter,
             c.google_data_source, c.google_ads_customer_ids, c.google_campaign_filter, c.google_sheet_tab,
             (length(c.ghl_token_enc) > 0 AND length(c.ghl_location_id) > 0) AS has_ghl_token,
@@ -75,7 +77,7 @@ export async function loadCoachClients(ctx: CoachContext, opts: { adminCoachFilt
   );
   return rows.map(r => ({
     id: r.id, name: r.name, active: r.active, isRollup: r.is_rollup,
-    marketingType: r.marketing_type || '', offer: r.offer || '', coachName: r.coach_name || '',
+    marketingType: r.marketing_type || '', offer: r.offer || '', offerDetails: r.offer_details || '', coachName: r.coach_name || '',
     contactName: r.client_contact_name || '', locationAddress: r.location_address || '', sortOrder: r.sort_order,
     leadsSource: r.leads_source || 'meta', dataSource: r.data_source || 'live',
     adAccountIds: r.ad_account_ids || [], campaignFilter: r.campaign_filter || '',
