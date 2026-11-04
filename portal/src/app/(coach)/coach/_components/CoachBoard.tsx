@@ -248,15 +248,18 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
       </div>
       {error && <p className="text-xs text-rose-300 bg-rose-500/10 border border-rose-500/20 rounded-lg px-3 py-2">{error}</p>}
 
-      <div className="border border-slate-800 rounded-xl overflow-x-auto">
+      {/* The table scrolls inside its own box (both ways) so the header row stays
+          pinned at the top while scrolling down — sticky doesn't work through an
+          overflow-x container that the page itself scrolls. */}
+      <div className="border border-slate-800 rounded-xl overflow-auto max-h-[calc(100vh-170px)]">
         <table className="w-full text-sm">
-          <thead className="bg-slate-900/80 text-[11px] uppercase tracking-wider text-slate-500 sticky top-0">
+          <thead className="text-[11px] uppercase tracking-wider text-slate-500">
             <tr>
-              <th className="text-left px-3 py-2.5 min-w-[260px]">Client</th>
+              <th className="sticky top-0 left-0 z-30 bg-slate-900 text-left px-3 py-2.5 min-w-[260px] shadow-[0_1px_0_0_rgb(30_41_59)]">Client</th>
               {shown.map(col => (
-                <th key={col.key} title={col.help} className={`px-3 py-2.5 whitespace-nowrap text-${col.align}`}>{col.label}</th>
+                <th key={col.key} title={col.help} className={`sticky top-0 z-20 bg-slate-900 px-3 py-2.5 whitespace-nowrap text-${col.align} shadow-[0_1px_0_0_rgb(30_41_59)]`}>{col.label}</th>
               ))}
-              <th className="text-right px-3 py-2.5">Actions</th>
+              <th className="sticky top-0 z-20 bg-slate-900 text-right px-3 py-2.5 shadow-[0_1px_0_0_rgb(30_41_59)]">Actions</th>
             </tr>
           </thead>
           <tbody>
