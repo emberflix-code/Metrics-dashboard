@@ -53,6 +53,18 @@ export const BOARD_COLUMNS: BoardColumn[] = [
   { key: 'ltv', label: 'LTV', kind: 'metric', cost: 'slow', align: 'right', help: "Won sales × the client's LTV value, same as the LTV card — click the eye on a row to load it" },
 ];
 
+// Default column widths (px). 'name' = the Client column, 'actions' = the buttons column.
+const DEFAULT_WIDTHS: Record<string, number> = {
+  name: 280, actions: 190, offer: 260, marketing_type: 150, coach: 170, channels: 140, leads_source: 110,
+  contact: 160, location: 220, launch_date: 150, data_source: 110, creatives_v3: 110, ghl: 100,
+  bookings_on: 120, cpa_on: 90, ltv_on: 90,
+};
+export const MIN_COL_WIDTH = 60;
+export const MAX_COL_WIDTH = 1000;
+export function defaultColumnWidth(key: string): number {
+  return DEFAULT_WIDTHS[key] ?? 120;
+}
+
 export const COLUMN_BY_KEY = new Map(BOARD_COLUMNS.map(c => [c.key, c] as const));
 export const CHEAP_METRIC_KEYS = BOARD_COLUMNS.filter(c => c.kind === 'metric' && c.cost === 'cheap').map(c => c.key);
 export const SLOW_METRIC_KEYS = BOARD_COLUMNS.filter(c => c.kind === 'metric' && c.cost === 'slow').map(c => c.key);
@@ -89,16 +101,30 @@ export interface CoachBoardPrefs {
   revealed: string[];
   /** Column sort inside each group: '<key>:asc|desc', '' = by name. */
   sort: string;
+  /** Column widths the user dragged (px), by column key ('name' = Client, 'actions'). Missing = default. */
+  widths: Record<string, number>;
 }
 
 export function defaultPrefs(isAdmin: boolean): CoachBoardPrefs {
-  return { columns: defaultColumns(isAdmin), groupBy: 'marketing_type', range: DEFAULT_RANGE, collapsed: [], coachFilter: '', revealed: [], sort: '' };
+  return { columns: defaultColumns(isAdmin), groupBy: 'marketing_type', range: DEFAULT_RANGE, collapsed: [], coachFilter: '', revealed: [], sort: '', widths: {} };
 }
 
 /** 'ghl:<id>' / 'cpa:<id>' entries only, capped. */
 export function sanitizeRevealed(v: unknown): string[] {
   if (!Array.isArray(v)) return [];
   return Array.from(new Set(v.filter((x): x is string => typeof x === 'string' && /^(ghl|cpa):[0-9a-f-]{36}$/.test(x)))).slice(0, 300);
+}
+
+/** Known column keys (plus 'name'/'actions') with whole-pixel widths inside the allowed range. */
+export function sanitizeWidths(v: unknown): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out;
+  for (const [k, w] of Object.entries(v as Record<string, unknown>)) {
+    if ((k === 'name' || k === 'actions' || COLUMN_BY_KEY.has(k)) && typeof w === 'number' && Number.isFinite(w)) {
+      out[k] = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, Math.round(w)));
+    }
+  }
+  return out;
 }
 
 export function sanitizeSort(v: unknown): string {

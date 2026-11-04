@@ -1,7 +1,7 @@
 'use client';
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { BOARD_COLUMNS, COLUMN_BY_KEY, CHEAP_METRIC_KEYS, CPA_METRIC_KEYS, GROUP_BY_OPTIONS, defaultColumns, type CoachBoardPrefs } from '@/lib/coach/columns';
+import { BOARD_COLUMNS, COLUMN_BY_KEY, CHEAP_METRIC_KEYS, CPA_METRIC_KEYS, GROUP_BY_OPTIONS, defaultColumns, defaultColumnWidth, MIN_COL_WIDTH, MAX_COL_WIDTH, type CoachBoardPrefs } from '@/lib/coach/columns';
 import { resolveBoardRange, formatRangeLabel, boardToday, daysBetween } from '@/lib/coach/dateRange';
 import { groupColorFor } from '@/lib/groupColors';
 import DateRangePicker from './DateRangePicker';
@@ -98,6 +98,13 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
   const [coachFilter, setCoachFilter] = useState(prefs.coachFilter);
   const [revealed, setRevealed] = useState<string[]>(prefs.revealed);
   const [sort, setSort] = useState(prefs.sort);
+  const [widths, setWidths] = useState<Record<string, number>>(prefs.widths || {});
+  const colWidth = useCallback((key: string) => widths[key] ?? defaultColumnWidth(key), [widths]);
+  // Header drag (reorder) + edge drag (resize) state.
+  const dragKeyRef = useRef<string | null>(null);
+  const [dragKey, setDragKey] = useState<string | null>(null);
+  const [dropAt, setDropAt] = useState<{ key: string; side: 'before' | 'after' } | null>(null);
+  const resizingRef = useRef(false);
   const [search, setSearch] = useState('');
   const [pickerOpen, setPickerOpen] = useState(false);
   // metrics[range][clientId] = merged values for that range
@@ -115,10 +122,10 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
     if (firstSave.current) { firstSave.current = false; return; }
     const t = setTimeout(() => {
       fetch('/api/coach/prefs', { method: 'PUT', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ columns, groupBy, range, collapsed, revealed, sort, ...(isAdmin ? { coachFilter } : {}) }) }).catch(() => {});
+        body: JSON.stringify({ columns, groupBy, range, collapsed, revealed, sort, widths, ...(isAdmin ? { coachFilter } : {}) }) }).catch(() => {});
     }, 500);
     return () => clearTimeout(t);
-  }, [columns, groupBy, range, collapsed, coachFilter, revealed, sort, isAdmin]);
+  }, [columns, groupBy, range, collapsed, coachFilter, revealed, sort, widths, isAdmin]);
 
   // ── visible clients ──
   const visible = useMemo(() => {
@@ -331,9 +338,9 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
       case 'offer':
         if (isUniqueOffer(c)) {
           return (
-            <span className="inline-flex items-center gap-1.5 max-w-[320px]" title={c.offerDetails || 'Unique offer — no text in the Marketing Offer (Text) column'}>
+            <span className="inline-flex items-start gap-1.5" title={c.offerDetails || 'Unique offer — no text in the Marketing Offer (Text) column'}>
               <span className="shrink-0 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">Unique</span>
-              <span className="truncate">{c.offerDetails || <span className="text-slate-600">no details</span>}</span>
+              <span className="min-w-0 break-words">{c.offerDetails || <span className="text-slate-600">no details</span>}</span>
             </span>
           );
         }
@@ -382,10 +389,79 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
     }
   }
 
+  // ── column reorder (drag a header onto another) ──
+  function moveColumn(from: string | null, to: string, side: 'before' | 'after') {
+    if (!from || from === to) return;
+    setColumns(cols => {
+      const a = cols.filter(k => k !== from);
+      let i = a.indexOf(to);
+      if (i < 0) return cols;
+      if (side === 'after') i++;
+      a.splice(i, 0, from);
+      return a;
+    });
+  }
+  const endDrag = () => { dragKeyRef.current = null; setDragKey(null); setDropAt(null); };
+  const sideOf = (e: React.DragEvent<HTMLElement>): 'before' | 'after' => {
+    const r = e.currentTarget.getBoundingClientRect();
+    return e.clientX < r.left + r.width / 2 ? 'before' : 'after';
+  };
+  function headerDragProps(key: string) {
+    return {
+      draggable: true,
+      onDragStart: (e: React.DragEvent<HTMLElement>) => {
+        if (resizingRef.current) { e.preventDefault(); return; }
+        dragKeyRef.current = key; setDragKey(key);
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', key);
+      },
+      onDragOver: (e: React.DragEvent<HTMLElement>) => {
+        if (!dragKeyRef.current) return;
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const side = sideOf(e);
+        setDropAt(d => (d?.key === key && d.side === side ? d : { key, side }));
+      },
+      onDrop: (e: React.DragEvent<HTMLElement>) => {
+        e.preventDefault();
+        moveColumn(dragKeyRef.current, key, sideOf(e));
+        endDrag();
+      },
+      onDragEnd: endDrag,
+    };
+  }
+
+  // ── column resize (drag a header's right edge; double-click resets) ──
+  function startResize(e: React.MouseEvent, key: string) {
+    e.preventDefault(); e.stopPropagation();
+    resizingRef.current = true;
+    const startX = e.clientX, startW = colWidth(key);
+    const move = (ev: MouseEvent) => {
+      const w = Math.min(MAX_COL_WIDTH, Math.max(MIN_COL_WIDTH, Math.round(startW + ev.clientX - startX)));
+      setWidths(ws => (ws[key] === w ? ws : { ...ws, [key]: w }));
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up);
+      document.body.style.cursor = ''; document.body.style.userSelect = '';
+      setTimeout(() => { resizingRef.current = false; }, 0);
+    };
+    document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+    window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+  }
+  const resetWidth = (key: string) => setWidths(ws => { const n = { ...ws }; delete n[key]; return n; });
+  const resizeHandle = (key: string) => (
+    <span role="separator" aria-orientation="vertical" title="Drag to resize · double-click to reset"
+      onMouseDown={e => startResize(e, key)} onDoubleClick={e => { e.stopPropagation(); resetWidth(key); }} onClick={e => e.stopPropagation()}
+      className="absolute top-0 right-0 z-10 h-full w-2.5 cursor-col-resize flex justify-end group/rs">
+      <span className="h-full w-0.5 group-hover/rs:bg-blue-500" />
+    </span>
+  );
+  const tableWidth = colWidth('name') + shown.reduce((s, c) => s + colWidth(c.key), 0) + colWidth('actions');
+
   const colSpan = shown.length + 2;
   const anyLoading = loadingKeys.size > 0 || slowBusy.size > 0;
   const shownRevealed = revealed.filter(r => shownSlowKinds.has(r.split(':')[0] as SlowKind) && visible.some(c => c.id === r.split(':')[1])).length;
-  const thBase = 'sticky top-0 z-20 bg-slate-900 px-3 py-2.5 whitespace-nowrap shadow-[0_1px_0_0_rgb(51_65_85)]';
+  const thBase = 'sticky top-0 z-20 bg-slate-900 px-3 py-2.5 align-bottom whitespace-normal break-words shadow-[0_1px_0_0_rgb(51_65_85)]';
 
   return (
     <div className="space-y-4">
@@ -412,7 +488,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
             <svg className="w-4 h-4 text-slate-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeWidth={2} strokeLinecap="round" d="M4 6h16M4 12h16M4 18h16M9 4v16M15 4v16" /></svg>
             Columns <span className="text-slate-500">{shown.length}</span>
           </button>
-          {pickerOpen && <ColumnPicker columns={columns} setColumns={setColumns} isAdmin={isAdmin} onClose={() => setPickerOpen(false)} />}
+          {pickerOpen && <ColumnPicker columns={columns} setColumns={setColumns} onResetWidths={() => setWidths({})} isAdmin={isAdmin} onClose={() => setPickerOpen(false)} />}
         </div>
         <button type="button" onClick={() => setCollapsed(allCollapsed ? [] : groups.map(([k]) => k))}
           className="h-9 text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-500 rounded-lg px-3">
@@ -450,19 +526,30 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
           the Client column stay pinned while scrolling. */}
       <div className="relative border border-slate-800 rounded-xl overflow-auto max-h-[calc(100vh-250px)] bg-slate-950">
         {anyLoading && <div className="sticky top-0 left-0 z-40 h-0.5 w-full overflow-hidden"><div className="h-full w-1/3 bg-blue-500 animate-[coachload_1.2s_ease-in-out_infinite]" /></div>}
-        <table className="w-full text-sm border-separate border-spacing-0">
+        <table className="table-fixed text-sm border-separate border-spacing-0" style={{ width: tableWidth }}>
+          <colgroup>
+            <col style={{ width: colWidth('name') }} />
+            {shown.map(col => <col key={col.key} style={{ width: colWidth(col.key) }} />)}
+            <col style={{ width: colWidth('actions') }} />
+          </colgroup>
           <thead className="text-[11px] uppercase tracking-wider text-slate-400">
             <tr>
-              <th className={`${thBase} left-0 z-30 text-left min-w-[260px]`}>
+              <th className={`${thBase} left-0 z-30 text-left`}>
                 <SortButton label="Client" dir={sortDir('name')} onClick={() => toggleSort('name')} align="left" />
+                {resizeHandle('name')}
               </th>
               {shown.map(col => (
-                <th key={col.key} title={col.help} className={`${thBase} text-${col.align}`}>
+                <th key={col.key} title={col.help ? `${col.help} (drag to move this column)` : 'Drag to move this column'} {...headerDragProps(col.key)}
+                  className={`${thBase} text-${col.align} cursor-grab active:cursor-grabbing ${dragKey === col.key ? 'opacity-40' : ''}`}>
                   <SortButton label={col.label} dir={sortDir(col.key)} onClick={() => toggleSort(col.key)} align={col.align}
                     extra={col.cost === 'slow' ? <span className="ml-1 normal-case tracking-normal text-[10px] text-amber-300/80">per row</span> : null} />
+                  {dropAt?.key === col.key && dragKey && dragKey !== col.key && (
+                    <span className={`pointer-events-none absolute top-0 bottom-0 w-0.5 bg-blue-400 ${dropAt.side === 'before' ? 'left-0' : 'right-0'}`} />
+                  )}
+                  {resizeHandle(col.key)}
                 </th>
               ))}
-              <th className={`${thBase} text-right`}>Actions</th>
+              <th className={`${thBase} text-right`}>Actions{resizeHandle('actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -477,7 +564,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
                     <td className="p-0 sticky left-0 z-10 border-t border-slate-800" style={{ background: opaqueTint }}>
                       <div className="flex items-stretch">
                         <div className="w-1.5 shrink-0" style={{ backgroundColor: color.bar }} />
-                        <div className="flex items-center gap-2 px-3 py-2.5">
+                        <div className="flex items-center gap-2 px-3 py-2.5 min-w-0">
                           <svg className={`w-3.5 h-3.5 text-slate-400 transition-transform ${open ? 'rotate-90' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M9 5l7 7-7 7" />
                           </svg>
@@ -488,7 +575,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
                     </td>
                     {/* collapsed groups still show their totals */}
                     {shown.map(col => (
-                      <td key={col.key} className={`px-3 py-2.5 border-t border-slate-800 text-${col.align} font-mono text-xs text-slate-300 whitespace-nowrap`} style={{ background: color.tint }}>
+                      <td key={col.key} className={`px-3 py-2.5 border-t border-slate-800 text-${col.align} font-mono text-xs text-slate-300 whitespace-nowrap overflow-hidden text-ellipsis`} style={{ background: color.tint }}>
                         {!open && col.kind === 'metric' ? groupTotal(cs, col.key) : ''}
                       </td>
                     ))}
@@ -500,13 +587,13 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
                         <div className="flex items-stretch h-full">
                           <div className="w-1.5 shrink-0" style={{ backgroundColor: color.bar, opacity: 0.6 }} />
                           <div className="px-3 py-2 text-slate-100 flex items-center gap-2 min-w-0">
-                            <span className="truncate max-w-[300px]" title={c.name}>{c.name}</span>
+                            <span className="min-w-0 break-words">{c.name}</span>
                             {c.isRollup && <span className="shrink-0 text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300">Rollup</span>}
                           </div>
                         </div>
                       </td>
                       {shown.map(col => (
-                        <td key={col.key} className={`px-3 py-2 whitespace-nowrap border-t border-slate-800/70 group-hover/row:bg-slate-900 text-${col.align} ${col.kind === 'metric' ? 'font-mono text-xs text-slate-200 tabular-nums' : 'text-xs text-slate-300'}`}>
+                        <td key={col.key} className={`px-3 py-2 border-t border-slate-800/70 group-hover/row:bg-slate-900 text-${col.align} ${col.kind === 'metric' ? 'font-mono text-xs text-slate-200 tabular-nums whitespace-nowrap overflow-hidden text-ellipsis' : 'text-xs text-slate-300 whitespace-normal break-words'}`}>
                           {cell(c, col.key)}
                         </td>
                       ))}
@@ -517,7 +604,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
                     <tr className="text-xs">
                       <td className="sticky left-0 z-10 bg-slate-900 border-t border-slate-700 px-3 py-1.5 pl-6 text-[11px] uppercase tracking-wider text-slate-500">Group total</td>
                       {shown.map(col => (
-                        <td key={col.key} className={`bg-slate-900/60 border-t border-slate-700 px-3 py-1.5 text-${col.align} font-mono text-slate-300 whitespace-nowrap`}>{col.kind === 'metric' ? groupTotal(cs, col.key) : ''}</td>
+                        <td key={col.key} className={`bg-slate-900/60 border-t border-slate-700 px-3 py-1.5 text-${col.align} font-mono text-slate-300 whitespace-nowrap overflow-hidden text-ellipsis`}>{col.kind === 'metric' ? groupTotal(cs, col.key) : ''}</td>
                       ))}
                       <td className="bg-slate-900/60 border-t border-slate-700" />
                     </tr>
@@ -568,7 +655,7 @@ function LaunchDate({ day }: { day: string }) {
     : days < 60 ? `launched ${days} day${days === 1 ? '' : 's'} ago`
     : `launched ${Math.floor(days / 30.44)} months ago`;
   return (
-    <span className="inline-flex items-center gap-1.5" title={ago}>
+    <span className="inline-flex flex-wrap items-center gap-1.5" title={ago}>
       <span className="text-slate-200 tabular-nums">{formatRangeLabel(day, day)}</span>
       {days >= 0 && days < 30 && <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300">New</span>}
       {days < 0 && <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">Upcoming</span>}
@@ -610,14 +697,14 @@ function ChannelBadges({ c, staleMeta, staleGoogle, info }: { c: BoardClient; st
     </span>
   );
   return (
-    <span className="inline-flex gap-1">
+    <span className="inline-flex flex-wrap gap-1">
       {pill(c.hasMeta, 'Meta', staleMeta, c.hasMeta ? `Meta ads${info?.meta ? ` — data through ${info.meta}` : ''}` : 'No Meta ads set up')}
       {pill(c.hasGoogle, 'Google', staleGoogle, c.hasGoogle ? `Google Ads (${c.googleSource === 'api' ? 'live from Google Ads' : 'from the Google sheet tab'})${info?.google && c.googleSource === 'api' ? ` — data through ${info.google}` : ''}` : 'No Google Ads set up')}
     </span>
   );
 }
 
-function ColumnPicker({ columns, setColumns, isAdmin, onClose }: { columns: string[]; setColumns: (c: string[]) => void; isAdmin: boolean; onClose: () => void }) {
+function ColumnPicker({ columns, setColumns, onResetWidths, isAdmin, onClose }: { columns: string[]; setColumns: (c: string[]) => void; onResetWidths: () => void; isAdmin: boolean; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const onDown = (e: MouseEvent) => { if (ref.current && !ref.current.parentElement?.contains(e.target as Node)) onClose(); };
@@ -626,7 +713,8 @@ function ColumnPicker({ columns, setColumns, isAdmin, onClose }: { columns: stri
     window.addEventListener('keydown', onKey);
     return () => { document.removeEventListener('mousedown', onDown); window.removeEventListener('keydown', onKey); };
   }, [onClose]);
-  const toggle = (key: string) => setColumns(columns.includes(key) ? columns.filter(k => k !== key) : BOARD_COLUMNS.map(c => c.key).filter(k => k === key || columns.includes(k)));
+  // A newly shown column goes to the end so a dragged order is kept.
+  const toggle = (key: string) => setColumns(columns.includes(key) ? columns.filter(k => k !== key) : [...columns, key]);
   const section = (title: string, kind: 'config' | 'metric') => (
     <div>
       <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">{title}</p>
@@ -645,10 +733,13 @@ function ColumnPicker({ columns, setColumns, isAdmin, onClose }: { columns: stri
         {section('Numbers', 'metric')}
       </div>
       <div className="flex justify-between mt-3 pt-3 border-t border-slate-800">
-        <button type="button" onClick={() => setColumns(defaultColumns(isAdmin))} className="text-xs text-slate-400 hover:text-white">Reset to default</button>
+        <div className="flex gap-3">
+          <button type="button" onClick={() => setColumns(defaultColumns(isAdmin))} className="text-xs text-slate-400 hover:text-white" title="Default columns in the default order">Reset columns</button>
+          <button type="button" onClick={onResetWidths} className="text-xs text-slate-400 hover:text-white">Reset widths</button>
+        </div>
         <button type="button" onClick={onClose} className="text-xs text-blue-300 hover:text-blue-200">Done</button>
       </div>
-      <p className="text-[11px] text-slate-500 mt-2">Only the numbers you show are loaded. Saved to your login.</p>
+      <p className="text-[11px] text-slate-500 mt-2">Only the numbers you show are loaded. Drag a column header to move it; drag its right edge to resize (double-click the edge to reset). Saved to your login.</p>
     </div>
   );
 }

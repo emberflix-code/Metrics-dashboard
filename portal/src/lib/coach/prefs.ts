@@ -2,7 +2,7 @@
 // range, collapsed groups; admins also their coach filter), stored per user
 // in user_preferences so they follow the coach to any browser.
 import { query } from '../db';
-import { defaultPrefs, sanitizeColumns, sanitizeRevealed, sanitizeSort, GROUP_BY_KEYS, type CoachBoardPrefs } from './columns';
+import { defaultPrefs, sanitizeColumns, sanitizeRevealed, sanitizeSort, sanitizeWidths, GROUP_BY_KEYS, type CoachBoardPrefs } from './columns';
 import { normalizeRangeSpec } from './dateRange';
 
 export const BOARD_PREF_KEY = 'coach_board';
@@ -21,6 +21,7 @@ export async function loadBoardPrefs(userId: string, isAdmin: boolean): Promise<
     coachFilter: isAdmin && typeof v.coachFilter === 'string' ? v.coachFilter : '',
     revealed: sanitizeRevealed(v.revealed),
     sort: sanitizeSort(v.sort),
+    widths: sanitizeWidths(v.widths),
   };
 }
 
@@ -32,6 +33,7 @@ export async function saveBoardPrefs(userId: string, isAdmin: boolean, body: Rec
   if (body.range !== undefined) patch.range = normalizeRangeSpec(body.range);
   if (body.revealed !== undefined) patch.revealed = sanitizeRevealed(body.revealed);
   if (body.sort !== undefined) patch.sort = sanitizeSort(body.sort);
+  if (body.widths !== undefined) patch.widths = sanitizeWidths(body.widths);
   if (Array.isArray(body.collapsed)) patch.collapsed = body.collapsed.filter((x: unknown) => typeof x === 'string').map(x => (x as string).slice(0, 100)).slice(0, 100);
   if (isAdmin && typeof body.coachFilter === 'string') patch.coachFilter = body.coachFilter.slice(0, 100);
   await query(
