@@ -2,7 +2,7 @@
 
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BOARD_COLUMNS, COLUMN_BY_KEY, CHEAP_METRIC_KEYS, CPA_METRIC_KEYS, GROUP_BY_OPTIONS, defaultColumns, type CoachBoardPrefs } from '@/lib/coach/columns';
-import { resolveBoardRange, formatRangeLabel } from '@/lib/coach/dateRange';
+import { resolveBoardRange, formatRangeLabel, boardToday, daysBetween } from '@/lib/coach/dateRange';
 import { groupColorFor } from '@/lib/groupColors';
 import DateRangePicker from './DateRangePicker';
 
@@ -13,6 +13,7 @@ export interface BoardClient {
   marketingType: string;
   offer: string;
   offerDetails: string;
+  launchDate: string;
   coachName: string;
   contactName: string;
   locationAddress: string;
@@ -74,6 +75,7 @@ function configText(c: BoardClient, key: string): string {
     case 'coach': return c.coachName;
     case 'contact': return c.contactName;
     case 'location': return c.locationAddress;
+    case 'launch_date': return c.launchDate;
     case 'leads_source': return c.leadsSource;
     case 'channels': return `${c.hasMeta ? 'a' : 'b'}${c.hasGoogle ? 'a' : 'b'}`;
     case 'data_source': return c.hasMeta ? c.dataSource : '';
@@ -339,6 +341,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
       case 'marketing_type': return c.marketingType || dash;
       case 'coach': return c.coachName || dash;
       case 'contact': return c.contactName || dash;
+      case 'launch_date': return <LaunchDate day={c.launchDate} />;
       case 'location': return <span className="text-slate-400">{c.locationAddress || '—'}</span>;
       case 'leads_source': return <span className="text-[11px] uppercase tracking-wide text-slate-400">{c.leadsSource}</span>;
       case 'channels': return <ChannelBadges c={c} staleMeta={staleMeta} staleGoogle={staleGoogle} info={info} />;
@@ -554,6 +557,22 @@ function SortButton({ label, dir, onClick, align, extra }: { label: string; dir:
       <span>{label}{extra}</span>
       <span className={`text-[9px] ${dir ? 'text-blue-300' : 'text-slate-600'}`}>{dir === 'asc' ? '▲' : dir === 'desc' ? '▼' : '↕'}</span>
     </button>
+  );
+}
+
+// Launch date + how long ago (in US Eastern days, like the date picker).
+function LaunchDate({ day }: { day: string }) {
+  if (!day) return <span className="text-slate-600">—</span>;
+  const days = daysBetween(day, boardToday());
+  const ago = days < 0 ? `launches in ${-days} day${days === -1 ? '' : 's'}`
+    : days < 60 ? `launched ${days} day${days === 1 ? '' : 's'} ago`
+    : `launched ${Math.floor(days / 30.44)} months ago`;
+  return (
+    <span className="inline-flex items-center gap-1.5" title={ago}>
+      <span className="text-slate-200 tabular-nums">{formatRangeLabel(day, day)}</span>
+      {days >= 0 && days < 30 && <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300">New</span>}
+      {days < 0 && <span className="text-[10px] uppercase tracking-wide px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">Upcoming</span>}
+    </span>
   );
 }
 

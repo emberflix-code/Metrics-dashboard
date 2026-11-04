@@ -26,6 +26,7 @@ export const BOARD_COLUMNS: BoardColumn[] = [
   { key: 'channels', label: 'Platform', kind: 'config', cost: 'cheap', align: 'left', help: 'Meta | Google — dimmed when not set up' },
   { key: 'leads_source', label: 'Leads From', kind: 'config', cost: 'cheap', align: 'left', help: 'Where the client dashboard counts leads: Meta, Sheet or GHL' },
   { key: 'contact', label: 'Owner', kind: 'config', cost: 'cheap', align: 'left' },
+  { key: 'launch_date', label: 'Launch Date', kind: 'config', cost: 'cheap', align: 'left', help: 'From the marketing sheet — hover a date to see how long ago it was' },
   { key: 'location', label: 'Location', kind: 'config', cost: 'cheap', align: 'left' },
   { key: 'data_source', label: 'Meta Data', kind: 'config', cost: 'cheap', align: 'center', help: 'Cached = synced daily (fast); Live = fetched from Meta on every load' },
   { key: 'creatives_v3', label: 'Creatives v3', kind: 'config', cost: 'cheap', align: 'center', help: 'Creatives v3 tab switched on for the client' },
@@ -59,7 +60,7 @@ export const GHL_METRIC_KEYS = ['ghl_leads', 'ghl_bookings'];
 export const CPA_METRIC_KEYS = ['won', 'cpa', 'ltv'];
 
 export function defaultColumns(isAdmin: boolean): string[] {
-  return ['offer', ...(isAdmin ? ['coach'] : []), 'channels', 'spend', 'leads', 'cpl', 'g_spend', 'g_leads'];
+  return ['offer', ...(isAdmin ? ['coach'] : []), 'channels', 'launch_date', 'spend', 'leads', 'cpl', 'g_spend', 'g_leads'];
 }
 
 /** Keep known keys only, in the given order, without duplicates. */

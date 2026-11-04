@@ -37,3 +37,6 @@ CREATE INDEX IF NOT EXISTS impersonation_audit_client_idx ON impersonation_audit
 
 -- Marketing sheet "Marketing Offer (Text)" (shown when offer is "Unique Offer ...").
 ALTER TABLE clients ADD COLUMN IF NOT EXISTS offer_details TEXT NOT NULL DEFAULT '';
+
+-- Marketing sheet "Launch Date" (col D).
+ALTER TABLE clients ADD COLUMN IF NOT EXISTS launch_date DATE;

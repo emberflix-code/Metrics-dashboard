@@ -22,6 +22,7 @@ export default async function CoachPage() {
     marketingType: c.marketingType,
     offer: c.offer,
     offerDetails: c.offerDetails,
+    launchDate: c.launchDate,
     coachName: c.coachName,
     contactName: c.contactName,
     locationAddress: c.locationAddress,
