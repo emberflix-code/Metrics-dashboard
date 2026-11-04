@@ -20,8 +20,8 @@ async function requireAdmin() {
 export async function GET() {
   if (!(await requireAdmin())) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   const [coaches, names] = await Promise.all([
-    query<{ id: string; email: string; coach_name: string; created_at: string; client_count: string }>(
-      `SELECT u.id, u.email, u.coach_name, u.created_at,
+    query<{ id: string; email: string; coach_name: string; created_at: string; client_count: string; auto_login_token: string | null }>(
+      `SELECT u.id, u.email, u.coach_name, u.created_at, u.auto_login_token,
               (SELECT COUNT(*) FROM clients c WHERE c.active AND u.coach_name <> '' AND ${COACH_MATCH})::text AS client_count
        FROM users u WHERE u.role = 'coach' ORDER BY u.created_at DESC`
     ),

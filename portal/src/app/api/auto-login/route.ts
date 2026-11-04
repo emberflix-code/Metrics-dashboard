@@ -5,7 +5,7 @@ import { encode } from 'next-auth/jwt';
 interface UserRow {
   id: string;
   email: string;
-  role: 'admin' | 'client' | 'marketer';
+  role: 'admin' | 'client' | 'marketer' | 'coach';
   client_id: string | null;
 }
 
@@ -17,7 +17,7 @@ export async function GET(req: NextRequest) {
     `SELECT u.id, u.email, u.role, cu.client_id
      FROM users u
      LEFT JOIN client_users cu ON cu.user_id = u.id
-     WHERE u.auto_login_token = $1 AND u.role IN ('client', 'admin', 'marketer')
+     WHERE u.auto_login_token = $1 AND u.role IN ('client', 'admin', 'marketer', 'coach')
      LIMIT 1`,
     [token]
   );
@@ -45,7 +45,10 @@ export async function GET(req: NextRequest) {
   const isProd = (process.env.NEXTAUTH_URL || '').startsWith('https://');
   const cookieName = isProd ? '__Secure-next-auth.session-token' : 'next-auth.session-token';
 
-  const res = NextResponse.json({ ok: true });
+  // Each role's home; the auto-login page follows this (clients get the
+  // token appended there so the dashboard's Refresh can re-enter via it).
+  const home = user.role === 'admin' ? '/admin' : user.role === 'marketer' ? '/marketer' : user.role === 'coach' ? '/coach' : '/dashboard';
+  const res = NextResponse.json({ ok: true, redirect: home });
   res.cookies.set(cookieName, jwt, {
     httpOnly: true,
     sameSite: isProd ? 'none' : 'lax',

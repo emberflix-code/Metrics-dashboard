@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from 'react';
 
-interface Coach { id: string; email: string; coach_name: string; created_at: string; client_count: number }
+interface Coach { id: string; email: string; coach_name: string; created_at: string; client_count: number; auto_login_token: string | null }
 
 const inputCls = 'w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500';
 
@@ -67,6 +67,24 @@ export default function CoachesManager() {
     await load();
   }
 
+  // Auto-login link = signs the coach straight into their board (no password),
+  // so treat it like a password: Rotate invalidates the old link.
+  const linkFor = (token: string) => `${window.location.origin}/auto-login?token=${token}`;
+  async function copyLink(c: Coach) {
+    if (!c.auto_login_token) return;
+    await navigator.clipboard.writeText(linkFor(c.auto_login_token)).catch(() => {});
+    flash(`Copied ${c.email}'s auto-login link.`);
+  }
+  async function generateLink(c: Coach) {
+    if (c.auto_login_token && !window.confirm(`Rotate ${c.email}'s auto-login link? The old link stops working.`)) return;
+    const res = await fetch(`/api/admin/coaches/${c.id}/token`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) { setError(data.error || 'Failed to generate link'); return; }
+    await navigator.clipboard.writeText(linkFor(data.token)).catch(() => {});
+    flash(`New auto-login link for ${c.email} copied to the clipboard.`);
+    await load();
+  }
+
   async function remove(c: Coach) {
     if (!window.confirm(`Remove coach login ${c.email}? They will be signed out and unable to log in.`)) return;
     const res = await fetch(`/api/admin/coaches/${c.id}`, { method: 'DELETE' });
@@ -114,17 +132,28 @@ export default function CoachesManager() {
               <th className="text-left px-3 py-2">Email</th>
               <th className="text-left px-3 py-2">Coach name</th>
               <th className="text-right px-3 py-2">Active clients</th>
+              <th className="text-left px-3 py-2">Auto-login link</th>
               <th className="text-right px-3 py-2">Actions</th>
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-800">
-            {list === null && <tr><td colSpan={4} className="px-3 py-3 text-slate-500">Loading…</td></tr>}
-            {list?.length === 0 && <tr><td colSpan={4} className="px-3 py-3 text-slate-500">No coaches yet.</td></tr>}
+            {list === null && <tr><td colSpan={5} className="px-3 py-3 text-slate-500">Loading…</td></tr>}
+            {list?.length === 0 && <tr><td colSpan={5} className="px-3 py-3 text-slate-500">No coaches yet.</td></tr>}
             {list?.map(c => (
               <tr key={c.id} className="align-top">
                 <td className="px-3 py-2 text-white font-mono text-xs">{c.email}</td>
                 <td className="px-3 py-2 text-slate-300 text-xs">{c.coach_name || <span className="text-amber-300">not set</span>}</td>
                 <td className={`px-3 py-2 text-right text-xs font-mono ${c.client_count === 0 ? 'text-amber-300' : 'text-slate-300'}`}>{c.client_count}</td>
+                <td className="px-3 py-2 text-xs whitespace-nowrap">
+                  {c.auto_login_token ? (
+                    <span className="flex items-center gap-2">
+                      <button type="button" onClick={() => copyLink(c)} className="px-2 py-1 rounded-md border border-slate-700 text-slate-200 hover:border-slate-500">Copy link</button>
+                      <button type="button" onClick={() => generateLink(c)} className="text-slate-400 hover:text-white">Rotate</button>
+                    </span>
+                  ) : (
+                    <button type="button" onClick={() => generateLink(c)} className="px-2 py-1 rounded-md bg-blue-600 hover:bg-blue-500 text-white">Generate link</button>
+                  )}
+                </td>
                 <td className="px-3 py-2">
                   {editFor?.id === c.id ? (
                     <div className="flex items-center gap-2 justify-end">
