@@ -80,7 +80,7 @@ function configText(c: BoardClient, key: string): string {
     case 'location': return c.locationAddress;
     case 'launch_date': return c.launchDate;
     case 'leads_source': return c.leadsSource;
-    case 'channels': return `${c.hasMeta ? 'a' : 'b'}${c.hasGoogle ? 'a' : 'b'}`;
+    case 'channels': return `${c.hasMeta ? 'a' : 'b'}${c.hasGoogle ? 'a' : 'b'}`; // set-up only (spend isn't known here)
     case 'data_source': return c.hasMeta ? c.dataSource : '';
     case 'creatives_v3': return c.showCreativesV3 ? '1' : '';
     case 'ghl': return c.hasGhl ? '1' : '';
@@ -165,6 +165,11 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
         if (na !== nb) return na ? -1 : 1;
         if (na && nb && va !== vb) return mul * ((va as number) - (vb as number));
         return a.name.localeCompare(b.name);
+      }
+      if (sortKey === 'channels') {
+        // Spending platforms first: Meta+Google, then one, then set up but idle, then not set up.
+        const score = (c: BoardClient) => { const r = rangeMetrics[c.id]; return ((Number(r?.spend) || 0) > 0 ? 4 : 0) + ((Number(r?.g_spend) || 0) > 0 ? 4 : 0) + (c.hasMeta ? 1 : 0) + (c.hasGoogle ? 1 : 0); };
+        return (mul === 1 ? score(b) - score(a) : score(a) - score(b)) || a.name.localeCompare(b.name);
       }
       const ta = configText(a, sortKey), tb = configText(b, sortKey);
       if (!ta !== !tb) return ta ? -1 : 1;
@@ -358,7 +363,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
       case 'launch_date': return <LaunchDate day={c.launchDate} />;
       case 'location': return <span className="text-slate-400">{c.locationAddress || '—'}</span>;
       case 'leads_source': return <span className="text-[11px] uppercase tracking-wide text-slate-400">{c.leadsSource}</span>;
-      case 'channels': return <ChannelBadges c={c} staleMeta={staleMeta} staleGoogle={staleGoogle} info={info} />;
+      case 'channels': return <ChannelBadges c={c} m={m} staleMeta={staleMeta} staleGoogle={staleGoogle} info={info} />;
       case 'data_source': return c.hasMeta
         ? <span className={`text-[11px] px-1.5 py-0.5 rounded ${c.dataSource === 'cached' ? 'bg-emerald-500/15 text-emerald-300' : 'bg-amber-500/15 text-amber-300'}`}>{c.dataSource === 'cached' ? 'Cached' : 'Live'}</span>
         : <span className="text-slate-700">—</span>;
@@ -736,19 +741,34 @@ function Select({ label, value, onChange, options }: { label: string; value: str
   );
 }
 
-function ChannelBadges({ c, staleMeta, staleGoogle, info }: { c: BoardClient; staleMeta: boolean; staleGoogle: boolean; info?: { meta: string | null; google: string | null } }) {
-  const pill = (on: boolean, label: string, stale: boolean, title: string) => (
-    <span title={title} className={`relative inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium border ${on
-      ? label === 'Meta' ? 'bg-blue-500/15 text-blue-200 border-blue-500/30' : 'bg-emerald-500/15 text-emerald-200 border-emerald-500/30'
-      : 'bg-slate-800/50 text-slate-600 border-slate-700/50'}`}>
-      {label}
-      {on && stale && <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-amber-400" />}
-    </span>
-  );
+// One pill per platform. Spending in the selected dates = solid colour with a
+// green dot; set up but no spend = outline only; not set up = faint, crossed out.
+function ChannelBadges({ c, m, staleMeta, staleGoogle, info }: {
+  c: BoardClient; m?: Metrics; staleMeta: boolean; staleGoogle: boolean; info?: { meta: string | null; google: string | null };
+}) {
+  const pill = (setUp: boolean, spend: number | null | undefined, label: 'Meta' | 'Google', stale: boolean, through: string | null | undefined, src: string) => {
+    const loading = setUp && spend === undefined;
+    const active = setUp && typeof spend === 'number' && spend > 0;
+    const money = typeof spend === 'number' ? '$' + spend.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '';
+    const title = !setUp ? `No ${label} ads set up`
+      : loading ? `${label} ads${src}`
+      : active ? `${label} is active — ${money} spent in these dates${src}${through ? ` (data through ${through})` : ''}`
+      : `${label} is set up but spent nothing in these dates${src}`;
+    const cls = !setUp ? 'border-dashed border-slate-700/60 text-slate-600 line-through decoration-slate-600'
+      : active ? (label === 'Meta' ? 'bg-blue-600 border-blue-500 text-white' : 'bg-emerald-600 border-emerald-500 text-white')
+      : 'border-slate-600 text-slate-400';
+    return (
+      <span title={title} className={`relative inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium border ${cls} ${loading ? 'animate-pulse' : ''}`}>
+        {active && <span className="h-1.5 w-1.5 rounded-full bg-lime-300" />}
+        {label}
+        {setUp && stale && <span className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-amber-400" title="Data may be behind" />}
+      </span>
+    );
+  };
   return (
     <span className="inline-flex flex-wrap gap-1">
-      {pill(c.hasMeta, 'Meta', staleMeta, c.hasMeta ? `Meta ads${info?.meta ? ` — data through ${info.meta}` : ''}` : 'No Meta ads set up')}
-      {pill(c.hasGoogle, 'Google', staleGoogle, c.hasGoogle ? `Google Ads (${c.googleSource === 'api' ? 'live from Google Ads' : 'from the Google sheet tab'})${info?.google && c.googleSource === 'api' ? ` — data through ${info.google}` : ''}` : 'No Google Ads set up')}
+      {pill(c.hasMeta, m?.spend, 'Meta', staleMeta, info?.meta, '')}
+      {pill(c.hasGoogle, m?.g_spend, 'Google', staleGoogle, c.googleSource === 'api' ? info?.google : null, c.googleSource === 'sheet' ? ' (from the Google sheet tab)' : '')}
     </span>
   );
 }

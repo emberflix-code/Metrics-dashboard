@@ -7,7 +7,7 @@ import type { GoogleAdRow, GoogleCampaignPreviewAssets } from '@/lib/googleAds';
 import type { ActiveCreative, ActiveCreativesResult } from '@/lib/coach/activeCreatives';
 import { resolveBoardRange, formatRangeLabel } from '@/lib/coach/dateRange';
 
-// Side drawer: the client's running Meta ads (by creative) and Google ads
+// Pop-up: the client's running Meta ads (by creative) and Google ads
 // (full search-ad previews with numbers for the board's date range).
 
 type Tab = 'meta' | 'google';
@@ -32,11 +32,18 @@ export default function AdsDrawer({ client, range, onClose }: {
     return () => window.removeEventListener('keydown', onKey);
   }, [onClose]);
 
+  // Meta loads right away (it decides whether the Meta tab is shown at all).
   useEffect(() => {
-    if (tab !== 'meta' || meta) return;
+    if (!client.hasMeta || meta) return;
     fetch(`/api/coach/clients/${client.id}/active-creatives`).then(x => x.json()).then(setMeta)
       .catch(e => setMeta({ creatives: [], activeAds: 0, adsWithoutCopy: 0, creativesWithoutThumbnail: 0, copySyncedAt: null, error: String(e) }));
-  }, [tab, meta, client.id]);
+  }, [client.hasMeta, meta, client.id]);
+  // No running Meta ads → show Google only (when the client has Google).
+  const metaRunning = !!meta && !meta.error && !meta.noMeta && meta.creatives.length > 0;
+  const showMetaTab = client.hasMeta && (!meta || !!meta.error || metaRunning || !client.hasGoogle);
+  useEffect(() => {
+    if (tab === 'meta' && !showMetaTab && client.hasGoogle) setTab('google');
+  }, [tab, showMetaTab, client.hasGoogle]);
 
   useEffect(() => {
     if (tab !== 'google' || googleRange === range) return;
@@ -48,8 +55,8 @@ export default function AdsDrawer({ client, range, onClose }: {
 
   if (typeof document === 'undefined') return null;
   return createPortal(
-    <div className="fixed inset-0 z-[250] flex justify-end bg-black/50" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
-      <aside role="dialog" aria-label={`Ads — ${client.name}`} className="h-full w-full max-w-[900px] bg-slate-950 border-l border-slate-800 shadow-2xl flex flex-col">
+    <div className="fixed inset-0 z-[250] flex items-center justify-center bg-black/60 p-4" onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div role="dialog" aria-label={`Ads — ${client.name}`} className="w-full max-w-[1400px] h-[92vh] bg-slate-950 border border-slate-800 rounded-xl shadow-2xl flex flex-col overflow-hidden">
         <div className="flex items-start justify-between gap-3 px-5 pt-4 pb-3 border-b border-slate-800">
           <div className="min-w-0">
             <h2 className="text-base font-semibold text-white truncate">{client.name}</h2>
@@ -59,7 +66,7 @@ export default function AdsDrawer({ client, range, onClose }: {
         </div>
         <div className="px-5 pt-3 flex items-center gap-3 flex-wrap">
           <div className="flex items-center bg-slate-800/60 rounded-lg p-0.5 border border-slate-700">
-            {(['meta', 'google'] as Tab[]).map(t => {
+            {(['meta', 'google'] as Tab[]).filter(t => (t === 'meta' ? showMetaTab : client.hasGoogle)).map(t => {
               const enabled = t === 'meta' ? client.hasMeta : client.hasGoogle;
               return (
                 <button key={t} type="button" disabled={!enabled} onClick={() => setTab(t)}
@@ -79,7 +86,7 @@ export default function AdsDrawer({ client, range, onClose }: {
         <div className="flex-1 overflow-y-auto px-5 py-4 coach-scroll">
           {tab === 'meta' ? <MetaPanel data={meta} /> : <GooglePanel data={google} runningOnly={runningOnly} />}
         </div>
-      </aside>
+      </div>
     </div>,
     document.body,
   );
@@ -123,7 +130,7 @@ function MetaPanel({ data }: { data: MetaResp | null }) {
           {' '}They fill in on the next nightly sync.
         </p>
       )}
-      <div className="grid gap-3 lg:grid-cols-2">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
         {data.creatives.map(c => <MetaCreativeCard key={`${c.accountId}|${c.key}`} c={c} />)}
       </div>
     </div>
