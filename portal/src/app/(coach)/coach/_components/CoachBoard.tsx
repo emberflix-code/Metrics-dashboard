@@ -6,6 +6,8 @@ import { resolveBoardRange, formatRangeLabel, boardToday, daysBetween } from '@/
 import { groupColorFor } from '@/lib/groupColors';
 import DateRangePicker from './DateRangePicker';
 import GlossaryButton from '@/components/GlossaryButton';
+import AdsDrawer from './AdsDrawer';
+import InsightsModal from './InsightsModal';
 
 export interface BoardClient {
   id: string;
@@ -100,6 +102,10 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
   const [revealed, setRevealed] = useState<string[]>(prefs.revealed);
   const [sort, setSort] = useState(prefs.sort);
   const [widths, setWidths] = useState<Record<string, number>>(prefs.widths || {});
+  const [adsClient, setAdsClient] = useState<BoardClient | null>(null);
+  const closeAds = useCallback(() => setAdsClient(null), []);
+  const [insightsClient, setInsightsClient] = useState<BoardClient | null>(null);
+  const closeInsights = useCallback(() => setInsightsClient(null), []);
   const colWidth = useCallback((key: string) => widths[key] ?? defaultColumnWidth(key), [widths]);
   // Header drag (reorder) + edge drag (resize) state.
   const dragKeyRef = useRef<string | null>(null);
@@ -632,7 +638,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
                           {cell(c, col.key)}
                         </td>
                       ))}
-                      <td className="px-3 py-2 border-t border-slate-800/70 group-hover/row:bg-slate-900"><RowActions client={c} /></td>
+                      <td className="px-3 py-2 border-t border-slate-800/70 group-hover/row:bg-slate-900"><RowActions client={c} onAds={() => setAdsClient(c)} onInsights={() => setInsightsClient(c)} /></td>
                     </tr>
                   ))}
                   {open && shown.some(col => col.kind === 'metric') && (
@@ -655,6 +661,8 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
         {shown.some(c => c.cost === 'slow') && <p>Per-row numbers: click the eye on a row. They stay on when you change dates; click a number to hide it again.</p>}
         <p>Summary excludes rollups (their clubs are already counted).</p>
       </div>
+      {adsClient && <AdsDrawer client={adsClient} range={range} onClose={closeAds} />}
+      {insightsClient && <InsightsModal client={insightsClient} range={range} onClose={closeInsights} onOpenDashboard={() => { void openClientDashboard(insightsClient.id); }} />}
       <style>{`@keyframes coachload { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
         .coach-scroll { scrollbar-color: rgb(71 85 105) rgb(15 23 42); }
         .coach-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
@@ -785,7 +793,18 @@ function ColumnPicker({ columns, setColumns, onResetWidths, isAdmin, onClose }: 
   );
 }
 
-function RowActions({ client }: { client: BoardClient }) {
+// View the client's dashboard as the client (audited impersonation); false when it failed.
+async function openClientDashboard(clientId: string): Promise<boolean> {
+  try {
+    const r = await fetch('/api/coach/impersonate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId }) });
+    const j = await r.json();
+    if (!r.ok) { alert(j.error || 'Could not open this dashboard'); return false; }
+    window.location.href = j.redirect || '/dashboard';
+    return true;
+  } catch { return false; }
+}
+
+function RowActions({ client, onAds, onInsights }: { client: BoardClient; onAds: () => void; onInsights: () => void }) {
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'none' | 'error'>('idle');
   const [opening, setOpening] = useState(false);
 
@@ -803,16 +822,25 @@ function RowActions({ client }: { client: BoardClient }) {
 
   async function open() {
     setOpening(true);
-    try {
-      const r = await fetch('/api/coach/impersonate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ clientId: client.id }) });
-      const j = await r.json();
-      if (!r.ok) { alert(j.error || 'Could not open this dashboard'); setOpening(false); return; }
-      window.location.href = j.redirect || '/dashboard';
-    } catch { setOpening(false); }
+    if (!(await openClientDashboard(client.id))) setOpening(false);
   }
 
   return (
     <div className="flex items-center justify-end gap-1.5 whitespace-nowrap">
+      {client.hasMeta && (
+        <button type="button" onClick={onInsights} title="Written analysis of this client's Meta results for the selected dates"
+          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-slate-700 text-slate-300 hover:text-white hover:border-slate-500">
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" d="M4 19h16M7 16V9m5 7V5m5 11v-4" /></svg>
+          Insights
+        </button>
+      )}
+      {(client.hasMeta || client.hasGoogle) && (
+        <button type="button" onClick={onAds} title="See this client's running Meta ads and Google ads"
+          className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border border-slate-700 text-slate-300 hover:text-white hover:border-slate-500">
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2" strokeWidth={2} /><path strokeWidth={2} strokeLinecap="round" d="M7 9h10M7 13h6" /></svg>
+          Ads
+        </button>
+      )}
       <button type="button" onClick={copy} title="Copy the client's auto-login link"
         className={`inline-flex items-center gap-1 text-xs px-2 py-1 rounded-md border ${copyState === 'copied' ? 'border-emerald-500/40 text-emerald-300' : copyState === 'none' || copyState === 'error' ? 'border-amber-500/40 text-amber-300' : 'border-slate-700 text-slate-300 hover:text-white hover:border-slate-500'}`}>
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" strokeWidth={2} /><path strokeWidth={2} d="M5 15V5a2 2 0 012-2h10" /></svg>

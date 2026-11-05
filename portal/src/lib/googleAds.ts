@@ -69,15 +69,37 @@ async function accessToken(): Promise<string> {
 interface GaqlRow {
   customer?: { timeZone?: string };
   campaign?: { id?: string; name?: string; status?: string };
-  adGroup?: { id?: string };
+  adGroup?: { id?: string; name?: string; status?: string };
   adGroupCriterion?: { criterionId?: string; keyword?: { text?: string; matchType?: string } };
   adGroupAdAssetView?: { fieldType?: string };
-  adGroupAd?: { ad?: { finalUrls?: string[] } };
-  asset?: { id?: string; textAsset?: { text?: string } };
+  adGroupAd?: {
+    status?: string;
+    policySummary?: { approvalStatus?: string };
+    ad?: {
+      id?: string; type?: string; finalUrls?: string[];
+      responsiveSearchAd?: { headlines?: AdTextAsset[]; descriptions?: AdTextAsset[]; path1?: string; path2?: string };
+    };
+  };
+  campaignAsset?: { fieldType?: string };
+  asset?: {
+    id?: string; type?: string; finalUrls?: string[];
+    textAsset?: { text?: string };
+    sitelinkAsset?: { linkText?: string; description1?: string; description2?: string };
+    calloutAsset?: { calloutText?: string };
+    imageAsset?: { fullSize?: { url?: string } };
+  };
   conversionAction?: { id?: string; category?: string };
   segments?: { date?: string; conversionActionCategory?: string; conversionAction?: string };
   metrics?: { costMicros?: string; impressions?: string; clicks?: string; allConversions?: number };
 }
+
+interface AdTextAsset { text?: string; pinnedField?: string }
+/** Headline / description as stored: text + pin position ('HEADLINE_1', 'DESCRIPTION_2', ... or ''). */
+export interface GoogleAdText { text: string; pinned: string }
+const adTexts = (a?: AdTextAsset[]): GoogleAdText[] => (a || []).filter(x => x.text).map(x => ({ text: x.text || '', pinned: x.pinnedField || '' }));
+
+// Campaign assets kept for ad previews.
+const PREVIEW_ASSET_FIELDS = ['SITELINK', 'CALLOUT', 'BUSINESS_NAME', 'BUSINESS_LOGO', 'LOGO', 'AD_IMAGE'];
 
 // GAQL search with pagination (page size is fixed server-side at 10,000).
 async function search<T = GaqlRow>(customerId: string, gaql: string): Promise<T[]> {
@@ -142,6 +164,10 @@ export interface GoogleSyncResult {
   keywordRows?: number;
   assetRows?: number;
   campaigns?: number;
+  ads?: number;
+  adDayRows?: number;
+  adSince?: string;
+  campaignAssets?: number;
   skipped?: string;
   error?: string;
 }
@@ -179,7 +205,22 @@ export async function syncGoogleAdsCustomer(rawCustomerId: string): Promise<Goog
     // Offer landing page per campaign (most common across its ads) — the Promo
     // breakdown's fallback when the campaign name carries no offer code.
     const offerVotes = new Map<string, Map<string, number>>();
-    for (const r of await search(customerId, "SELECT campaign.id, ad_group_ad.ad.final_urls FROM ad_group_ad WHERE ad_group_ad.status != 'REMOVED'")) {
+    // Every ad with its text (removed ones too: they can still have spend in the window).
+    const adRows = await search(customerId,
+      `SELECT campaign.id, ad_group.id, ad_group.name, ad_group.status, ad_group_ad.ad.id, ad_group_ad.ad.type, ad_group_ad.status,
+              ad_group_ad.policy_summary.approval_status, ad_group_ad.ad.final_urls,
+              ad_group_ad.ad.responsive_search_ad.headlines, ad_group_ad.ad.responsive_search_ad.descriptions,
+              ad_group_ad.ad.responsive_search_ad.path1, ad_group_ad.ad.responsive_search_ad.path2
+       FROM ad_group_ad`);
+    const ads = adRows.map(r => ({
+      adId: String(r.adGroupAd?.ad?.id ?? ''), campaignId: String(r.campaign?.id ?? ''), adGroupId: String(r.adGroup?.id ?? ''),
+      adGroupName: r.adGroup?.name ?? '', adGroupStatus: r.adGroup?.status ?? '', adType: r.adGroupAd?.ad?.type ?? '',
+      status: r.adGroupAd?.status ?? '', approval: r.adGroupAd?.policySummary?.approvalStatus ?? '',
+      headlines: adTexts(r.adGroupAd?.ad?.responsiveSearchAd?.headlines), descriptions: adTexts(r.adGroupAd?.ad?.responsiveSearchAd?.descriptions),
+      finalUrl: r.adGroupAd?.ad?.finalUrls?.[0] ?? '', path1: r.adGroupAd?.ad?.responsiveSearchAd?.path1 ?? '', path2: r.adGroupAd?.ad?.responsiveSearchAd?.path2 ?? '',
+    })).filter(a => a.adId && a.campaignId && a.adGroupId);
+    for (const r of adRows) {
+      if (r.adGroupAd?.status === 'REMOVED') continue;
       const campaignId = String(r.campaign?.id ?? '');
       for (const url of r.adGroupAd?.ad?.finalUrls || []) {
         const offer = landingOfferOf(url);
@@ -281,6 +322,49 @@ export async function syncGoogleAdsCustomer(rawCustomerId: string): Promise<Goog
     }
     const assetRows = Array.from(assetDays.values()).filter(d => d.text && hasData(d));
 
+    // Ad x day. The table is newer than the account's sync state, so the
+    // first run for an account backfills it from BACKFILL_FLOOR.
+    const [hasAdRows] = await query<{ one: number }>(`SELECT 1 AS one FROM google_ads_ad_daily WHERE customer_id = $1 LIMIT 1`, [customerId]);
+    const adSince = hasAdRows ? since : BACKFILL_FLOOR;
+    const adRange = `segments.date BETWEEN '${adSince}' AND '${until}'`;
+    const adDays = new Map<string, Metrics & { campaignId: string; adGroupId: string; adId: string; date: string }>();
+    const adFor = (r: GaqlRow) => {
+      const campaignId = String(r.campaign?.id ?? ''), adGroupId = String(r.adGroup?.id ?? ''), adId = String(r.adGroupAd?.ad?.id ?? ''), date = r.segments?.date ?? '';
+      if (!campaignId || !adGroupId || !adId || !date) return null;
+      const key = `${adGroupId}|${adId}|${date}`;
+      let d = adDays.get(key);
+      if (!d) { d = { campaignId, adGroupId, adId, date, ...emptyMetrics() }; adDays.set(key, d); }
+      return d;
+    };
+    for (const r of await search(customerId,
+      `SELECT campaign.id, ad_group.id, ad_group_ad.ad.id, segments.date, metrics.cost_micros, metrics.impressions, metrics.clicks
+       FROM ad_group_ad WHERE ${adRange}`)) {
+      const d = adFor(r);
+      if (d) addBase(d, r);
+    }
+    for (const r of await search(customerId,
+      `SELECT campaign.id, ad_group.id, ad_group_ad.ad.id, segments.date, segments.conversion_action_category, metrics.all_conversions
+       FROM ad_group_ad WHERE ${adRange} AND metrics.all_conversions > 0`)) {
+      const col = CONVERSION_COLUMN[r.segments?.conversionActionCategory || ''];
+      const d = col ? adFor(r) : null;
+      if (d && col) d[col] += Number(r.metrics?.allConversions || 0);
+    }
+    const adDayRows = Array.from(adDays.values()).filter(hasData);
+
+    // Campaign assets shown with search ads (current state, replaced each run).
+    const campaignAssets = (await search(customerId,
+      `SELECT campaign.id, campaign_asset.field_type, asset.id, asset.type, asset.final_urls, asset.text_asset.text,
+              asset.sitelink_asset.link_text, asset.sitelink_asset.description1, asset.sitelink_asset.description2,
+              asset.callout_asset.callout_text, asset.image_asset.full_size.url
+       FROM campaign_asset WHERE campaign_asset.status != 'REMOVED'`))
+      .map(r => ({
+        campaignId: String(r.campaign?.id ?? ''), fieldType: r.campaignAsset?.fieldType ?? '', assetId: String(r.asset?.id ?? ''),
+        text: r.asset?.sitelinkAsset?.linkText || r.asset?.calloutAsset?.calloutText || r.asset?.textAsset?.text || '',
+        description1: r.asset?.sitelinkAsset?.description1 ?? '', description2: r.asset?.sitelinkAsset?.description2 ?? '',
+        finalUrl: r.asset?.finalUrls?.[0] ?? '', imageUrl: r.asset?.imageAsset?.fullSize?.url ?? '',
+      }))
+      .filter(a => a.campaignId && a.assetId && PREVIEW_ASSET_FIELDS.includes(a.fieldType));
+
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
@@ -297,6 +381,45 @@ export async function syncGoogleAdsCustomer(rawCustomerId: string): Promise<Goog
       // a campaign that was removed) doesn't leave a stale row behind.
       for (const table of ['google_ads_daily', 'google_ads_keyword_daily', 'google_ads_asset_daily']) {
         await client.query(`DELETE FROM ${table} WHERE customer_id = $1 AND date BETWEEN $2 AND $3`, [customerId, since, until]);
+      }
+      await client.query(`DELETE FROM google_ads_ad_daily WHERE customer_id = $1 AND date BETWEEN $2 AND $3`, [customerId, adSince, until]);
+      for (let i = 0; i < ads.length; i += INSERT_CHUNK) {
+        const chunk = ads.slice(i, i + INSERT_CHUNK);
+        await client.query(
+          `INSERT INTO google_ads_ads (customer_id, ad_id, campaign_id, ad_group_id, ad_group_name, ad_group_status, ad_type, status, approval_status,
+                                       headlines, descriptions, final_url, path1, path2, updated_at)
+           SELECT $1::text, t.ad_id, t.campaign_id, t.ad_group_id, t.ad_group_name, t.ad_group_status, t.ad_type, t.status, t.approval_status,
+                  t.headlines::jsonb, t.descriptions::jsonb, t.final_url, t.path1, t.path2, now()
+           FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[], $13::text[], $14::text[])
+             AS t(ad_id, campaign_id, ad_group_id, ad_group_name, ad_group_status, ad_type, status, approval_status, headlines, descriptions, final_url, path1, path2)
+           ON CONFLICT (customer_id, ad_id) DO UPDATE SET campaign_id = EXCLUDED.campaign_id, ad_group_id = EXCLUDED.ad_group_id,
+             ad_group_name = EXCLUDED.ad_group_name, ad_group_status = EXCLUDED.ad_group_status, ad_type = EXCLUDED.ad_type, status = EXCLUDED.status,
+             approval_status = EXCLUDED.approval_status, headlines = EXCLUDED.headlines, descriptions = EXCLUDED.descriptions,
+             final_url = EXCLUDED.final_url, path1 = EXCLUDED.path1, path2 = EXCLUDED.path2, updated_at = now()`,
+          [customerId, chunk.map(a => a.adId), chunk.map(a => a.campaignId), chunk.map(a => a.adGroupId), chunk.map(a => a.adGroupName),
+            chunk.map(a => a.adGroupStatus), chunk.map(a => a.adType), chunk.map(a => a.status), chunk.map(a => a.approval),
+            chunk.map(a => JSON.stringify(a.headlines)), chunk.map(a => JSON.stringify(a.descriptions)), chunk.map(a => a.finalUrl),
+            chunk.map(a => a.path1), chunk.map(a => a.path2)]
+        );
+      }
+      for (let i = 0; i < adDayRows.length; i += INSERT_CHUNK) {
+        const chunk = adDayRows.slice(i, i + INSERT_CHUNK);
+        await client.query(
+          `INSERT INTO google_ads_ad_daily (customer_id, campaign_id, ad_group_id, ad_id, date, cost, impressions, clicks, leads, joins, bookings)
+           SELECT $1::text, t.* FROM unnest($2::text[], $3::text[], $4::text[], $5::date[], $6::numeric[], $7::bigint[], $8::bigint[], $9::numeric[], $10::numeric[], $11::numeric[]) AS t`,
+          [customerId, chunk.map(r => r.campaignId), chunk.map(r => r.adGroupId), chunk.map(r => r.adId), chunk.map(r => r.date), ...metricArrays(chunk)]
+        );
+      }
+      await client.query(`DELETE FROM google_ads_campaign_assets WHERE customer_id = $1`, [customerId]);
+      if (campaignAssets.length) {
+        await client.query(
+          `INSERT INTO google_ads_campaign_assets (customer_id, campaign_id, field_type, asset_id, text, description1, description2, final_url, image_url, updated_at)
+           SELECT $1::text, t.*, now() FROM unnest($2::text[], $3::text[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[]) AS t
+           ON CONFLICT DO NOTHING`,
+          [customerId, campaignAssets.map(a => a.campaignId), campaignAssets.map(a => a.fieldType), campaignAssets.map(a => a.assetId),
+            campaignAssets.map(a => a.text), campaignAssets.map(a => a.description1), campaignAssets.map(a => a.description2),
+            campaignAssets.map(a => a.finalUrl), campaignAssets.map(a => a.imageUrl)]
+        );
       }
       for (let i = 0; i < rows.length; i += INSERT_CHUNK) {
         const chunk = rows.slice(i, i + INSERT_CHUNK);
@@ -336,7 +459,8 @@ export async function syncGoogleAdsCustomer(rawCustomerId: string): Promise<Goog
     } finally {
       client.release();
     }
-    return { customerId, since, until, rows: rows.length, keywordRows: kwRows.length, assetRows: assetRows.length, campaigns: campaigns.length };
+    return { customerId, since, until, rows: rows.length, keywordRows: kwRows.length, assetRows: assetRows.length, campaigns: campaigns.length,
+      ads: ads.length, adDayRows: adDayRows.length, adSince, campaignAssets: campaignAssets.length };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await query(`UPDATE google_ads_sync_state SET status = 'error', last_error = $2 WHERE customer_id = $1`, [customerId, message.slice(0, 500)]).catch(() => {});
@@ -558,4 +682,97 @@ export async function getGoogleBreakdowns(customerIds: string[], campaignFilter:
     headlines: assets.filter(a => a.field_type === 'HEADLINE').map(r => toRow(r, r.label, campaignOf(r), campaignTypeOf(campaignOf(r)))),
     descriptions: assets.filter(a => a.field_type === 'DESCRIPTION').map(r => toRow(r, r.label, campaignOf(r), campaignTypeOf(campaignOf(r)))),
   };
+}
+
+export interface GoogleAdRow {
+  adId: string;
+  campaign: string;
+  campaignType: string;
+  campaignStatus: string;
+  adGroup: string;
+  status: string;          // ad status: ENABLED / PAUSED / REMOVED
+  adGroupStatus: string;
+  approval: string;
+  adType: string;          // RESPONSIVE_SEARCH_AD, RESPONSIVE_DISPLAY_AD, ...
+  headlines: GoogleAdText[];
+  descriptions: GoogleAdText[];
+  finalUrl: string;
+  path1: string;
+  path2: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  leads: number;
+  joins: number;
+  bookings: number;
+}
+
+export interface GoogleCampaignPreviewAssets {
+  businessName: string;
+  logoUrl: string;
+  sitelinks: { text: string; description1: string; description2: string; finalUrl: string }[];
+  callouts: string[];
+  images: string[];
+}
+
+// Every ad in the client's Google campaigns (google_campaign_filter) with its
+// text and its numbers for since..until — ads with numbers in the range plus
+// ads that are live now — and each campaign's preview assets, keyed by name.
+export async function getGoogleAds(customerIds: string[], campaignFilter: string, since: string, until: string): Promise<{
+  ads: GoogleAdRow[]; assets: Record<string, GoogleCampaignPreviewAssets>;
+}> {
+  const ids = customerIds.map(normalizeCustomerId).filter(Boolean);
+  if (ids.length === 0) return { ads: [], assets: {} };
+  const campaigns = await query<{ customer_id: string; campaign_id: string; campaign_name: string; status: string }>(
+    `SELECT customer_id, campaign_id, campaign_name, status FROM google_ads_campaigns WHERE customer_id = ANY($1)`, [ids]);
+  const matched = campaigns.filter(c => matchesCampaignFilter(c.campaign_name, campaignFilter, c.customer_id));
+  if (matched.length === 0) return { ads: [], assets: {} };
+  const byId = new Map(matched.map(c => [`${c.customer_id}|${c.campaign_id}`, c] as const));
+  const campaignIds = matched.map(c => c.campaign_id);
+
+  const [adRows, sums, assetRows] = await Promise.all([
+    query<{ customer_id: string; ad_id: string; campaign_id: string; ad_group_name: string; ad_group_status: string; ad_type: string; status: string;
+            approval_status: string; headlines: GoogleAdText[]; descriptions: GoogleAdText[]; final_url: string; path1: string; path2: string }>(
+      `SELECT customer_id, ad_id, campaign_id, ad_group_name, ad_group_status, ad_type, status, approval_status, headlines, descriptions, final_url, path1, path2
+       FROM google_ads_ads WHERE customer_id = ANY($1) AND campaign_id = ANY($2)`, [ids, campaignIds]),
+    query<{ customer_id: string; ad_id: string; cost: string; impressions: string; clicks: string; leads: string; joins: string; bookings: string }>(
+      `SELECT customer_id, ad_id, SUM(cost) AS cost, SUM(impressions) AS impressions, SUM(clicks) AS clicks,
+              SUM(leads) AS leads, SUM(joins) AS joins, SUM(bookings) AS bookings
+       FROM google_ads_ad_daily WHERE customer_id = ANY($1) AND campaign_id = ANY($2) AND date BETWEEN $3 AND $4
+       GROUP BY customer_id, ad_id`, [ids, campaignIds, since, until]),
+    query<{ customer_id: string; campaign_id: string; field_type: string; text: string; description1: string; description2: string; final_url: string; image_url: string }>(
+      `SELECT customer_id, campaign_id, field_type, text, description1, description2, final_url, image_url
+       FROM google_ads_campaign_assets WHERE customer_id = ANY($1) AND campaign_id = ANY($2) ORDER BY asset_id`, [ids, campaignIds]),
+  ]);
+  const sumBy = new Map(sums.map(s => [`${s.customer_id}|${s.ad_id}`, s] as const));
+
+  const ads: GoogleAdRow[] = [];
+  for (const a of adRows) {
+    const c = byId.get(`${a.customer_id}|${a.campaign_id}`);
+    if (!c) continue;
+    const s = sumBy.get(`${a.customer_id}|${a.ad_id}`);
+    const liveNow = a.status === 'ENABLED' && a.ad_group_status === 'ENABLED' && c.status === 'ENABLED';
+    if (!s && !liveNow) continue;
+    ads.push({
+      adId: a.ad_id, campaign: c.campaign_name, campaignType: campaignTypeOf(c.campaign_name), campaignStatus: c.status,
+      adGroup: a.ad_group_name, status: a.status, adGroupStatus: a.ad_group_status, approval: a.approval_status, adType: a.ad_type,
+      headlines: a.headlines || [], descriptions: a.descriptions || [], finalUrl: a.final_url, path1: a.path1, path2: a.path2,
+      spend: Number(s?.cost || 0), impressions: Number(s?.impressions || 0), clicks: Number(s?.clicks || 0),
+      leads: Number(s?.leads || 0), joins: Number(s?.joins || 0), bookings: Number(s?.bookings || 0),
+    });
+  }
+  ads.sort((x, y) => y.spend - x.spend || y.impressions - x.impressions);
+
+  const assets: Record<string, GoogleCampaignPreviewAssets> = {};
+  for (const r of assetRows) {
+    const c = byId.get(`${r.customer_id}|${r.campaign_id}`);
+    if (!c) continue;
+    const a = assets[c.campaign_name] ??= { businessName: '', logoUrl: '', sitelinks: [], callouts: [], images: [] };
+    if (r.field_type === 'BUSINESS_NAME' && !a.businessName) a.businessName = r.text;
+    else if ((r.field_type === 'BUSINESS_LOGO' || r.field_type === 'LOGO') && !a.logoUrl) a.logoUrl = r.image_url;
+    else if (r.field_type === 'SITELINK') a.sitelinks.push({ text: r.text, description1: r.description1, description2: r.description2, finalUrl: r.final_url });
+    else if (r.field_type === 'CALLOUT' && r.text) a.callouts.push(r.text);
+    else if (r.field_type === 'AD_IMAGE' && r.image_url) a.images.push(r.image_url);
+  }
+  return { ads, assets };
 }

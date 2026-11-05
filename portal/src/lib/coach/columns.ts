@@ -55,7 +55,7 @@ export const BOARD_COLUMNS: BoardColumn[] = [
 
 // Default column widths (px). 'name' = the Client column, 'actions' = the buttons column.
 const DEFAULT_WIDTHS: Record<string, number> = {
-  name: 280, actions: 190, offer: 260, marketing_type: 150, coach: 170, channels: 140, leads_source: 110,
+  name: 280, actions: 340, offer: 260, marketing_type: 150, coach: 170, channels: 140, leads_source: 110,
   contact: 160, location: 220, launch_date: 150, data_source: 110, creatives_v3: 110, ghl: 100,
   bookings_on: 120, cpa_on: 90, ltv_on: 90,
 };

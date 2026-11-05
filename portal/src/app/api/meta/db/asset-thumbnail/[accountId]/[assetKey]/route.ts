@@ -3,6 +3,8 @@ import { getServerSession } from 'next-auth';
 import { authOptions } from '@/lib/auth';
 import { getClientDbScope } from '@/lib/meta';
 import { query } from '@/lib/db';
+import { getCoachSession } from '@/lib/coachAuth';
+import { loadCoachClients } from '@/lib/coach/scope';
 
 // Serves the actual thumbnail image bytes stored on meta_creative_assets
 // (see 027_creative_asset_bytes.sql) — the Creatives v3 tab's <img src>/
@@ -24,6 +26,13 @@ async function allowedAccountIds(): Promise<string[]> {
   if (session.user.role === 'admin' || session.user.role === 'marketer') {
     const rows = await query<{ account_ids: string[] | null }>(`SELECT account_ids FROM agency_bm_connections`);
     return Array.from(new Set(rows.flatMap(r => r.account_ids || [])));
+  }
+  // Coach (not impersonating): the ad accounts of their own clients only.
+  if (session.user.role === 'coach') {
+    const ctx = await getCoachSession();
+    if (!ctx) throw new Error('Unauthorized');
+    const clients = await loadCoachClients(ctx);
+    return Array.from(new Set(clients.flatMap(c => c.adAccountIds.map(a => a.replace(/^act_/i, '')))));
   }
   return (await getClientDbScope()).accountIds;
 }

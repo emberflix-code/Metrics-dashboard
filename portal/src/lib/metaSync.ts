@@ -1543,6 +1543,19 @@ function deriveAssets(adId: string, creative: AdCreativeResp['creative']): Asset
 async function resolveFullResThumbnail(
   accountId: string, token: string, assetKey: string, currentWidth: number
 ): Promise<string | null> {
+  return resolveFullResThumbnailImpl(accountId, token, assetKey, currentWidth);
+}
+
+/** True when a Meta CDN link's oe= expiry has passed (or is within an hour). Links without one never expire this way. */
+export function metaCdnUrlExpired(url: string, now = Date.now()): boolean {
+  const m = /[?&]oe=([0-9a-f]{6,10})(?:&|$)/i.exec(url);
+  if (!m) return false;
+  return parseInt(m[1], 16) * 1000 < now + 3600_000;
+}
+
+async function resolveFullResThumbnailImpl(
+  accountId: string, token: string, assetKey: string, currentWidth: number
+): Promise<string | null> {
   if (assetKey.startsWith('image:')) {
     const hash = assetKey.slice(6);
     const u = `${GRAPH}/act_${accountId}/adimages?fields=hash,url,width&hashes=${encodeURIComponent(JSON.stringify([hash]))}&access_token=${token}`;
@@ -1578,7 +1591,7 @@ async function resolveFullResThumbnail(
     const feedJson = await (await fetch(`${GRAPH}/${creativeId}?fields=asset_feed_spec&access_token=${token}`)).json() as { asset_feed_spec?: { images?: { hash?: string }[] } };
     const hash = feedJson.asset_feed_spec?.images?.[0]?.hash;
     if (!hash || !/^[a-f0-9]{20,}$/i.test(hash)) return null;
-    return resolveFullResThumbnail(accountId, token, `image:${hash}`, currentWidth);
+    return resolveFullResThumbnailImpl(accountId, token, `image:${hash}`, currentWidth);
   }
   return null;
 }
@@ -2291,7 +2304,16 @@ async function syncCreatives(
          OR a.thumbnail_bytes_fetched_at < now() - interval '${THUMBNAIL_BYTES_STALE_DAYS} days'
          OR a.phash IS NULL
        )
-     ORDER BY COALESCE(s.total_spend, 0) DESC
+     -- Creatives of ads running now first (what the coach board / client
+     -- dashboards are showing today), never-stored before refreshes, then
+     -- by spend. A new account backlog otherwise left running ads blank for weeks.
+     ORDER BY EXISTS (
+                SELECT 1 FROM meta_creative_asset_ad_map m
+                JOIN meta_entities e ON e.account_id = m.account_id AND e.level = 'ad' AND e.entity_id = m.ad_id AND e.effective_status = 'ACTIVE'
+                WHERE m.account_id = a.account_id AND m.asset_key = a.asset_key
+              ) DESC,
+              (a.thumbnail_bytes IS NULL) DESC,
+              COALESCE(s.total_spend, 0) DESC
      LIMIT ${THUMBNAIL_BYTES_BACKFILL_LIMIT}`,
     [accountId]
   );
@@ -2302,8 +2324,20 @@ async function syncCreatives(
       if (Date.now() > thumbnailBytesDeadline) break;
       try {
         let sourceUrl = row.thumbnail;
-        const res = await fetch(sourceUrl);
-        if (!res.ok) continue;
+        // Meta CDN links carry their expiry (oe=<hex unix time>); don't spend
+        // the time budget downloading one that's known dead.
+        let res = metaCdnUrlExpired(sourceUrl) ? null : await fetch(sourceUrl);
+        if (!res || !res.ok) {
+          // Expired / blocked link. Images can be looked up fresh by hash in
+          // this account; a video's fresh link only arrives with the next
+          // breakdown sync (see the preview upsert), so skip it until then.
+          if (!row.asset_key.startsWith('image:')) continue;
+          const fresh = await resolveFullResThumbnail(accountId, token, row.asset_key, 0).catch(() => null);
+          if (!fresh || fresh === sourceUrl) continue;
+          sourceUrl = fresh;
+          res = await fetch(sourceUrl);
+          if (!res.ok) continue;
+        }
         let bytes = Buffer.from(await res.arrayBuffer());
         let contentType = res.headers.get('content-type') || 'image/jpeg';
 
@@ -2547,8 +2581,13 @@ async function syncCreatives(
                   CASE WHEN asset_key LIKE 'video:%' THEN substr(asset_key, 7) END, now()
            FROM unnest($2::text[], $3::text[]) AS t(asset_key, url)
            ON CONFLICT (account_id, asset_key) DO UPDATE SET
-             thumbnail = CASE WHEN meta_creative_assets.thumbnail IS NULL OR meta_creative_assets.thumbnail_fetched_at IS NULL THEN EXCLUDED.thumbnail ELSE meta_creative_assets.thumbnail END,
-             thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL OR meta_creative_assets.thumbnail_fetched_at IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
+             -- Also replace the link while no image bytes are stored yet: Meta CDN
+             -- links expire in ~4 days, and for videos this breakdown row is the
+             -- only source we may read (the video itself can belong to another
+             -- account/Page — /{video_id} returns code 10), so an expired link
+             -- kept here meant the image could never be stored.
+             thumbnail = CASE WHEN meta_creative_assets.thumbnail IS NULL OR meta_creative_assets.thumbnail_fetched_at IS NULL OR meta_creative_assets.thumbnail_bytes IS NULL THEN EXCLUDED.thumbnail ELSE meta_creative_assets.thumbnail END,
+             thumbnail_fetched_at = CASE WHEN meta_creative_assets.thumbnail IS NULL OR meta_creative_assets.thumbnail_fetched_at IS NULL OR meta_creative_assets.thumbnail_bytes IS NULL THEN now() ELSE meta_creative_assets.thumbnail_fetched_at END,
              video_id = COALESCE(meta_creative_assets.video_id, EXCLUDED.video_id),
              updated_at = now()`,
           [accountId, batch.map(([k]) => k), batch.map(([, u]) => u)]
