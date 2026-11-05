@@ -23,7 +23,7 @@ export default function AdsDrawer({ client, range, onClose }: {
   const [meta, setMeta] = useState<MetaResp | null>(null);
   const [google, setGoogle] = useState<GoogleResp | null>(null);
   const [googleRange, setGoogleRange] = useState('');
-  const [runningOnly, setRunningOnly] = useState(false);
+  const [runningOnly, setRunningOnly] = useState(true);
   const r = resolveBoardRange(range) || resolveBoardRange('last_7d')!;
 
   useEffect(() => {

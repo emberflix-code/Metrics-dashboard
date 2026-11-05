@@ -4273,6 +4273,7 @@ let _gbData: Record<GbDataTab, GoogleBreakdownRow[]> | null = null;
 let _gaData: { ads: GoogleAdRow[]; assets: Record<string, GoogleCampaignPreviewAssets> } | null = null;
 let _gaError = '';
 const GA_TOP_N = 10;
+let _gaRunningOnly = true; // Ads tab: only ads running now, unless switched off
 let _gbTab: GoogleBreakdownTab = 'keywords';
 let _gbSort: { col: string; dir: 1 | -1 } = { col: 'leads', dir: -1 };
 let _gbShowAll = false;
@@ -4349,18 +4350,23 @@ function gbTabsHtml(): string {
   }).join('');
 }
 
+const gaIsRunning = (a: GoogleAdRow) => a.status === 'ENABLED' && a.adGroupStatus === 'ENABLED' && a.campaignStatus === 'ENABLED';
 function renderGoogleAdsTab(el: HTMLElement) {
-  const ads = gaVisibleAds();
+  const all = gaVisibleAds();
+  const ads = _gaRunningOnly ? all.filter(gaIsRunning) : all;
   const shown = _gbShowAll ? ads : ads.slice(0, GA_TOP_N);
-  const running = ads.filter(a => a.status === 'ENABLED' && a.adGroupStatus === 'ENABLED' && a.campaignStatus === 'ENABLED').length;
+  const running = all.filter(gaIsRunning).length;
   el.innerHTML = `
     <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
       <div class="flex items-center bg-slate-800/60 rounded-lg p-0.5 border border-slate-700">${gbTabsHtml()}</div>
       ${ads.length > GA_TOP_N ? `<button class="text-xs text-blue-400 hover:text-blue-300" onclick="window._gbToggleAll()">${_gbShowAll ? `Show top ${GA_TOP_N}` : `Show all ${ads.length}`}</button>` : ''}
     </div>
-    <p class="text-[11px] text-slate-500 mb-3">Each ad as it appears on Google, with its numbers for the selected dates (highest spend first). ${running} of ${ads.length} running now. Ads with no spend in these dates are listed only while they are running.</p>
+    <div class="flex items-center justify-between gap-3 flex-wrap mb-3">
+      <p class="text-[11px] text-slate-500">Each ad as it appears on Google, with its numbers for the selected dates (highest spend first). ${running} of ${all.length} running now.</p>
+      <label class="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer"><input type="checkbox" ${_gaRunningOnly ? 'checked' : ''} onchange="window._gaToggleRunning()" class="accent-blue-500"> Running now only</label>
+    </div>
     ${_gaError ? `<div class="text-xs text-red-400 py-6 text-center">Could not load ads: ${esc(_gaError)}</div>`
-      : ads.length === 0 ? '<div class="text-xs text-slate-500 py-6 text-center">No ads for this date range and campaign search.</div>'
+      : ads.length === 0 ? `<div class="text-xs text-slate-500 py-6 text-center">${_gaRunningOnly ? 'No ads running right now. Untick “Running now only” to see ads from these dates.' : 'No ads for this date range and campaign search.'}</div>`
       : `<div class="grid gap-3 xl:grid-cols-2">${shown.map(a => googleAdCardHtml(a, _gaData?.assets[a.campaign])).join('')}</div>`}`;
 }
 
@@ -4755,6 +4761,7 @@ if (typeof window !== 'undefined') {
   (window as any)._gbSetTab = (t: GoogleBreakdownTab) => { _gbTab = t; _gbShowAll = false; renderGoogleBreakdowns(); };
   (window as any)._gbSetSort = (col: string) => { _gbSort = _gbSort.col === col ? { col, dir: (_gbSort.dir === 1 ? -1 : 1) } : { col, dir: (col === 'name' || col === 'campaignType' || ['cpl', 'cpb', 'cpj', 'cpc', 'cpm'].includes(col)) ? 1 : -1 }; renderGoogleBreakdowns(); };
   (window as any)._gbToggleAll = () => { _gbShowAll = !_gbShowAll; renderGoogleBreakdowns(); };
+  (window as any)._gaToggleRunning = () => { _gaRunningOnly = !_gaRunningOnly; _gbShowAll = false; renderGoogleBreakdowns(); };
   (window as any)._refreshKpiCardsForSearch = () => { const data=getFiltered().map(calcMetrics); renderCards(getSelectedTotals(data),_selectedRows.size); _scheduleCreativesV3SearchRender(); };
   (window as any)._handleSelectAll = (checked: boolean) => { const data=getFiltered(); if (checked) data.forEach(c=>_selectedRows.add(c.id||c.name)); else _selectedRows.clear(); renderTable(); };
   (window as any)._clearDrilldown = () => { _drilldownParentIds.clear(); _drilldownParentLevel=null; _selectedRows.clear(); renderTable(); };
