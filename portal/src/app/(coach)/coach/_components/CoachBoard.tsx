@@ -459,6 +459,33 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
   );
   const tableWidth = colWidth('name') + shown.reduce((s, c) => s + colWidth(c.key), 0) + colWidth('actions');
 
+  // ── horizontal scrolling: a second scrollbar above the table (synced with the
+  // table box) + the box sized to the window so its own scrollbar is always on screen ──
+  const boxRef = useRef<HTMLDivElement>(null);
+  const topBarRef = useRef<HTMLDivElement>(null);
+  const [boxMaxH, setBoxMaxH] = useState<number | null>(null);
+  const [hOverflow, setHOverflow] = useState(false);
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const measure = () => {
+      const top = box.getBoundingClientRect().top + window.scrollY;
+      setBoxMaxH(Math.max(320, Math.round(window.innerHeight - top - 16)));
+      setHOverflow(box.scrollWidth > box.clientWidth + 1);
+    };
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(box);
+    window.addEventListener('resize', measure);
+    return () => { ro.disconnect(); window.removeEventListener('resize', measure); };
+  }, [tableWidth, hOverflow]);
+  const syncScroll = (from: 'box' | 'bar') => {
+    const box = boxRef.current, bar = topBarRef.current;
+    if (!box || !bar) return;
+    if (from === 'box') { if (bar.scrollLeft !== box.scrollLeft) bar.scrollLeft = box.scrollLeft; }
+    else if (box.scrollLeft !== bar.scrollLeft) box.scrollLeft = bar.scrollLeft;
+  };
+
   const colSpan = shown.length + 2;
   const anyLoading = loadingKeys.size > 0 || slowBusy.size > 0;
   const shownRevealed = revealed.filter(r => shownSlowKinds.has(r.split(':')[0] as SlowKind) && visible.some(c => c.id === r.split(':')[1])).length;
@@ -526,7 +553,13 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
 
       {/* The table scrolls inside its own box (both ways) so the header row and
           the Client column stay pinned while scrolling. */}
-      <div className="relative border border-slate-800 rounded-xl overflow-auto max-h-[calc(100vh-250px)] bg-slate-950">
+      {hOverflow && (
+        <div ref={topBarRef} onScroll={() => syncScroll('bar')} className="coach-scroll overflow-x-auto overflow-y-hidden -mb-2" title="Scroll the table sideways">
+          <div style={{ width: tableWidth, height: 1 }} />
+        </div>
+      )}
+      <div ref={boxRef} onScroll={() => syncScroll('box')} style={boxMaxH ? { maxHeight: boxMaxH } : undefined}
+        className="coach-scroll relative border border-slate-800 rounded-xl overflow-auto max-h-[calc(100vh-250px)] bg-slate-950">
         {anyLoading && <div className="sticky top-0 left-0 z-40 h-0.5 w-full overflow-hidden"><div className="h-full w-1/3 bg-blue-500 animate-[coachload_1.2s_ease-in-out_infinite]" /></div>}
         <table className="table-fixed text-sm border-separate border-spacing-0" style={{ width: tableWidth }}>
           <colgroup>
@@ -622,7 +655,13 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
         {shown.some(c => c.cost === 'slow') && <p>Per-row numbers: click the eye on a row. They stay on when you change dates; click a number to hide it again.</p>}
         <p>Summary excludes rollups (their clubs are already counted).</p>
       </div>
-      <style>{`@keyframes coachload { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }`}</style>
+      <style>{`@keyframes coachload { 0% { transform: translateX(-100%); } 100% { transform: translateX(300%); } }
+        .coach-scroll { scrollbar-color: rgb(71 85 105) rgb(15 23 42); }
+        .coach-scroll::-webkit-scrollbar { height: 12px; width: 12px; }
+        .coach-scroll::-webkit-scrollbar-track { background: rgb(15 23 42); border-radius: 8px; }
+        .coach-scroll::-webkit-scrollbar-thumb { background: rgb(71 85 105); border-radius: 8px; border: 2px solid rgb(15 23 42); }
+        .coach-scroll::-webkit-scrollbar-thumb:hover { background: rgb(100 116 139); }
+        .coach-scroll::-webkit-scrollbar-corner { background: transparent; }`}</style>
     </div>
   );
 }
