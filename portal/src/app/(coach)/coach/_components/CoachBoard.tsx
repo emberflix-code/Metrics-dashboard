@@ -5,6 +5,7 @@ import { BOARD_COLUMNS, COLUMN_BY_KEY, CHEAP_METRIC_KEYS, CPA_METRIC_KEYS, GROUP
 import { resolveBoardRange, formatRangeLabel, boardToday, daysBetween } from '@/lib/coach/dateRange';
 import { groupColorFor } from '@/lib/groupColors';
 import DateRangePicker from './DateRangePicker';
+import GlossaryButton from '@/components/GlossaryButton';
 
 export interface BoardClient {
   id: string;
@@ -503,6 +504,7 @@ export default function CoachBoard({ clients, prefs, isAdmin, coachNames }: {
         {sort && (
           <button type="button" onClick={() => setSort('')} className="h-9 text-sm text-slate-400 hover:text-white rounded-lg px-2">Clear sort</button>
         )}
+        <GlossaryButton audience="coach" className="h-9 inline-flex items-center gap-1.5 text-sm text-slate-300 hover:text-white border border-slate-700 hover:border-slate-500 rounded-lg px-3" />
         <div className="ml-auto text-xs text-slate-500 text-right leading-snug">
           <div>{formatRangeLabel(resolved.since, resolved.until)}</div>
           {info?.meta && <div className={staleMeta ? 'text-amber-300/80' : ''}>Meta data through {info.meta}{info.google ? ` · Google through ${info.google}` : ''}</div>}

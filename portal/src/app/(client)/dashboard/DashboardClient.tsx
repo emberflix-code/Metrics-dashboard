@@ -5,6 +5,7 @@ import { useEffect, useState } from 'react';
 import Script from 'next/script';
 import { signOut } from 'next-auth/react';
 import { ChangePasswordButton } from '@/components/ChangePasswordButton';
+import GlossaryButton from '@/components/GlossaryButton';
 import type { MetaKpiSheetRow } from '@/lib/metaKpiSheet';
 
 declare const Chart: any;
@@ -5674,6 +5675,8 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                     <i data-lucide="presentation" className="w-3 h-3"></i><span>GMN Marketing Report</span>
                   </a>
                 )}
+                {/* Abbreviations help */}
+                <GlossaryButton audience="client" />
                 {/* Export */}
                 <div className="relative">
                   <button data-export-toggle onClick={() => document.getElementById('export-menu')?.classList.toggle('hidden')} className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">
