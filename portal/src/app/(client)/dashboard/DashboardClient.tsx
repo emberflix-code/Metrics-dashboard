@@ -4367,7 +4367,7 @@ function renderGoogleAdsTab(el: HTMLElement) {
     </div>
     ${_gaError ? `<div class="text-xs text-red-400 py-6 text-center">Could not load ads: ${esc(_gaError)}</div>`
       : ads.length === 0 ? `<div class="text-xs text-slate-500 py-6 text-center">${_gaRunningOnly ? 'No ads running right now. Untick “Running now only” to see ads from these dates.' : 'No ads for this date range and campaign search.'}</div>`
-      : `<div class="grid gap-3 xl:grid-cols-2">${shown.map(a => googleAdCardHtml(a, _gaData?.assets[a.campaign])).join('')}</div>`}`;
+      : `<div class="grid gap-3">${shown.map(a => googleAdCardHtml(a, _gaData?.assets[a.campaign])).join('')}</div>`}`;
 }
 
 function renderGoogleBreakdowns() {
