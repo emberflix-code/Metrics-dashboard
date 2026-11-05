@@ -5676,7 +5676,7 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
                   </a>
                 )}
                 {/* Abbreviations help */}
-                <GlossaryButton audience="client" />
+                <GlossaryButton audience="client" onlyOnPage />
                 {/* Export */}
                 <div className="relative">
                   <button data-export-toggle onClick={() => document.getElementById('export-menu')?.classList.toggle('hidden')} className="text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-2">

@@ -4,11 +4,34 @@ import { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { glossaryFor } from '@/lib/glossary';
 
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/** True when the term is visible on the page as a whole word (plural "s" allowed, any case —
+ *  table headers are shown in CSS uppercase). */
+function termOnPage(term: string, text: string): boolean {
+  return new RegExp(`(^|[^A-Za-z0-9])${escapeRe(term)}s?(?=[^A-Za-z0-9]|$)`, 'i').test(text);
+}
+
 // "?" button that opens a searchable list of the abbreviations used on the dashboard.
-export default function GlossaryButton({ audience, className }: { audience: 'client' | 'coach'; className?: string }) {
+// onlyOnPage: list only the terms visible on the page when it's opened (client dashboards).
+export default function GlossaryButton({ audience, className, onlyOnPage = false }: { audience: 'client' | 'coach'; className?: string; onlyOnPage?: boolean }) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState('');
-  const sections = useMemo(() => glossaryFor(audience), [audience]);
+  const [pageText, setPageText] = useState<string | null>(null);
+  const sections = useMemo(() => {
+    const all = glossaryFor(audience);
+    if (!onlyOnPage || pageText === null) return all;
+    return all
+      .map(s => ({ ...s, entries: s.entries.filter(e => termOnPage(e.term, pageText)) }))
+      .filter(s => s.entries.length > 0);
+  }, [audience, onlyOnPage, pageText]);
+
+  function openPopup() {
+    setQ('');
+    // Read what's on screen before the pop-up itself is added (innerText = visible text only).
+    if (onlyOnPage) setPageText(document.body.innerText || '');
+    setOpen(true);
+  }
 
   useEffect(() => {
     if (!open) return;
@@ -24,7 +47,7 @@ export default function GlossaryButton({ audience, className }: { audience: 'cli
 
   return (
     <>
-      <button type="button" onClick={() => { setQ(''); setOpen(true); }} title="What do the abbreviations mean?" aria-label="Abbreviations"
+      <button type="button" onClick={openPopup} title="What do the abbreviations mean?" aria-label="Abbreviations"
         className={className || 'text-xs bg-slate-800/50 hover:bg-slate-800 text-slate-300 border border-slate-600 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5'}>
         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="12" cy="12" r="9" strokeWidth={2} />
@@ -45,7 +68,12 @@ export default function GlossaryButton({ audience, className }: { audience: 'cli
                 className="w-full h-9 bg-slate-900 border border-slate-700 rounded-lg px-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-blue-500" />
             </div>
             <div className="overflow-y-auto px-5 py-3 space-y-5">
-              {shown.length === 0 && <p className="text-sm text-slate-500 py-6 text-center">Nothing matches “{q}”.</p>}
+              {shown.length === 0 && (
+                <p className="text-sm text-slate-500 py-6 text-center">
+                  {term ? <>Nothing matches “{q}”.</> : 'No abbreviations on this page yet. Open it again once the numbers have loaded.'}
+                </p>
+              )}
+              {onlyOnPage && shown.length > 0 && !term && <p className="text-[11px] text-slate-500 -mt-1">Abbreviations shown on this page.</p>}
               {shown.map(s => (
                 <div key={s.title}>
                   <p className="text-[10px] uppercase tracking-wider text-slate-500 mb-1.5">{s.title}</p>
