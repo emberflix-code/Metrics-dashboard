@@ -173,6 +173,31 @@ export async function syncChatgptAdsClient(clientId: string): Promise<{ accountI
           r.ad_name || '', r.impressions || 0, r.clicks || 0, Number(r.spend) || 0, r.conversions || 0]);
     }
 
+    // 2b) Campaign + ad-group daily numbers at their own level (Ads Manager's
+    //     totals; summing ad rows can be cents off). Full history the first time.
+    const [{ n: levelRowCount }] = await query<{ n: string }>(`SELECT count(*)::text AS n FROM chatgpt_ads_level_daily WHERE account_id = $1`, [accountId]);
+    const levelRange = JSON.stringify({ type: 'date_range', since: Number(levelRowCount) > 0 ? since : floor, until });
+    for (const level of ['campaign', 'ad_group'] as const) {
+      const lf = level === 'campaign'
+        ? ['campaign_id', 'campaign_name', 'readable_time', 'impressions', 'clicks', 'spend', 'conversions']
+        : ['ad_group_id', 'ad_group_name', 'campaign_id', 'campaign_name', 'readable_time', 'impressions', 'clicks', 'spend', 'conversions'];
+      const lrows = await listAll<InsightRow>(key, `/ad_account/insights?aggregation_level=${level}&time_granularity=daily&limit=2000`
+        + `&time_ranges[]=${encodeURIComponent(levelRange)}` + lf.map(f => `&fields[]=${f}`).join(''));
+      for (const r of lrows) {
+        const id = level === 'campaign' ? r.campaign_id : r.ad_group_id;
+        if (!id || !r.readable_time) continue;
+        await query(
+          `INSERT INTO chatgpt_ads_level_daily (account_id, level, entity_id, date, name, campaign_id, campaign_name, impressions, clicks, spend, conversions, synced_at)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+           ON CONFLICT (account_id, level, entity_id, date) DO UPDATE SET
+             name = EXCLUDED.name, campaign_id = EXCLUDED.campaign_id, campaign_name = EXCLUDED.campaign_name,
+             impressions = EXCLUDED.impressions, clicks = EXCLUDED.clicks, spend = EXCLUDED.spend,
+             conversions = EXCLUDED.conversions, synced_at = now()`,
+          [accountId, level, id, r.readable_time.slice(0, 10), (level === 'campaign' ? r.campaign_name : r.ad_group_name) || '',
+            r.campaign_id || '', r.campaign_name || '', r.impressions || 0, r.clicks || 0, Number(r.spend) || 0, r.conversions || 0]);
+      }
+    }
+
     // 3) Creative images not stored yet (new ads, or the image file changed)
     let imagesStored = 0;
     const missing = await query<{ id: string }>(
@@ -197,8 +222,24 @@ export async function getChatgptAdsClientIds(): Promise<string[]> {
   return (await query<{ id: string }>(`SELECT id FROM clients WHERE chatgpt_ads_key_enc <> ''`)).map(r => r.id);
 }
 
-/** All cached ad-level daily rows + entities for one account, and how far the cache reaches. */
-export async function getChatgptDashboardData(accountId: string): Promise<{ rows: ChatgptAdDailyRow[]; entities: ChatgptEntity[]; syncedThrough: string | null; timeZone: string | null }> {
+export interface ChatgptLevelDailyRow {
+  level: 'campaign' | 'ad_group';
+  date: string;
+  id: string;
+  name: string;
+  campaignId: string;
+  campaignName: string;
+  impressions: number;
+  clicks: number;
+  spend: number;
+  conversions: number;
+}
+
+/** All cached daily rows (ad level + campaign / ad-group level) + entities for one account, and how far the cache reaches. */
+export async function getChatgptDashboardData(accountId: string): Promise<{ rows: ChatgptAdDailyRow[]; levelRows: ChatgptLevelDailyRow[]; entities: ChatgptEntity[]; syncedThrough: string | null; timeZone: string | null }> {
+  const lrows = await query<{ level: ChatgptLevelDailyRow['level']; date: string; entity_id: string; name: string; campaign_id: string; campaign_name: string; impressions: string; clicks: string; spend: string; conversions: string }>(
+    `SELECT level, date::text, entity_id, name, campaign_id, campaign_name, impressions::text, clicks::text, spend::text, conversions::text
+     FROM chatgpt_ads_level_daily WHERE account_id = $1 ORDER BY date`, [accountId]);
   const rows = await query<{ date: string; ad_id: string; ad_name: string; ad_group_id: string; ad_group_name: string; campaign_id: string; campaign_name: string; impressions: string; clicks: string; spend: string; conversions: string }>(
     `SELECT date::text, ad_id, ad_name, ad_group_id, ad_group_name, campaign_id, campaign_name,
             impressions::text, clicks::text, spend::text, conversions::text
@@ -213,6 +254,10 @@ export async function getChatgptDashboardData(accountId: string): Promise<{ rows
     rows: rows.map(r => ({
       date: r.date, adId: r.ad_id, adName: r.ad_name, adGroupId: r.ad_group_id, adGroupName: r.ad_group_name,
       campaignId: r.campaign_id, campaignName: r.campaign_name,
+      impressions: Number(r.impressions), clicks: Number(r.clicks), spend: Number(r.spend), conversions: Number(r.conversions),
+    })),
+    levelRows: lrows.map(r => ({
+      level: r.level, date: r.date, id: r.entity_id, name: r.name, campaignId: r.campaign_id, campaignName: r.campaign_name,
       impressions: Number(r.impressions), clicks: Number(r.clicks), spend: Number(r.spend), conversions: Number(r.conversions),
     })),
     entities: ents.map(e => ({

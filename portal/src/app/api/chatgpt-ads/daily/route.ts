@@ -17,7 +17,7 @@ export async function GET() {
      WHERE cu.user_id = $1 LIMIT 1`,
     [session.user.id]
   );
-  if (!client?.has_key || !client.chatgpt_ads_account_id) return NextResponse.json({ rows: [], entities: [], syncedThrough: null, timeZone: null });
+  if (!client?.has_key || !client.chatgpt_ads_account_id) return NextResponse.json({ rows: [], levelRows: [], entities: [], syncedThrough: null, timeZone: null });
 
   try {
     return NextResponse.json(await getChatgptDashboardData(client.chatgpt_ads_account_id));

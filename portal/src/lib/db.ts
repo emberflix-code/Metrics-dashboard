@@ -827,6 +827,23 @@ pool.query(`CREATE TABLE IF NOT EXISTS chatgpt_ads_ad_daily (
   synced_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (account_id, ad_id, date)
 )`).catch(() => {});
+// Campaign / ad-group daily numbers from OpenAI at that level (migration 041):
+// summing ad rows can be cents off Ads Manager, so cards + those tabs use these.
+pool.query(`CREATE TABLE IF NOT EXISTS chatgpt_ads_level_daily (
+  account_id     TEXT NOT NULL,
+  level          TEXT NOT NULL,
+  entity_id      TEXT NOT NULL,
+  date           DATE NOT NULL,
+  name           TEXT NOT NULL DEFAULT '',
+  campaign_id    TEXT NOT NULL DEFAULT '',
+  campaign_name  TEXT NOT NULL DEFAULT '',
+  impressions    BIGINT NOT NULL DEFAULT 0,
+  clicks         BIGINT NOT NULL DEFAULT 0,
+  spend          NUMERIC(16,6) NOT NULL DEFAULT 0,
+  conversions    NUMERIC(16,6) NOT NULL DEFAULT 0,
+  synced_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (account_id, level, entity_id, date)
+)`).catch(() => {});
 pool.query(`CREATE TABLE IF NOT EXISTS chatgpt_ads_sync_state (
   account_id          TEXT PRIMARY KEY,
   account_name        TEXT NOT NULL DEFAULT '',

@@ -6,13 +6,19 @@
 // Cache only: /api/chatgpt-ads/daily returns every synced ad-level daily row +
 // the entities; date range / delivery / search are applied here. Leads = the
 // conversions OpenAI attributes from the account's pixel. Kept separate from
-// the Meta / Google totals.
+// the Meta / Google totals. KPI cards and the Campaigns / Ad Groups tabs use
+// OpenAI's own campaign / ad-group numbers (summing ads can be cents off Ads
+// Manager); Ads and Creatives use the ad-level rows.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import Script from 'next/script';
 import GlossaryButton from '@/components/GlossaryButton';
 
 interface Row {
   date: string; adId: string; adName: string; adGroupId: string; adGroupName: string; campaignId: string; campaignName: string;
+  impressions: number; clicks: number; spend: number; conversions: number;
+}
+interface LevelRow {
+  level: 'campaign' | 'ad_group'; date: string; id: string; name: string; campaignId: string; campaignName: string;
   impressions: number; clicks: number; spend: number; conversions: number;
 }
 interface Entity {
@@ -64,6 +70,16 @@ function totals(rows: Row[]): Totals {
     cpm: impressions ? (spend / impressions) * 1000 : null,
     cpl: leads ? spend / leads : null,
   };
+}
+
+/** "↑12.34%" vs the previous period, Meta-dashboard colours (lowerIsBetter for cost metrics). */
+function Delta({ curr, prev, lowerIsBetter = false }: { curr: number | null; prev: number | null | undefined; lowerIsBetter?: boolean }) {
+  if (curr === null || prev === null || prev === undefined || prev === 0) return null;
+  const pct = ((curr - prev) / Math.abs(prev)) * 100;
+  if (Math.abs(pct) < 0.005) return <span className="delta-neutral font-mono">—</span>;
+  const up = pct > 0; const good = lowerIsBetter ? !up : up;
+  const cls = good ? (up ? 'delta-up-good' : 'delta-down-good') : (up ? 'delta-up-bad' : 'delta-down-bad');
+  return <span className={`${cls} font-mono`}>{up ? '↑' : '↓'}{Math.abs(pct).toFixed(2)}%</span>;
 }
 
 // ── icons (lucide paths, inline so React owns the DOM) ────────────────────
@@ -122,6 +138,7 @@ const COLS: { key: SortKey; label: string; right?: boolean }[] = [
 export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: Props) {
   const [all, setAll] = useState<Row[] | null>(null);
   const [entities, setEntities] = useState<Entity[]>([]);
+  const [levelRows, setLevelRows] = useState<LevelRow[]>([]);
   const [syncedThrough, setSyncedThrough] = useState<string | null>(null);
   const [timeZone, setTimeZone] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -142,7 +159,7 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
       .then(r => r.json())
       .then(j => {
         if (j.error) throw new Error(j.error);
-        setAll(j.rows || []); setEntities(j.entities || []); setSyncedThrough(j.syncedThrough); setTimeZone(j.timeZone);
+        setAll(j.rows || []); setLevelRows(j.levelRows || []); setEntities(j.entities || []); setSyncedThrough(j.syncedThrough); setTimeZone(j.timeZone);
       })
       .catch(e => setError(e instanceof Error ? e.message : String(e)));
   }, []);
@@ -160,27 +177,59 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
   const statusOf = (id: string) => (entById.get(id)?.status || '').toLowerCase();
   const terms = search.toLowerCase().split(/[,\s]+/).filter(Boolean);
 
-  // Rows in the date range, narrowed by delivery (of the row's entity at the
-  // current tab's level) and by the campaign-name search.
-  const inRange = useMemo(() => (all || []).filter(r => r.date >= since && r.date <= until), [all, since, until]);
-  const filtered = useMemo(() => inRange.filter(r => {
-    if (terms.length && !terms.every(t => r.campaignName.toLowerCase().includes(t))) return false;
+  // Campaign / ad-group rows from OpenAI at that level, in the ad-row shape so
+  // one filter/total path serves every level. Falls back to the ad rows when a
+  // level hasn't been synced yet.
+  const rowsByLevel = useMemo(() => {
+    const camp: Row[] = [], ag: Row[] = [];
+    for (const r of levelRows) {
+      const base = { date: r.date, adId: '', adName: '', impressions: r.impressions, clicks: r.clicks, spend: r.spend, conversions: r.conversions, campaignId: r.campaignId, campaignName: r.campaignName };
+      if (r.level === 'campaign') camp.push({ ...base, adGroupId: '', adGroupName: '', campaignId: r.id, campaignName: r.name });
+      else ag.push({ ...base, adGroupId: r.id, adGroupName: r.name });
+    }
+    const ads = all || [];
+    return { campaign: camp.length ? camp : ads, ad_group: ag.length ? ag : ads, ad: ads } as Record<Level, Row[]>;
+  }, [levelRows, all]);
+
+  // Rows of one level in [from, to], narrowed by the campaign-name search and
+  // by the delivery status of that level's entity.
+  const pick = (level: Level, from: string, to: string) => rowsByLevel[level].filter(r => {
+    if (r.date < from || r.date > to) return false;
+    if (terms.length && !terms.every(x => r.campaignName.toLowerCase().includes(x))) return false;
     if (delivery !== 'all') {
-      const id = tab === 'ad_group' ? r.adGroupId : tab === 'campaign' ? r.campaignId : r.adId;
+      const id = level === 'ad_group' ? r.adGroupId : level === 'campaign' ? r.campaignId : r.adId;
       if (statusOf(id) !== delivery) return false;
     }
     return true;
+  });
+  const tableLevel: Level = tab === 'creatives' ? 'ad' : tab;
+  // Cards + chart: Ads Manager's campaign totals, unless a delivery filter
+  // needs the current tab's own level.
+  const cardLevel: Level = delivery === 'all' ? 'campaign' : tableLevel;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [inRange, delivery, search, tab, entById]);
-  const t = totals(filtered);
+  const filtered = useMemo(() => pick(tableLevel, since, until), [rowsByLevel, tableLevel, since, until, delivery, search, entById]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const cardRows = useMemo(() => pick(cardLevel, since, until), [rowsByLevel, cardLevel, since, until, delivery, search, entById]);
+  const t = totals(cardRows);
+
+  // Previous period of the same length, right before the selected range.
+  const [prevSince, prevUntil] = useMemo<[string, string]>(() => {
+    if (!since || !until || preset === 'max') return ['', ''];
+    const days = Math.round((Date.parse(until) - Date.parse(since)) / 86400000) + 1;
+    const pu = addDays(since, -1);
+    return [addDays(pu, -(days - 1)), pu];
+  }, [since, until, preset]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const prevRows = useMemo(() => (prevSince ? pick(cardLevel, prevSince, prevUntil) : []), [rowsByLevel, cardLevel, prevSince, prevUntil, delivery, search, entById]);
+  const p = prevRows.length ? totals(prevRows) : null;
 
   // Table rows for the current level
   const tableRows = useMemo(() => {
-    const level: Level = tab === 'creatives' ? 'ad' : tab;
+    const level = tableLevel;
     const groups = new Map<string, Row[]>();
     for (const r of filtered) {
       const id = level === 'campaign' ? r.campaignId : level === 'ad_group' ? r.adGroupId : r.adId;
-      const a = groups.get(id) ?? []; a.push(r); groups.set(id, a);
+      const g = groups.get(id) ?? []; g.push(r); groups.set(id, g);
     }
     const out = Array.from(groups.entries()).map(([id, rs]) => {
       const last = rs[rs.length - 1];
@@ -191,24 +240,29 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
     const v = (x: (typeof out)[number]) => (sort.key === 'name' ? x.name.toLowerCase() : sort.key === 'leads' ? x.leads : (x[sort.key] ?? -1));
     return out.sort((a, b) => (v(a) < v(b) ? -1 : v(a) > v(b) ? 1 : 0) * sort.dir);
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filtered, tab, sort, entById]);
+  }, [filtered, tableLevel, sort, entById]);
+  const tableTotals = totals(filtered);
 
   const byDay = useMemo(() => {
     const m = new Map<string, Row[]>();
     for (let d = since; d && d <= until; d = addDays(d, 1)) m.set(d, []);
-    for (const r of filtered) m.get(r.date)?.push(r);
+    for (const r of cardRows) m.get(r.date)?.push(r);
     return Array.from(m.entries()).map(([date, rs]) => ({ date, ...totals(rs) }));
-  }, [filtered, since, until]);
+  }, [cardRows, since, until]);
+
+  // Ad-level rows for the Creatives tab (the delivery filter applies to the ad)
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const adRows = useMemo(() => pick('ad', since, until), [rowsByLevel, since, until, delivery, search, entById]);
 
   // Creatives: every ad with delivery in the range (Creatives v3 style)
   const creatives = useMemo(() => {
     const groups = new Map<string, Row[]>();
-    for (const r of filtered) { const a = groups.get(r.adId) ?? []; a.push(r); groups.set(r.adId, a); }
+    for (const r of adRows) { const a = groups.get(r.adId) ?? []; a.push(r); groups.set(r.adId, a); }
     return Array.from(groups.entries())
       .map(([id, rs]) => ({ id, ent: entById.get(id), last: rs[rs.length - 1], ...totals(rs) }))
       .filter(c => c.impressions > 0 || c.spend > 0)
       .sort((a, b) => b.spend - a.spend);
-  }, [filtered, entById]);
+  }, [adRows, entById]);
 
   // Analytics chart (Chart.js, same CDN build as the Meta dashboard)
   const chartRef = useRef<HTMLCanvasElement | null>(null);
@@ -244,15 +298,15 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
   const presetLabel = preset === 'custom' ? 'Custom' : PRESETS.find(p => p.id === preset)?.label || '';
   const noLeadsYet = t.leads === 0;
 
-  const cards: { label: string; value: string; icon: keyof typeof ICONS; color: string; sub?: string }[] = [
-    { label: 'Amount Spent', value: usd(t.spend), icon: 'dollar', color: 'emerald' },
-    { label: 'Impressions', value: int(t.impressions), icon: 'eye', color: 'indigo' },
-    { label: 'Clicks', value: int(t.clicks), icon: 'pointer', color: 'blue' },
-    { label: 'CTR', value: pct(t.ctr), icon: 'percent', color: 'rose' },
-    { label: 'CPC', value: opt(t.cpc, usd), icon: 'coins', color: 'sky' },
-    { label: 'CPM', value: opt(t.cpm, usd), icon: 'gauge', color: 'teal' },
-    { label: 'Leads', value: int(t.leads), icon: 'users', color: 'amber', sub: noLeadsYet ? 'From the ChatGPT pixel' : undefined },
-    { label: 'CPL', value: opt(t.cpl, usd), icon: 'receipt', color: 'violet' },
+  const cards: { label: string; value: string; icon: keyof typeof ICONS; color: string; sub?: string; curr: number | null; prev: number | null | undefined; lowerIsBetter?: boolean }[] = [
+    { label: 'Amount Spent', value: usd(t.spend), icon: 'dollar', color: 'emerald', curr: t.spend, prev: p?.spend },
+    { label: 'Impressions', value: int(t.impressions), icon: 'eye', color: 'indigo', curr: t.impressions, prev: p?.impressions },
+    { label: 'Clicks', value: int(t.clicks), icon: 'pointer', color: 'blue', curr: t.clicks, prev: p?.clicks },
+    { label: 'CTR', value: pct(t.ctr), icon: 'percent', color: 'rose', curr: t.ctr, prev: p?.ctr },
+    { label: 'CPC', value: opt(t.cpc, usd), icon: 'coins', color: 'sky', curr: t.cpc, prev: p?.cpc, lowerIsBetter: true },
+    { label: 'CPM', value: opt(t.cpm, usd), icon: 'gauge', color: 'teal', curr: t.cpm, prev: p?.cpm, lowerIsBetter: true },
+    { label: 'Leads', value: int(t.leads), icon: 'users', color: 'amber', sub: noLeadsYet ? 'From the ChatGPT pixel' : undefined, curr: t.leads, prev: p?.leads },
+    { label: 'CPL', value: opt(t.cpl, usd), icon: 'receipt', color: 'violet', curr: t.cpl, prev: p?.cpl, lowerIsBetter: true },
   ];
 
   const pill = (active: boolean) => `text-xs px-3 py-1 rounded transition-colors ${active ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`;
@@ -299,7 +353,7 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
               <span>{presetLabel}</span>
               <Icon name="chevron" className="w-3.5 h-3.5 text-slate-400 ml-1" />
             </button>
-            <span className="text-[10px] text-slate-400 font-mono px-1 h-4 whitespace-nowrap">{since && `${fmtDay(since)} – ${fmtDay(until)}`}</span>
+            <span className="text-[10px] text-slate-400 font-mono px-1 h-4 whitespace-nowrap">{since && `${fmtDay(since)} – ${fmtDay(until)}`}{prevSince && p ? ` · vs ${fmtDay(prevSince)} – ${fmtDay(prevUntil)}` : ''}</span>
             {pickerOpen && lastDay && firstDay && (
               <div className="absolute left-0 top-full mt-1 z-40 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl p-3 w-[300px]">
                 <div className="grid grid-cols-2 gap-1 mb-3">
@@ -362,7 +416,10 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
                 <Icon name={c.icon} className={`w-4 h-4 ${ICON_COLORS[c.color]}`} />
               </div>
               <div className="text-xl font-bold text-white font-mono">{all ? c.value : '…'}</div>
-              <div className="mt-1 h-4 text-[11px] text-slate-500">{c.sub || ''}</div>
+              <div className="mt-1 h-4 text-[11px] text-slate-500 flex items-center gap-1.5">
+                {all && <Delta curr={c.curr} prev={c.prev} lowerIsBetter={c.lowerIsBetter} />}
+                {c.sub && !(p && c.prev) ? <span>{c.sub}</span> : null}
+              </div>
             </div>
           ))}
         </div>
@@ -420,14 +477,14 @@ export default function ChatgptDashboard({ clientName, hasMeta, hasGoogleAds }: 
                     <tr className="bg-slate-800/40 font-semibold">
                       <td className="px-4 py-3 text-slate-300 text-xs uppercase tracking-wider">Total ({tableRows.length})</td>
                       <td />
-                      <td className="px-4 py-3 text-right font-mono text-white">{int(t.impressions)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-white">{opt(t.cpm, usd)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-amber-300">{int(t.leads)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-emerald-300">{usd(t.spend)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-white">{pct(t.ctr)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-white">{int(t.clicks)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-white">{opt(t.cpc, usd)}</td>
-                      <td className="px-4 py-3 text-right font-mono text-violet-300">{opt(t.cpl, usd)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-white">{int(tableTotals.impressions)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-white">{opt(tableTotals.cpm, usd)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-amber-300">{int(tableTotals.leads)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-emerald-300">{usd(tableTotals.spend)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-white">{pct(tableTotals.ctr)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-white">{int(tableTotals.clicks)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-white">{opt(tableTotals.cpc, usd)}</td>
+                      <td className="px-4 py-3 text-right font-mono text-violet-300">{opt(tableTotals.cpl, usd)}</td>
                     </tr>
                   </tfoot>
                 )}
