@@ -14,6 +14,7 @@ interface ClientRow {
   google_data_source: 'sheet' | 'api';
   google_ads_customer_ids: string[];
   ad_account_ids: string[] | null;
+  has_chatgpt: boolean;
 }
 
 export default async function DashboardGooglePage({
@@ -30,7 +31,8 @@ export default async function DashboardGooglePage({
 
   const [client] = await query<ClientRow>(
     `SELECT c.name, c.show_account, c.sheet_id, c.google_sheet_tab,
-            c.google_data_source, c.google_ads_customer_ids, c.ad_account_ids
+            c.google_data_source, c.google_ads_customer_ids, c.ad_account_ids,
+            (c.chatgpt_ads_key_enc <> '' AND c.chatgpt_ads_account_id <> '') AS has_chatgpt
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -79,6 +81,7 @@ export default async function DashboardGooglePage({
         hasGoogleAds={true}
         hasMeta={!isGoogleOnlyClient(client)}
         metaUrl="/dashboard"
+        hasChatgptAds={!!client.has_chatgpt}
         isAdminView={!!impersonatedBy && impersonatedBy.role !== 'coach'}
         autoLoginToken={autoLoginToken}
       />

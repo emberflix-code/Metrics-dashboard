@@ -19,6 +19,7 @@ import { syncAccount } from './metaSync';
 import { geocodePendingClients } from './geocode';
 import { syncBookingCalendars } from './bookingCalendars';
 import { getAllGoogleCustomerIds, syncGoogleAdsCustomer } from './googleAds';
+import { getChatgptAdsClientIds, syncChatgptAdsClient } from './chatgptAds';
 
 const RUN_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 const PAUSE_BETWEEN_ACCOUNTS_MS = 20_000; // same deliberate pacing as the manual backfill queue, to avoid Meta rate limits
@@ -162,6 +163,16 @@ async function runDailySync() {
     }
   } catch (err) {
     console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:google:threw', error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // ChatGPT Ads (OpenAI Ads Manager) accounts — one insights call per client key.
+  try {
+    for (const clientId of await getChatgptAdsClientIds()) {
+      const result = await syncChatgptAdsClient(clientId);
+      console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:chatgpt:done', clientId, result }));
+    }
+  } catch (err) {
+    console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:chatgpt:threw', error: err instanceof Error ? err.message : String(err) }));
   }
 
   // Recorded by ET CALENDAR DATE, not by whichever run started it — a

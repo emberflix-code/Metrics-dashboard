@@ -45,6 +45,7 @@ interface ClientRow {
   meta_kpi_sheet_tab: string;
   show_meta_kpi_sheet: boolean;
   hide_creative_tagging: boolean;
+  has_chatgpt: boolean;
 }
 
 export default async function DashboardPage({
@@ -95,7 +96,8 @@ export default async function DashboardPage({
             c.show_cpa, c.cpa_sheet_tab, c.show_ltv, c.ltv_value, c.show_meta_lead_names,
             c.show_creative_campaign_breakdown, c.show_creatives_v3, c.enable_cross_account_creative_tagging,
             c.show_theme_breakdown, c.show_insights, c.show_gmn_report, c.hide_adset_ad_tabs, c.enable_page_image_fallback,
-            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet, c.hide_creative_tagging
+            c.meta_kpi_sheet_id, c.meta_kpi_sheet_tab, c.show_meta_kpi_sheet, c.hide_creative_tagging,
+            (c.chatgpt_ads_key_enc <> '' AND c.chatgpt_ads_account_id <> '') AS has_chatgpt
      FROM clients c
      JOIN client_users cu ON cu.client_id = c.id
      WHERE cu.user_id = $1
@@ -170,6 +172,7 @@ export default async function DashboardPage({
         platform="meta"
         hasGoogleAds={hasGoogleAds}
         googleUrl="/dashboard/google"
+        hasChatgptAds={!!client?.has_chatgpt}
         useSheetForLeads={resolvedLeadsSource === 'sheet'}
         leadsSource={resolvedLeadsSource}
         showBookings={!!(client?.show_bookings && client?.has_ghl_token)}

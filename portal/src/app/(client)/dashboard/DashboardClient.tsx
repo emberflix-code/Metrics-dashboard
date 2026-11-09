@@ -25,6 +25,7 @@ interface Props {
   googleDataSource?: 'sheet' | 'api'; // Google view source: google_sheet_tab, or the Google Ads API cache (adds Joins/Bookings)
   metaUrl?: string;             // link target for "View Meta" switch (on /dashboard/google)
   googleUrl?: string;           // link target for "View Google Ads" switch (on /dashboard)
+  hasChatgptAds?: boolean;      // ChatGPT Ads (OpenAI Ads Manager) connected → adds a ChatGPT pill (/dashboard/chatgpt)
   useSheetForLeads?: boolean;   // when true, Meta dashboard KPI reads leads from sheet_tab
   leadsSource?: 'meta' | 'sheet' | 'ghl';  // resolved server-side; drives Leads KPI source
   showBookings?: boolean;       // when true (and GHL is configured), show the 7th Bookings card
@@ -5332,7 +5333,7 @@ if (typeof window !== 'undefined') {
 }
 
 // ── React component ───────────────────────────────────────────────────────────
-export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, hasMeta = true, googleDataSource = 'sheet', metaUrl, googleUrl, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, showGmnReport = false, hideCreativeTagging = false }: Props) {
+export default function DashboardClient({ accountIds, clientName, campaignFilter, showAccount, platform = 'meta', hasGoogleAds = false, hasMeta = true, googleDataSource = 'sheet', metaUrl, googleUrl, hasChatgptAds = false, useSheetForLeads = false, leadsSource = 'meta', showBookings = false, showBookRate = false, showCpa = false, showLtv = false, ltvValue = 0, showMetaLeadNames = false, dataSourceByAccount = {}, isAdminView = false, autoLoginToken, showCreativeCampaignBreakdown = false, showCreativesV3 = false, hideAdsetAdTabs = true, enablePageImageFallback = false, showMetaKpiSheet = false, enableCrossAccountCreativeTagging = false, showThemeBreakdown = false, showInsights = false, showGmnReport = false, hideCreativeTagging = false }: Props) {
   const [ready, setReady] = useState(0);
   _platform = platform;
   _googleDataSource = googleDataSource;
@@ -5433,20 +5434,29 @@ export default function DashboardClient({ accountIds, clientName, campaignFilter
               </div>
               <div className="flex items-center gap-2">
                 {/* Platform switch — shown when this client has both Meta and Google Ads. */}
-                {hasGoogleAds && hasMeta && (
+                {((hasGoogleAds && hasMeta) || hasChatgptAds) && (
                   <div className="flex items-center bg-slate-800/60 rounded-lg p-0.5 border border-slate-700">
-                    <a
-                      href={metaUrl || '/dashboard'}
-                      className={`text-xs px-3 py-1 rounded transition-colors ${platform === 'meta' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                    >
-                      Meta
-                    </a>
-                    <a
-                      href={googleUrl || '/dashboard/google'}
-                      className={`text-xs px-3 py-1 rounded transition-colors ${platform === 'google' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
-                    >
-                      Google Ads
-                    </a>
+                    {hasMeta && (
+                      <a
+                        href={metaUrl || '/dashboard'}
+                        className={`text-xs px-3 py-1 rounded transition-colors ${platform === 'meta' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        Meta
+                      </a>
+                    )}
+                    {hasGoogleAds && (
+                      <a
+                        href={googleUrl || '/dashboard/google'}
+                        className={`text-xs px-3 py-1 rounded transition-colors ${platform === 'google' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white'}`}
+                      >
+                        Google Ads
+                      </a>
+                    )}
+                    {hasChatgptAds && (
+                      <a href="/dashboard/chatgpt" className="text-xs px-3 py-1 rounded transition-colors text-slate-400 hover:text-white">
+                        ChatGPT
+                      </a>
+                    )}
                   </div>
                 )}
                 {/* GMN Marketing Report — only for clients with show_gmn_report on */}
