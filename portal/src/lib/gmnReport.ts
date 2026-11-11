@@ -102,6 +102,9 @@ export interface GmnBooking {
   adLead: boolean;            // carries the location's Leads Tag ("new ad lead - gmn" or a version of it)
   campaign: string | null;    // our Meta campaign the lead came from, when GHL recorded it
   ad: string | null;          // our Meta ad, when GHL recorded it
+  // Why an entry without the ad-lead tag is or isn't counted as ours: it submitted one of our ad forms (= ours, the
+  // tag is just missing), only some other form (club website, another agency's Meta form…), or no form at all.
+  via?: 'our_form' | 'other_form' | 'no_form';
 }
 
 export interface GmnReportGroup {

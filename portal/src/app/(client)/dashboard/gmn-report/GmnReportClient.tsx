@@ -339,8 +339,9 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
       .catch(() => { if (live) setError(true); });
     return () => { live = false; };
   }, [month, location]);
-  const fromAds = rows?.filter(r => r.campaign || r.adLead).length ?? 0;
-  const shown = rows ? (onlyAds ? rows.filter(r => r.campaign || r.adLead) : rows) : [];
+  const isOurs = (r: GmnBooking) => !!(r.campaign || r.adLead || r.via === 'our_form');
+  const fromAds = rows?.filter(isOurs).length ?? 0;
+  const shown = rows ? (onlyAds ? rows.filter(isOurs) : rows) : [];
   const calendars = rows ? Array.from(new Set(rows.map(r => r.calendar))) : [];
   return (
     <Panel kicker={`${monthLabel} · Bookings`} title={location} onClose={onClose} brand={brand}>
@@ -364,7 +365,7 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
             <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
               <p className="text-xs text-slate-400">
                 Calendar{calendars.length === 1 ? '' : 's'}: {calendars.join(' · ')}. &quot;From our paid ads&quot; = the lead carries the
-                location&apos;s ad-lead tag; the campaign shows when GoHighLevel recorded it.
+                location&apos;s ad-lead tag or submitted one of our ad forms; the campaign shows when GoHighLevel recorded it.
               </p>
               <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer select-none">
                 <input type="checkbox" checked={onlyAds} onChange={e => setOnlyAds(e.target.checked)} className="accent-[#E1E000]" />
@@ -396,11 +397,17 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
                           <>
                             <span>{r.campaign}</span>
                             {r.ad && <span className="block text-xs text-slate-400">Ad: {r.ad}</span>}
+                            {!r.adLead && r.via === 'our_form' && <span className="block text-xs text-slate-400">Came through our ad form; ad-lead tag missing in GoHighLevel</span>}
                           </>
                         ) : r.adLead ? (
                           <span className="text-slate-300">Paid ad lead <span className="text-xs text-slate-500">(campaign not recorded in GoHighLevel)</span></span>
+                        ) : r.via === 'our_form' ? (
+                          <span className="text-slate-300">Paid ad lead <span className="text-xs text-slate-500">(came through our ad form; ad-lead tag missing in GoHighLevel)</span></span>
                         ) : (
-                          <span className="text-slate-500">Not from our ads</span>
+                          <span className="text-slate-500">
+                            Not from our ads
+                            {r.via && <span className="block text-xs">{r.via === 'other_form' ? 'Only another form (club website, other ads)' : 'No form submitted (added by hand, reactivation, member or staff)'}</span>}
+                          </span>
                         )}
                       </td>
                     </tr>
