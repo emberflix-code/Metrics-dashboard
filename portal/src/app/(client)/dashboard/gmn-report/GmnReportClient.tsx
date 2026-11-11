@@ -341,7 +341,19 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
   }, [month, location]);
   const isOurs = (r: GmnBooking) => !!(r.campaign || r.adLead || r.via === 'our_form');
   const fromAds = rows?.filter(isOurs).length ?? 0;
-  const shown = rows ? (onlyAds ? rows.filter(isOurs) : rows) : [];
+  // The Bookings number counts calendar entries, so a person who booked twice is in it twice; mark the later ones.
+  const personKey = (r: GmnBooking) => r.name.trim().toLowerCase().replace(/\s+/g, ' ');
+  const repeatOf = useMemo(() => {
+    const seen = new Map<string, number>();
+    return (rows ?? []).map((r, i) => {
+      const k = personKey(r);
+      const first = seen.get(k);
+      if (first == null) { seen.set(k, i); return null; }
+      return first;
+    });
+  }, [rows]);
+  const uniquePeople = repeatOf.filter(x => x == null).length;
+  const shown = rows ? rows.map((r, i) => ({ r, i })).filter(({ r }) => !onlyAds || isOurs(r)) : [];
   const calendars = rows ? Array.from(new Set(rows.map(r => r.calendar))) : [];
   return (
     <Panel kicker={`${monthLabel} · Bookings`} title={location} onClose={onClose} brand={brand}>
@@ -349,9 +361,10 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
       {!rows && !error && <p className="text-sm text-slate-400">Loading…</p>}
       {rows && (
         <>
-          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
             {([
               ['Bookings', fmtInt(count ?? rows.length)],
+              ['Unique people', fmtInt(uniquePeople)],
               ['From our paid ads', fmtInt(fromAds)],
               ['Other entries', fmtInt(rows.length - fromAds)],
             ] as [string, string][]).map(([l, v]) => (
@@ -365,7 +378,8 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
             <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
               <p className="text-xs text-slate-400">
                 Calendar{calendars.length === 1 ? '' : 's'}: {calendars.join(' · ')}. &quot;From our paid ads&quot; = the lead carries the
-                location&apos;s ad-lead tag or submitted one of our ad forms; the campaign shows when GoHighLevel recorded it.
+                location&apos;s ad-lead tag or submitted one of our ad forms; the campaign shows when GoHighLevel recorded it. Bookings
+                counts every calendar entry, so a person who booked more than once is listed again and marked &quot;Repeat&quot;.
               </p>
               <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer select-none">
                 <input type="checkbox" checked={onlyAds} onChange={e => setOnlyAds(e.target.checked)} className="accent-[#E1E000]" />
@@ -385,10 +399,18 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
                   </tr>
                 </thead>
                 <tbody>
-                  {shown.map((r, i) => (
-                    <tr key={i} className="border-t border-white/5 hover:bg-white/5 align-top">
+                  {shown.map(({ r, i }) => (
+                    <tr key={i} className={`border-t border-white/5 hover:bg-white/5 align-top ${repeatOf[i] != null ? 'opacity-60' : ''}`}>
                       <td className="px-3 py-1.5 text-right tabular-nums text-slate-500">{i + 1}</td>
-                      <td className="px-3 py-1.5">{r.name}</td>
+                      <td className="px-3 py-1.5">
+                        {r.name}
+                        {repeatOf[i] != null && (
+                          <span className="ml-2 text-[10px] uppercase tracking-wider font-semibold text-[#E1E000] border border-[#E1E000]/40 rounded px-1.5 py-0.5">
+                            Repeat of #{(repeatOf[i] as number) + 1}
+                          </span>
+                        )}
+                        {r.note && <span className="block text-xs text-slate-500">{r.note}</span>}
+                      </td>
                       <td className="px-3 py-1.5 whitespace-nowrap tabular-nums">{r.date}</td>
                       <td className="px-3 py-1.5 text-slate-300">{r.calendar}</td>
                       <td className="px-3 py-1.5 whitespace-nowrap">{STATUS_LABEL[r.status] ?? r.status}</td>
@@ -406,7 +428,11 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
                         ) : (
                           <span className="text-slate-500">
                             Not from our ads
-                            {r.via && <span className="block text-xs">{r.via === 'other_form' ? 'Only another form (club website, other ads)' : 'No form submitted (added by hand, reactivation, member or staff)'}</span>}
+                            {(r.viaNote || r.via) && (
+                              <span className="block text-xs">
+                                {r.viaNote ?? (r.via === 'other_form' ? 'Only another form (club website, other ads)' : 'No form submitted')}
+                              </span>
+                            )}
                           </span>
                         )}
                       </td>

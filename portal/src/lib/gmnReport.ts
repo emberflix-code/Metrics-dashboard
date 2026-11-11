@@ -105,6 +105,8 @@ export interface GmnBooking {
   // Why an entry without the ad-lead tag is or isn't counted as ours: it submitted one of our ad forms (= ours, the
   // tag is just missing), only some other form (club website, another agency's Meta form…), or no form at all.
   via?: 'our_form' | 'other_form' | 'no_form';
+  viaNote?: string;           // the specific reason in words (e.g. "Existing member", "Reactivation list …")
+  note?: string;              // e.g. the entry was linked to a staff contact and matched to the lead named in it
 }
 
 export interface GmnReportGroup {
