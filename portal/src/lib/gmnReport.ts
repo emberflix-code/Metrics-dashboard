@@ -84,6 +84,15 @@ export interface GmnReportPayload {
   topAdCopy?: GmnCopyItem[];
   copyNote?: string;
   notes?: string[];
+  // Location groups shown on their own tab (e.g. Presale), by location row label. The full report still includes them.
+  // Optional — snapshots without groups show no tabs.
+  groups?: GmnReportGroup[];
+}
+
+export interface GmnReportGroup {
+  key: string;                // URL-safe, e.g. "presale"
+  label: string;              // tab name, e.g. "Presale"
+  locations: string[];        // location row labels (may include locations with no spend this month)
 }
 
 export interface GmnCopyItem {

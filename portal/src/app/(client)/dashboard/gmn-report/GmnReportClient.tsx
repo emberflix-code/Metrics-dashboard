@@ -1,7 +1,8 @@
 'use client';
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import type { GmnCopyItem, GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
+import { groupReport, groupsWithData } from '@/lib/gmnReportGroups';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
 import EnhancedView, { BRAND_FONT_STACK, BRAND_LOGOS, CopyText, type BrandKey, type CopyKind } from './EnhancedView';
 
@@ -15,7 +16,24 @@ interface Props {
 // Alloy deck palette: charcoal background, yellow accents.
 const ACCENT = 'text-[#E1E000]';
 
-export default function GmnReportClient({ clientName, months, selectedMonth, report }: Props) {
+export default function GmnReportClient({ clientName, months, selectedMonth, report: fullReport }: Props) {
+  // Location groups (e.g. Presale) get their own tab; "All locations" is the report exactly as published.
+  const groups = useMemo(() => (fullReport ? groupsWithData(fullReport) : []), [fullReport]);
+  const [groupKey, setGroupKey] = useState<string | null>(null);
+  useEffect(() => {
+    try { const g = new URLSearchParams(window.location.search).get('group'); if (g) setGroupKey(g); } catch { /* no URL access */ }
+  }, []);
+  const activeGroup = groups.find(g => g.key === groupKey);
+  const report = useMemo(() => (fullReport && activeGroup ? groupReport(fullReport, activeGroup) : fullReport), [fullReport, activeGroup]);
+  const pickGroup = (key: string | null) => {
+    setGroupKey(key);
+    setOpenLocation(null); setOpenOffer(null); setOpenCreative(null); setOpenCopy(null);
+    try {
+      const u = new URL(window.location.href);
+      if (key) u.searchParams.set('group', key); else u.searchParams.delete('group');
+      window.history.replaceState(null, '', u.toString());
+    } catch { /* no URL access */ }
+  };
   const [openLocation, setOpenLocation] = useState<string | null>(null);
   const [openOffer, setOpenOffer] = useState<string | null>(null);
   const details = report?.locationDetails;
@@ -69,7 +87,7 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
               Month
               <select
                 value={selectedMonth ?? ''}
-                onChange={e => { window.location.href = `/dashboard/gmn-report?month=${encodeURIComponent(e.target.value)}`; }}
+                onChange={e => { window.location.href = `/dashboard/gmn-report?month=${encodeURIComponent(e.target.value)}${activeGroup ? `&group=${encodeURIComponent(activeGroup.key)}` : ''}`; }}
                 className="bg-slate-900 border border-slate-600 rounded-lg px-3 py-1.5 text-sm text-white"
               >
                 {months.map(m => <option key={m.month} value={m.month}>{m.label}</option>)}
@@ -79,6 +97,22 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
           </div>
         </div>
       </header>
+
+      {report && groups.length > 0 && (
+        <nav className="border-b border-white/10 bg-black/10" aria-label="Report sections">
+          <div className="max-w-7xl mx-auto px-4 sm:px-6 flex gap-1 overflow-x-auto" role="tablist">
+            {[{ key: null as string | null, label: 'All locations' }, ...groups.map(g => ({ key: g.key as string | null, label: g.label }))].map(t => {
+              const on = (activeGroup?.key ?? null) === t.key;
+              return (
+                <button key={t.key ?? 'all'} type="button" role="tab" aria-selected={on} onClick={() => pickGroup(t.key)}
+                  className={`px-4 py-3 text-sm whitespace-nowrap border-b-2 -mb-px transition-colors ${on ? 'border-[#E1E000] text-white font-semibold' : 'border-transparent text-slate-400 hover:text-white'}`}>
+                  {t.label}
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      )}
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 py-8 space-y-12">
         {!report ? (
