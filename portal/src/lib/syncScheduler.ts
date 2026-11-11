@@ -20,6 +20,7 @@ import { geocodePendingClients } from './geocode';
 import { syncBookingCalendars } from './bookingCalendars';
 import { getAllGoogleCustomerIds, syncGoogleAdsCustomer } from './googleAds';
 import { getChatgptAdsClientIds, syncChatgptAdsClient } from './chatgptAds';
+import { syncAllGhlCaches } from './ghlCache';
 
 const RUN_INTERVAL_MS = 24 * 60 * 60 * 1000; // once a day
 const PAUSE_BETWEEN_ACCOUNTS_MS = 20_000; // same deliberate pacing as the manual backfill queue, to avoid Meta rate limits
@@ -173,6 +174,19 @@ async function runDailySync() {
     }
   } catch (err) {
     console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:chatgpt:threw', error: err instanceof Error ? err.message : String(err) }));
+  }
+
+  // GoHighLevel cache (lib/ghlCache.ts): our own copy of every connected
+  // location's contacts, tags, appointments and forms. Runs last — the first
+  // night backfills appointments since 2025-01-01, which takes a while.
+  try {
+    await syncAllGhlCaches({
+      log: r => console.log('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:ghlCache:done', location: r.locationId, client: r.clientName,
+        status: r.status, contacts: r.contacts, appointments: r.appointments, forms: r.forms, tagsRemoved: r.tagsRemoved,
+        contactsMarkedMissing: r.contactsMarkedMissing, errors: r.errors, ms: r.ms })),
+    });
+  } catch (err) {
+    console.error('[SYNC-SCHEDULER]', JSON.stringify({ step: 'run:ghlCache:threw', error: err instanceof Error ? err.message : String(err) }));
   }
 
   // Recorded by ET CALENDAR DATE, not by whichever run started it — a
