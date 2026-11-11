@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { GmnCopyItem, GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
+import type { GmnBooking, GmnCopyItem, GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
 import { groupReport, groupsWithData } from '@/lib/gmnReportGroups';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
 import EnhancedView, { BRAND_FONT_STACK, BRAND_LOGOS, CopyText, type BrandKey, type CopyKind } from './EnhancedView';
@@ -27,7 +27,7 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
   const report = useMemo(() => (fullReport && activeGroup ? groupReport(fullReport, activeGroup) : fullReport), [fullReport, activeGroup]);
   const pickGroup = (key: string | null) => {
     setGroupKey(key);
-    setOpenLocation(null); setOpenOffer(null); setOpenCreative(null); setOpenCopy(null);
+    setOpenLocation(null); setOpenOffer(null); setOpenCreative(null); setOpenCopy(null); setOpenBookings(null);
     try {
       const u = new URL(window.location.href);
       if (key) u.searchParams.set('group', key); else u.searchParams.delete('group');
@@ -36,6 +36,10 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
   };
   const [openLocation, setOpenLocation] = useState<string | null>(null);
   const [openOffer, setOpenOffer] = useState<string | null>(null);
+  // Bookings click-through: the entries behind a location's Bookings number (fetched on open, never in the page data).
+  const [openBookings, setOpenBookings] = useState<string | null>(null);
+  const bookingLabels = useMemo(() => new Set(fullReport?.bookingDetailLocations ?? []), [fullReport]);
+  const showBookings = bookingLabels.size ? (label: string) => { if (bookingLabels.has(label)) setOpenBookings(label); } : undefined;
   const details = report?.locationDetails;
   const offerDetails = report?.offerDetails;
   const openDetail = openLocation && details ? details[openLocation] : undefined;
@@ -138,11 +142,13 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
             <Overview report={report} />
             <MetricTable
               title="Meta Campaign Breakdown"
-              subtitle={details ? 'Click a location to see its own offer breakdown and top creatives.' : undefined}
+              subtitle={[details ? 'Click a location to see its own offer breakdown and top creatives.' : '', showBookings ? 'Click a Bookings number to see who booked.' : ''].filter(Boolean).join(' ') || undefined}
               firstCol="Location"
               rows={report.locations}
               total={report.locationsTotal}
               onRowClick={showLocation}
+              bookingLabels={bookingLabels}
+              onBookingsClick={showBookings}
             />
             <MetricTable
               title="Marketing Offer Breakdown"
@@ -189,6 +195,16 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
           brand={panelBrand}
           onClose={() => setOpenCopy(null)}
           onLocation={openLocationFromCreative}
+        />
+      )}
+      {openBookings && report && (
+        <BookingsPanel
+          location={openBookings}
+          month={report.month}
+          monthLabel={report.monthLabel}
+          count={report.locations.find(r => r.label === openBookings)?.bookings ?? null}
+          brand={panelBrand}
+          onClose={() => setOpenBookings(null)}
         />
       )}
       {openCreative && report && (
@@ -305,6 +321,100 @@ function OfferPanel({ name, monthLabel, detail, brand, onClose, onLocation }: {
   );
 }
 
+const STATUS_LABEL: Record<string, string> = { confirmed: 'Confirmed', showed: 'Showed', noshow: 'No-show', cancelled: 'Cancelled', booked: 'Booked' };
+
+// Who is behind a location's Bookings number: each calendar entry with its date, calendar, status and the paid ad
+// (our Meta campaign) the lead came from. Loaded on open from /api/gmn-report/bookings.
+function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
+  location: string; month: string; monthLabel: string; count: number | null; brand?: BrandKey; onClose: () => void;
+}) {
+  const [rows, setRows] = useState<GmnBooking[] | null>(null);
+  const [error, setError] = useState(false);
+  const [onlyAds, setOnlyAds] = useState(false);
+  useEffect(() => {
+    let live = true;
+    fetch(`/api/gmn-report/bookings?month=${encodeURIComponent(month)}&location=${encodeURIComponent(location)}`)
+      .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
+      .then((j: { rows: GmnBooking[] }) => { if (live) setRows(j.rows); })
+      .catch(() => { if (live) setError(true); });
+    return () => { live = false; };
+  }, [month, location]);
+  const fromAds = rows?.filter(r => r.campaign || r.adLead).length ?? 0;
+  const shown = rows ? (onlyAds ? rows.filter(r => r.campaign || r.adLead) : rows) : [];
+  const calendars = rows ? Array.from(new Set(rows.map(r => r.calendar))) : [];
+  return (
+    <Panel kicker={`${monthLabel} · Bookings`} title={location} onClose={onClose} brand={brand}>
+      {error && <p className="text-sm text-red-300">Couldn&apos;t load the bookings for this location.</p>}
+      {!rows && !error && <p className="text-sm text-slate-400">Loading…</p>}
+      {rows && (
+        <>
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+            {([
+              ['Bookings', fmtInt(count ?? rows.length)],
+              ['From our paid ads', fmtInt(fromAds)],
+              ['Other entries', fmtInt(rows.length - fromAds)],
+            ] as [string, string][]).map(([l, v]) => (
+              <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
+                <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
+                <p className="text-lg font-semibold mt-0.5 tabular-nums">{v}</p>
+              </div>
+            ))}
+          </div>
+          <section>
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
+              <p className="text-xs text-slate-400">
+                Calendar{calendars.length === 1 ? '' : 's'}: {calendars.join(' · ')}. &quot;From our paid ads&quot; = the lead carries the
+                location&apos;s ad-lead tag; the campaign shows when GoHighLevel recorded it.
+              </p>
+              <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer select-none">
+                <input type="checkbox" checked={onlyAds} onChange={e => setOnlyAds(e.target.checked)} className="accent-[#E1E000]" />
+                Only paid-ad leads
+              </label>
+            </div>
+            <div className="overflow-auto max-h-[60vh] rounded-xl border border-white/15">
+              <table className="w-full text-sm border-collapse min-w-[760px]">
+                <thead className="sticky top-0 bg-[#1F1E1D] z-10">
+                  <tr>
+                    <th className="px-3 py-2 text-right font-semibold w-10">#</th>
+                    <th className="px-3 py-2 text-left font-semibold">Lead</th>
+                    <th className="px-3 py-2 text-left font-semibold whitespace-nowrap">Date</th>
+                    <th className="px-3 py-2 text-left font-semibold">Calendar</th>
+                    <th className="px-3 py-2 text-left font-semibold">Status</th>
+                    <th className="px-3 py-2 text-left font-semibold">Paid ad</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {shown.map((r, i) => (
+                    <tr key={i} className="border-t border-white/5 hover:bg-white/5 align-top">
+                      <td className="px-3 py-1.5 text-right tabular-nums text-slate-500">{i + 1}</td>
+                      <td className="px-3 py-1.5">{r.name}</td>
+                      <td className="px-3 py-1.5 whitespace-nowrap tabular-nums">{r.date}</td>
+                      <td className="px-3 py-1.5 text-slate-300">{r.calendar}</td>
+                      <td className="px-3 py-1.5 whitespace-nowrap">{STATUS_LABEL[r.status] ?? r.status}</td>
+                      <td className="px-3 py-1.5">
+                        {r.campaign ? (
+                          <>
+                            <span>{r.campaign}</span>
+                            {r.ad && <span className="block text-xs text-slate-400">Ad: {r.ad}</span>}
+                          </>
+                        ) : r.adLead ? (
+                          <span className="text-slate-300">Paid ad lead <span className="text-xs text-slate-500">(campaign not recorded in GoHighLevel)</span></span>
+                        ) : (
+                          <span className="text-slate-500">Not from our ads</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        </>
+      )}
+    </Panel>
+  );
+}
+
 function Overview({ report }: { report: GmnReportPayload }) {
   const o = report.overview;
   const tiles: [string, string][] = [
@@ -340,9 +450,17 @@ const COLS: { key: keyof GmnMetricRow; label: string; fmt: (r: GmnMetricRow) => 
   { key: 'cpb', label: 'CPB', fmt: r => fmtUsd(r.cpb) },
 ];
 
-function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick }: {
+function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, bookingLabels, onBookingsClick }: {
   title: string; subtitle?: string; firstCol: string; rows: GmnMetricRow[]; total: GmnMetricRow; onRowClick?: (label: string) => void;
+  bookingLabels?: Set<string>; onBookingsClick?: (label: string) => void;
 }) {
+  const cell = (c: (typeof COLS)[number], r: GmnMetricRow) =>
+    c.key === 'bookings' && onBookingsClick && bookingLabels?.has(r.label) ? (
+      <button type="button" onClick={() => onBookingsClick(r.label)} title="See who booked"
+        className="underline decoration-white/30 underline-offset-2 hover:text-[#E1E000] hover:decoration-[#E1E000] tabular-nums">
+        {c.fmt(r)}
+      </button>
+    ) : c.fmt(r);
   return (
     <section>
       <h3 className={`text-xl font-light ${subtitle ? 'mb-1' : 'mb-4'}`}>{title}</h3>
@@ -366,7 +484,7 @@ function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick }: {
                     </button>
                   ) : r.label}
                 </td>
-                {COLS.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/15 whitespace-nowrap">{c.fmt(r)}</td>)}
+                {COLS.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/15 whitespace-nowrap">{cell(c, r)}</td>)}
               </tr>
             ))}
             <tr className="bg-[#1F1E1D] font-semibold">
