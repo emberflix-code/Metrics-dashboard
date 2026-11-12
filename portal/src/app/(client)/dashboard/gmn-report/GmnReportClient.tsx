@@ -16,6 +16,14 @@ interface Props {
 // Alloy deck palette: charcoal background, yellow accents.
 const ACCENT = 'text-[#E1E000]';
 
+// Deployed-build label, same as the main dashboard's (NEXT_PUBLIC_VERSION / NEXT_PUBLIC_BUILD_SHA are set at build time).
+function versionLabel(): string {
+  const version = process.env.NEXT_PUBLIC_VERSION;
+  const sha = process.env.NEXT_PUBLIC_BUILD_SHA || 'dev';
+  if (!version || version === sha) return `v.${sha}`;
+  return `${version} (${sha})`;
+}
+
 export default function GmnReportClient({ clientName, months, selectedMonth, report: fullReport }: Props) {
   // Location groups (e.g. Presale) get their own tab; "All locations" is the report exactly as published.
   const groups = useMemo(() => (fullReport ? groupsWithData(fullReport) : []), [fullReport]);
@@ -178,6 +186,14 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
           </>
         )}
       </main>
+      <footer className="max-w-7xl mx-auto px-4 sm:px-6 py-4 text-center text-[11px] text-slate-500 border-t border-white/10">
+        GMN Marketing Report
+        <span className="ml-2 font-mono opacity-70" title="Deployed build">{versionLabel()}</span>
+      </footer>
+      {/* always-visible build badge, same as the main dashboard (z-30: below the pop-ups, which sit at z-50) */}
+      <div className="fixed bottom-3 right-3 z-30 font-mono text-[10px] text-slate-400 bg-black/60 border border-white/10 rounded px-2 py-1 backdrop-blur-sm pointer-events-none select-none" title="Deployed build">
+        {versionLabel()}
+      </div>
       {openLocation && openDetail && report && (
         <LocationPanel
           name={openLocation}
