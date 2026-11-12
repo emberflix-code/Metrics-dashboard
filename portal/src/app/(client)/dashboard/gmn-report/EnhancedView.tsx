@@ -191,7 +191,7 @@ function Spotlights({ report, onOpenLocation }: { report: GmnReportPayload; onOp
     if (worst) out.push({ tone: 'warning', icon: '!', title: 'Highest CPL at $1k+ spend', value: fmtUsd(worst.cpl), who: short(worst.label), detail: `${fmtUsd(worst.spend)} spend for ${fmtInt(worst.leads)} leads — worth a creative/offer review`, link: worst.label });
     const offers = report.offers.filter(o => (o.leads ?? 0) >= 20 && o.cpb != null);
     const bo = pick(offers, o => o.cpb!, 1);
-    if (bo) out.push({ tone: 'good', icon: '▲', title: 'Best offer by cost per booking', value: fmtUsd(bo.cpb), who: bo.label, detail: `${fmtInt(bo.bookings)} bookings · CPL ${fmtUsd(bo.cpl)}` });
+    if (bo) out.push({ tone: 'good', icon: '▲', title: hasPaid(bo) ? 'Best offer by CPB – paid ads' : 'Best offer by cost per booking', value: fmtUsd(bo.cpb), who: bo.label, detail: `${fmtInt(paidOf(bo))} ${hasPaid(bo) ? 'paid bookings' : 'bookings'} · CPL ${fmtUsd(bo.cpl)}` });
     const tc = report.topCreatives[0];
     if (tc) out.push({ tone: 'info', icon: '★', title: 'Top creative', value: fmtUsd(tc.cpl), who: `Creative #${tc.rank} · ${tc.type === 'video' ? 'Video' : 'Image'}`, detail: `CPL across ${tc.locations.length} locations · ${fmtUsd(tc.spend)} spend` });
     return out;
@@ -343,6 +343,7 @@ function OfferMix({ report, onOpenOffer }: { report: GmnReportPayload; onOpenOff
   const top = offers.slice(0, 3);
   const rest = offers.slice(3);
   const total = report.offersTotal.spend || 1;
+  const paid = offers.some(hasPaid);
   const segs = [
     ...top.map((o, i) => ({ label: o.label, spend: o.spend, color: SERIES[i] })),
     ...(rest.length ? [{ label: `Other (${rest.length} offers)`, spend: rest.reduce((s, o) => s + o.spend, 0), color: C.gray }] : []),
@@ -375,8 +376,8 @@ function OfferMix({ report, onOpenOffer }: { report: GmnReportPayload; onOpenOff
                 <th className="py-1.5 font-medium text-right">Spend</th>
                 <th className="py-1.5 font-medium text-right">Leads</th>
                 <th className="py-1.5 font-medium pl-4 w-[30%]">CPL</th>
-                <th className="py-1.5 font-medium text-right">Bookings</th>
-                <th className="py-1.5 font-medium text-right">CPB</th>
+                <th className="py-1.5 font-medium text-right">{paid ? 'Paid bookings' : 'Bookings'}</th>
+                <th className="py-1.5 font-medium text-right">{paid ? 'CPB – paid ads' : 'CPB'}</th>
               </tr>
             </thead>
             <tbody>
@@ -395,7 +396,7 @@ function OfferMix({ report, onOpenOffer }: { report: GmnReportPayload; onOpenOff
                       <span className="w-16 text-right tabular-nums">{fmtUsd(o.cpl)}</span>
                     </div>
                   </td>
-                  <td className="py-1.5 text-right tabular-nums">{fmtInt(o.bookings)}</td>
+                  <td className="py-1.5 text-right tabular-nums">{fmtInt(paidOf(o))}</td>
                   <td className="py-1.5 text-right tabular-nums">{fmtUsd(o.cpb)}</td>
                 </tr>
               ))}

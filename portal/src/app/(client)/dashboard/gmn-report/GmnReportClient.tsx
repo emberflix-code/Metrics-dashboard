@@ -171,11 +171,17 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
             />
             <MetricTable
               title="Marketing Offer Breakdown"
-              subtitle={offerDetails ? 'Click an offer to see which locations ran it.' : undefined}
+              subtitle={[
+                offerDetails ? 'Click an offer to see which locations ran it.' : '',
+                report.offers.some(r => r.bookingsPaid !== undefined)
+                  ? 'Each paid booking counts for the offer in its campaign (paid bookings with no campaign recorded are split across the location\'s offers by lead share). Organic bookings have no offer, so offers show Bookings – Paid only.'
+                  : '',
+              ].filter(Boolean).join(' ') || undefined}
               firstCol="Offer"
               rows={report.offers}
               total={report.offersTotal}
               onRowClick={offerDetails ? label => { if (offerDetails[label]) setOpenOffer(label); } : undefined}
+              offerTable
             />
             <TopCreatives creatives={report.topCreatives} note={report.creativesNote} onShowLocations={showCreative} />
             {report.notes && report.notes.length > 0 && (
@@ -300,11 +306,11 @@ function Panel({ kicker, title, onClose, brand, children }: { kicker: string; ti
   );
 }
 
-function RowTiles({ r }: { r: GmnMetricRow }) {
+function RowTiles({ r, offer }: { r: GmnMetricRow; offer?: boolean }) {
   const tiles: [string, string][] = [
     ['Spend', fmtUsd(r.spend)], ['Leads', fmtInt(r.leads)], ['CPL', fmtUsd(r.cpl)],
     ...(r.bookingsPaid !== undefined
-      ? [['Bookings – Paid', fmtInt(r.bookingsPaid ?? null)], ['Bookings – Total', fmtInt(r.bookings)], ['CPB – Paid ads', fmtUsd(r.cpb)]] as [string, string][]
+      ? [['Bookings – Paid', fmtInt(r.bookingsPaid ?? null)], ...(offer ? [] : [['Bookings – Total', fmtInt(r.bookings)]]), ['CPB – Paid ads', fmtUsd(r.cpb)]] as [string, string][]
       : [['Bookings', fmtInt(r.bookings)], ['CPB', fmtUsd(r.cpb)]] as [string, string][]),
     ['CTR', fmtPct(r.ctr)],
     ...(r.spsTotal !== undefined ? [['SPS – Paid', fmtSps(r.spsPaid)], ['SPS – Total', fmtSps(r.spsTotal)]] as [string, string][] : []),
@@ -321,8 +327,8 @@ function RowTiles({ r }: { r: GmnMetricRow }) {
   );
 }
 
-// One location's own view: its numbers, its top creatives ranked by its own CPL, then its offer breakdown (bookings
-// split across its offers by lead share, same as the all-locations table).
+// One location's own view: its numbers, its top creatives ranked by its own CPL, then its offer breakdown (paid bookings
+// by the offer in their campaign, the rest split by lead share; older snapshots: all bookings split by lead share).
 function LocationPanel({ name, monthLabel, detail, note, brand, onClose }: {
   name: string; monthLabel: string; detail: GmnLocationDetail; note?: string; brand?: BrandKey; onClose: () => void;
 }) {
@@ -330,19 +336,19 @@ function LocationPanel({ name, monthLabel, detail, note, brand, onClose }: {
     <Panel kicker={monthLabel} title={name} onClose={onClose} brand={brand}>
       <RowTiles r={detail.row} />
       <TopCreatives creatives={detail.topCreatives} note={note} cols="grid-cols-1 sm:grid-cols-2 lg:grid-cols-3" emptyText="No creative at this location reached $100 spend with at least one lead this month." />
-      <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={detail.offers} total={{ ...detail.row, label: 'Total' }} />
+      <MetricTable title="Marketing Offer Breakdown" firstCol="Offer" rows={detail.offers} total={{ ...detail.row, label: 'Total' }} offerTable />
     </Panel>
   );
 }
 
-// One offer's view: the locations that ran it, each with its numbers for this offer (bookings = that location's
-// calendar count split by its lead share). Location names jump to that location's own panel.
+// One offer's view: the locations that ran it, each with its numbers for this offer (paid bookings counted the same
+// way as the offer breakdown). Location names jump to that location's own panel.
 function OfferPanel({ name, monthLabel, detail, brand, onClose, onLocation }: {
   name: string; monthLabel: string; detail: GmnOfferDetail; brand?: BrandKey; onClose: () => void; onLocation?: (label: string) => void;
 }) {
   return (
     <Panel kicker={`${monthLabel} · Offer`} title={name} onClose={onClose} brand={brand}>
-      <RowTiles r={detail.row} />
+      <RowTiles r={detail.row} offer />
       <MetricTable
         title={`Locations that ran this offer (${detail.locations.length})`}
         subtitle={onLocation ? 'Click a location to open its own report.' : undefined}
@@ -350,6 +356,7 @@ function OfferPanel({ name, monthLabel, detail, brand, onClose, onLocation }: {
         rows={detail.locations}
         total={{ ...detail.row, label: 'Total' }}
         onRowClick={onLocation}
+        offerTable
       />
     </Panel>
   );
@@ -541,16 +548,18 @@ const SPS_COLS: typeof COLS = [
   { key: 'spsTotal', label: 'SPS – Total', fmt: r => fmtSps(r.spsTotal) },
 ];
 
-function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, bookingLabels, onBookingsClick, spsLabels, onSpsClick }: {
+function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, bookingLabels, onBookingsClick, spsLabels, onSpsClick, offerTable }: {
   title: string; subtitle?: string; firstCol: string; rows: GmnMetricRow[]; total: GmnMetricRow; onRowClick?: (label: string) => void;
   bookingLabels?: Set<string>; onBookingsClick?: (label: string, paidOnly?: boolean) => void;
   spsLabels?: Set<string>; onSpsClick?: (label: string, paidOnly?: boolean) => void;
+  /** Offer rows: paid bookings only (organic bookings have no offer), and no SPS. */
+  offerTable?: boolean;
 }) {
-  // paid split: Bookings → "Bookings – Paid" + "Bookings – Total", CPB → "CPB – Paid ads"
+  // paid split: Bookings → "Bookings – Paid" + "Bookings – Total" (offer tables: Paid only), CPB → "CPB – Paid ads"
   const base = rows.some(r => r.bookingsPaid !== undefined)
-    ? COLS.flatMap(c => c.key === 'bookings' ? [PAID_COL, { ...c, label: 'Bookings – Total' }] : c.key === 'cpb' ? [{ ...c, label: 'CPB – Paid ads' }] : [c])
+    ? COLS.flatMap(c => c.key === 'bookings' ? (offerTable ? [PAID_COL] : [PAID_COL, { ...c, label: 'Bookings – Total' }]) : c.key === 'cpb' ? [{ ...c, label: 'CPB – Paid ads' }] : [c])
     : COLS;
-  const cols = rows.some(r => r.spsTotal !== undefined) ? [...base, ...SPS_COLS] : base;
+  const cols = !offerTable && rows.some(r => r.spsTotal !== undefined) ? [...base, ...SPS_COLS] : base;
   const linkCell = (text: string, onClick: () => void, hint: string) => (
     <button type="button" onClick={onClick} title={hint}
       className="underline decoration-white/30 underline-offset-2 hover:text-[#E1E000] hover:decoration-[#E1E000] tabular-nums">
