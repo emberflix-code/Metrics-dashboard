@@ -6,7 +6,7 @@ import type { GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow,
 
 const r2 = (n: number) => Math.round(n * 100) / 100;
 
-/** Sum rows and recompute the ratios from the sums (CPB only over rows that have booking data). */
+/** Sum rows and recompute the ratios from the sums (CPB only over rows that have booking data; SPS over rows that have it). */
 export function sumRows(rows: GmnMetricRow[], label: string): GmnMetricRow {
   const spend = rows.reduce((s, r) => s + r.spend, 0);
   const reach = rows.reduce((s, r) => s + r.reach, 0);
@@ -17,8 +17,20 @@ export function sumRows(rows: GmnMetricRow[], label: string): GmnMetricRow {
   const leadSpend = withLeads.reduce((s, r) => s + r.spend, 0);
   const withBookings = rows.filter(r => r.bookings != null);
   const bookings = withBookings.length ? withBookings.reduce((s, r) => s + (r.bookings ?? 0), 0) : null;
-  const bookingSpend = withBookings.reduce((s, r) => s + r.spend, 0);
+  // Paid split (Bookings – Paid / CPB – paid ads): CPB is spend over paid bookings, from the rows that have them.
+  const hasPaid = rows.some(r => r.bookingsPaid !== undefined);
+  const withPaid = rows.filter(r => r.bookingsPaid != null);
+  const bookingsPaid = withPaid.length ? withPaid.reduce((s, r) => s + (r.bookingsPaid ?? 0), 0) : null;
+  const cpbBase = hasPaid ? bookingsPaid : bookings;
+  const bookingSpend = (hasPaid ? withPaid : withBookings).reduce((s, r) => s + r.spend, 0);
+  // SPS: summed over the rows that have it (N/A rows left out); N/A when none do; absent when the snapshot has no SPS.
+  const hasSps = rows.some(r => r.spsTotal !== undefined);
+  const spsSum = (k: 'spsPaid' | 'spsTotal') => {
+    const xs = rows.map(r => r[k]).filter((v): v is number => v != null);
+    return xs.length ? xs.reduce((s, v) => s + v, 0) : null;
+  };
   return {
+    ...(hasSps ? { spsPaid: spsSum('spsPaid'), spsTotal: spsSum('spsTotal') } : {}),
     label,
     spend: r2(spend),
     reach,
@@ -28,7 +40,8 @@ export function sumRows(rows: GmnMetricRow[], label: string): GmnMetricRow {
     leads,
     cpl: leads ? r2(leadSpend / leads) : null,
     bookings,
-    cpb: bookings ? r2(bookingSpend / bookings) : null,
+    ...(hasPaid ? { bookingsPaid } : {}),
+    cpb: cpbBase ? r2(bookingSpend / cpbBase) : null,
   };
 }
 

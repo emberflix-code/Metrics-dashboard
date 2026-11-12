@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import type { GmnBooking, GmnCopyItem, GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
+import type { GmnBooking, GmnBookingKind, GmnCopyItem, GmnCreative, GmnCreativeLocation, GmnLocationDetail, GmnMetricRow, GmnOfferDetail, GmnReportMonth, GmnReportPayload } from '@/lib/gmnReport';
 import { groupReport, groupsWithData } from '@/lib/gmnReportGroups';
 import { fmtInt, fmtPct, fmtUsd, adsManagerAdUrl } from '@/app/(marketer)/marketer/_components/format';
 import EnhancedView, { BRAND_FONT_STACK, BRAND_LOGOS, CopyText, type BrandKey, type CopyKind } from './EnhancedView';
@@ -36,10 +36,12 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
   };
   const [openLocation, setOpenLocation] = useState<string | null>(null);
   const [openOffer, setOpenOffer] = useState<string | null>(null);
-  // Bookings click-through: the entries behind a location's Bookings number (fetched on open, never in the page data).
-  const [openBookings, setOpenBookings] = useState<string | null>(null);
+  // Bookings / SPS click-through: the entries behind a location's number (fetched on open, never in the page data).
+  const [openBookings, setOpenBookings] = useState<{ label: string; kind: GmnBookingKind; paidOnly: boolean } | null>(null);
   const bookingLabels = useMemo(() => new Set(fullReport?.bookingDetailLocations ?? []), [fullReport]);
-  const showBookings = bookingLabels.size ? (label: string) => { if (bookingLabels.has(label)) setOpenBookings(label); } : undefined;
+  const spsLabels = useMemo(() => new Set(fullReport?.spsDetailLocations ?? []), [fullReport]);
+  const showBookings = bookingLabels.size ? (label: string, paidOnly = false) => { if (bookingLabels.has(label)) setOpenBookings({ label, kind: 'bookings', paidOnly }); } : undefined;
+  const showSps = spsLabels.size ? (label: string, paidOnly = false) => { if (spsLabels.has(label)) setOpenBookings({ label, kind: 'sps', paidOnly }); } : undefined;
   const details = report?.locationDetails;
   const offerDetails = report?.offerDetails;
   const openDetail = openLocation && details ? details[openLocation] : undefined;
@@ -142,13 +144,22 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
             <Overview report={report} />
             <MetricTable
               title="Meta Campaign Breakdown"
-              subtitle={[details ? 'Click a location to see its own offer breakdown and top creatives.' : '', showBookings ? 'Click a Bookings number to see who booked.' : ''].filter(Boolean).join(' ') || undefined}
+              subtitle={[
+                details ? 'Click a location to see its own offer breakdown and top creatives.' : '',
+                showBookings ? `Click a Bookings${showSps ? ' or SPS' : ''} number to see who booked.` : showSps ? 'Click an SPS number to see who booked.' : '',
+                report.locations.some(r => r.bookingsPaid !== undefined)
+                  ? 'Bookings and SPS (Starting Point Sessions) count each person once per date (booked again on another date = counted again; staff entries left out). Paid = from our paid ads, Total = paid + organic. CPB – Paid ads = spend ÷ Bookings – Paid.'
+                  : '',
+                report.locations.some(r => r.spsTotal === null) ? 'SPS N/A = the location records no SPS in GoHighLevel that month.' : '',
+              ].filter(Boolean).join(' ') || undefined}
               firstCol="Location"
               rows={report.locations}
               total={report.locationsTotal}
               onRowClick={showLocation}
               bookingLabels={bookingLabels}
               onBookingsClick={showBookings}
+              spsLabels={spsLabels}
+              onSpsClick={showSps}
             />
             <MetricTable
               title="Marketing Offer Breakdown"
@@ -199,10 +210,13 @@ export default function GmnReportClient({ clientName, months, selectedMonth, rep
       )}
       {openBookings && report && (
         <BookingsPanel
-          location={openBookings}
+          key={`${openBookings.label}|${openBookings.kind}|${openBookings.paidOnly}`}
+          location={openBookings.label}
+          kind={openBookings.kind}
+          paidOnly={openBookings.paidOnly}
           month={report.month}
           monthLabel={report.monthLabel}
-          count={report.locations.find(r => r.label === openBookings)?.bookings ?? null}
+          row={report.locations.find(r => r.label === openBookings.label)}
           brand={panelBrand}
           onClose={() => setOpenBookings(null)}
         />
@@ -273,10 +287,14 @@ function Panel({ kicker, title, onClose, brand, children }: { kicker: string; ti
 function RowTiles({ r }: { r: GmnMetricRow }) {
   const tiles: [string, string][] = [
     ['Spend', fmtUsd(r.spend)], ['Leads', fmtInt(r.leads)], ['CPL', fmtUsd(r.cpl)],
-    ['Bookings', fmtInt(r.bookings)], ['CPB', fmtUsd(r.cpb)], ['CTR', fmtPct(r.ctr)],
+    ...(r.bookingsPaid !== undefined
+      ? [['Bookings – Paid', fmtInt(r.bookingsPaid ?? null)], ['Bookings – Total', fmtInt(r.bookings)], ['CPB – Paid ads', fmtUsd(r.cpb)]] as [string, string][]
+      : [['Bookings', fmtInt(r.bookings)], ['CPB', fmtUsd(r.cpb)]] as [string, string][]),
+    ['CTR', fmtPct(r.ctr)],
+    ...(r.spsTotal !== undefined ? [['SPS – Paid', fmtSps(r.spsPaid)], ['SPS – Total', fmtSps(r.spsTotal)]] as [string, string][] : []),
   ];
   return (
-    <div className="grid grid-cols-3 lg:grid-cols-6 gap-3">
+    <div className={`grid grid-cols-3 ${tiles.length > 7 ? 'lg:grid-cols-9' : 'lg:grid-cols-6'} gap-3`}>
       {tiles.map(([l, v]) => (
         <div key={l} className="bg-black/25 border border-white/10 rounded-xl px-4 py-3">
           <p className="text-[11px] uppercase tracking-wider text-slate-400">{l}</p>
@@ -323,27 +341,32 @@ function OfferPanel({ name, monthLabel, detail, brand, onClose, onLocation }: {
 
 const STATUS_LABEL: Record<string, string> = { confirmed: 'Confirmed', showed: 'Showed', noshow: 'No-show', cancelled: 'Cancelled', booked: 'Booked' };
 
-// Who is behind a location's Bookings number: each calendar entry with its date, calendar, status and the paid ad
-// (our Meta campaign) the lead came from. Loaded on open from /api/gmn-report/bookings.
-function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
-  location: string; month: string; monthLabel: string; count: number | null; brand?: BrandKey; onClose: () => void;
+// Who is behind a location's Bookings (or SPS) numbers: each calendar entry with its date, calendar, status and the paid
+// ad (our Meta campaign) the lead came from. Loaded on open from /api/gmn-report/bookings.
+function BookingsPanel({ location, kind, paidOnly = false, month, monthLabel, row, brand, onClose }: {
+  location: string; kind: GmnBookingKind; paidOnly?: boolean; month: string; monthLabel: string; row?: GmnMetricRow; brand?: BrandKey; onClose: () => void;
 }) {
+  const sps = kind === 'sps';
   const [rows, setRows] = useState<GmnBooking[] | null>(null);
   const [error, setError] = useState(false);
-  const [onlyAds, setOnlyAds] = useState(false);
+  // opened from a Paid number: start with only the paid-ad leads (the checkbox still shows everyone when unticked)
+  const [onlyAds, setOnlyAds] = useState(paidOnly);
   useEffect(() => {
     let live = true;
-    fetch(`/api/gmn-report/bookings?month=${encodeURIComponent(month)}&location=${encodeURIComponent(location)}`)
+    setRows(null); setError(false);
+    fetch(`/api/gmn-report/bookings?month=${encodeURIComponent(month)}&location=${encodeURIComponent(location)}${sps ? '&kind=sps' : ''}`)
       .then(r => (r.ok ? r.json() : Promise.reject(r.status)))
       .then((j: { rows: GmnBooking[] }) => { if (live) setRows(j.rows); })
       .catch(() => { if (live) setError(true); });
     return () => { live = false; };
-  }, [month, location]);
+  }, [month, location, sps]);
   const isOurs = (r: GmnBooking) => !!(r.campaign || r.adLead || r.via === 'our_form');
   const fromAds = rows?.filter(isOurs).length ?? 0;
-  // The Bookings number counts calendar entries, so a person who booked twice is in it twice; mark the later ones.
-  const personKey = (r: GmnBooking) => r.name.trim().toLowerCase().replace(/\s+/g, ' ');
+  // With the paid split, a person counts once per date: a second entry for the same person on the same date is a
+  // repeat (on another date it counts again). Older snapshots count every entry, so any later entry is a repeat.
+  const perDate = sps || row?.bookingsPaid !== undefined;
   const repeatOf = useMemo(() => {
+    const personKey = (r: GmnBooking) => r.name.trim().toLowerCase().replace(/\s+/g, ' ') + (perDate ? `|${r.date}` : '');
     const seen = new Map<string, number>();
     return (rows ?? []).map((r, i) => {
       const k = personKey(r);
@@ -351,19 +374,29 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
       if (first == null) { seen.set(k, i); return null; }
       return first;
     });
-  }, [rows]);
+  }, [rows, perDate]);
   const uniquePeople = repeatOf.filter(x => x == null).length;
   const shown = rows ? rows.map((r, i) => ({ r, i })).filter(({ r }) => !onlyAds || isOurs(r)) : [];
   const calendars = rows ? Array.from(new Set(rows.map(r => r.calendar))) : [];
   return (
-    <Panel kicker={`${monthLabel} · Bookings`} title={location} onClose={onClose} brand={brand}>
-      {error && <p className="text-sm text-red-300">Couldn&apos;t load the bookings for this location.</p>}
+    <Panel kicker={`${monthLabel} · ${sps ? 'SPS (Starting Point Sessions)' : 'Bookings'}`} title={location} onClose={onClose} brand={brand}>
+      {error && <p className="text-sm text-red-300">Couldn&apos;t load the {sps ? 'SPS bookings' : 'bookings'} for this location.</p>}
       {!rows && !error && <p className="text-sm text-slate-400">Loading…</p>}
       {rows && (
         <>
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
-            {([
-              ['Bookings', fmtInt(count ?? rows.length)],
+            {(sps ? [
+              ['SPS – Paid', fmtInt(row?.spsPaid ?? null)],
+              ['SPS – Total', fmtInt(row?.spsTotal ?? null)],
+              ['SPS entries', fmtInt(rows.length)],
+              ['Same-day repeats / staff', fmtInt(rows.length - (row?.spsTotal ?? uniquePeople))],
+            ] : perDate ? [
+              ['Bookings – Paid', fmtInt(row?.bookingsPaid ?? null)],
+              ['Bookings – Total', fmtInt(row?.bookings ?? null)],
+              ['Calendar entries', fmtInt(rows.length)],
+              ['Same-day repeats / staff', fmtInt(rows.length - (row?.bookings ?? uniquePeople))],
+            ] : [
+              ['Bookings', fmtInt(row?.bookings ?? rows.length)],
               ['Unique people', fmtInt(uniquePeople)],
               ['From our paid ads', fmtInt(fromAds)],
               ['Other entries', fmtInt(rows.length - fromAds)],
@@ -378,8 +411,10 @@ function BookingsPanel({ location, month, monthLabel, count, brand, onClose }: {
             <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
               <p className="text-xs text-slate-400">
                 Calendar{calendars.length === 1 ? '' : 's'}: {calendars.join(' · ')}. &quot;From our paid ads&quot; = the lead carries the
-                location&apos;s ad-lead tag or submitted one of our ad forms; the campaign shows when GoHighLevel recorded it. Bookings
-                counts every calendar entry, so a person who booked more than once is listed again and marked &quot;Repeat&quot;.
+                location&apos;s ad-lead tag or submitted one of our ad forms; the campaign shows when GoHighLevel recorded it.{' '}
+                {perDate
+                  ? `Every ${sps ? 'SPS appointment' : 'calendar entry'} this month is listed. The numbers count each person once per date (booked again on another date = counted again); a second entry on the same date is marked "Repeat", and staff / internal entries are left out.`
+                  : 'Bookings counts every calendar entry, so a person who booked more than once is listed again and marked "Repeat".'}
               </p>
               <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer select-none">
                 <input type="checkbox" checked={onlyAds} onChange={e => setOnlyAds(e.target.checked)} className="accent-[#E1E000]" />
@@ -453,7 +488,7 @@ function Overview({ report }: { report: GmnReportPayload }) {
   const tiles: [string, string][] = [
     ['Total Locations', fmtInt(o.totalLocations)],
     ['CPL', fmtUsd(o.cpl)],
-    ['CPB', fmtUsd(o.cpb)],
+    [report.locationsTotal.bookingsPaid !== undefined ? 'CPB – Paid ads' : 'CPB', fmtUsd(o.cpb)],
     ['Avg. location spend', fmtUsd(o.avgLocationSpend)],
   ];
   return (
@@ -482,18 +517,39 @@ const COLS: { key: keyof GmnMetricRow; label: string; fmt: (r: GmnMetricRow) => 
   { key: 'bookings', label: 'Bookings', fmt: r => fmtInt(r.bookings) },
   { key: 'cpb', label: 'CPB', fmt: r => fmtUsd(r.cpb) },
 ];
+// SPS columns, only for snapshots that have them. null = the location records no SPS in GoHighLevel that month.
+const fmtSps = (n: number | null | undefined) => (n === null ? 'N/A' : fmtInt(n ?? null));
+const PAID_COL: (typeof COLS)[number] = { key: 'bookingsPaid', label: 'Bookings – Paid', fmt: r => fmtInt(r.bookingsPaid ?? null) };
+const SPS_COLS: typeof COLS = [
+  { key: 'spsPaid', label: 'SPS – Paid', fmt: r => fmtSps(r.spsPaid) },
+  { key: 'spsTotal', label: 'SPS – Total', fmt: r => fmtSps(r.spsTotal) },
+];
 
-function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, bookingLabels, onBookingsClick }: {
+function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, bookingLabels, onBookingsClick, spsLabels, onSpsClick }: {
   title: string; subtitle?: string; firstCol: string; rows: GmnMetricRow[]; total: GmnMetricRow; onRowClick?: (label: string) => void;
-  bookingLabels?: Set<string>; onBookingsClick?: (label: string) => void;
+  bookingLabels?: Set<string>; onBookingsClick?: (label: string, paidOnly?: boolean) => void;
+  spsLabels?: Set<string>; onSpsClick?: (label: string, paidOnly?: boolean) => void;
 }) {
-  const cell = (c: (typeof COLS)[number], r: GmnMetricRow) =>
-    c.key === 'bookings' && onBookingsClick && bookingLabels?.has(r.label) ? (
-      <button type="button" onClick={() => onBookingsClick(r.label)} title="See who booked"
-        className="underline decoration-white/30 underline-offset-2 hover:text-[#E1E000] hover:decoration-[#E1E000] tabular-nums">
-        {c.fmt(r)}
-      </button>
-    ) : c.fmt(r);
+  // paid split: Bookings → "Bookings – Paid" + "Bookings – Total", CPB → "CPB – Paid ads"
+  const base = rows.some(r => r.bookingsPaid !== undefined)
+    ? COLS.flatMap(c => c.key === 'bookings' ? [PAID_COL, { ...c, label: 'Bookings – Total' }] : c.key === 'cpb' ? [{ ...c, label: 'CPB – Paid ads' }] : [c])
+    : COLS;
+  const cols = rows.some(r => r.spsTotal !== undefined) ? [...base, ...SPS_COLS] : base;
+  const linkCell = (text: string, onClick: () => void, hint: string) => (
+    <button type="button" onClick={onClick} title={hint}
+      className="underline decoration-white/30 underline-offset-2 hover:text-[#E1E000] hover:decoration-[#E1E000] tabular-nums">
+      {text}
+    </button>
+  );
+  const cell = (c: (typeof COLS)[number], r: GmnMetricRow) => {
+    // a Paid number opens the list showing only the paid-ad leads; a Total number opens everyone
+    const paidOnly = c.key === 'bookingsPaid' || c.key === 'spsPaid';
+    if ((c.key === 'bookings' || c.key === 'bookingsPaid') && onBookingsClick && bookingLabels?.has(r.label))
+      return linkCell(c.fmt(r), () => onBookingsClick(r.label, paidOnly), paidOnly ? 'See who booked from our paid ads' : 'See who booked');
+    if ((c.key === 'spsPaid' || c.key === 'spsTotal') && onSpsClick && spsLabels?.has(r.label) && r[c.key] != null)
+      return linkCell(c.fmt(r), () => onSpsClick(r.label, paidOnly), paidOnly ? 'See who booked an SPS from our paid ads' : 'See who booked an SPS');
+    return c.fmt(r);
+  };
   return (
     <section>
       <h3 className={`text-xl font-light ${subtitle ? 'mb-1' : 'mb-4'}`}>{title}</h3>
@@ -501,10 +557,10 @@ function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, booki
       <div className="overflow-x-auto rounded-lg border border-white/40">
         <table className="w-full text-sm border-collapse min-w-[900px]">
           <thead>
-            <tr><th colSpan={COLS.length + 1} className={`bg-[#1F1E1D] py-2 text-center font-semibold ${ACCENT}`}>Lead Generation</th></tr>
+            <tr><th colSpan={cols.length + 1} className={`bg-[#1F1E1D] py-2 text-center font-semibold ${ACCENT}`}>Lead Generation</th></tr>
             <tr className="bg-[#1F1E1D]">
               <th className="text-left px-3 py-2 font-semibold border border-white/40">{firstCol}</th>
-              {COLS.map(c => <th key={c.key} className="px-3 py-2 font-semibold text-right border border-white/40 whitespace-nowrap">{c.label}</th>)}
+              {cols.map(c => <th key={c.key} className="px-3 py-2 font-semibold text-right border border-white/40 whitespace-nowrap">{c.label}</th>)}
             </tr>
           </thead>
           <tbody>
@@ -517,12 +573,12 @@ function MetricTable({ title, subtitle, firstCol, rows, total, onRowClick, booki
                     </button>
                   ) : r.label}
                 </td>
-                {COLS.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/15 whitespace-nowrap">{cell(c, r)}</td>)}
+                {cols.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/15 whitespace-nowrap">{cell(c, r)}</td>)}
               </tr>
             ))}
             <tr className="bg-[#1F1E1D] font-semibold">
               <td className={`px-3 py-2 border border-white/40 ${ACCENT}`}>Total</td>
-              {COLS.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/40 whitespace-nowrap">{c.fmt(total)}</td>)}
+              {cols.map(c => <td key={c.key} className="px-3 py-2 text-right tabular-nums border border-white/40 whitespace-nowrap">{c.fmt(total)}</td>)}
             </tr>
           </tbody>
         </table>

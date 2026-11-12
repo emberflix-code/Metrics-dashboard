@@ -21,9 +21,13 @@ type Metric = 'cpl' | 'cpb' | 'bookRate' | 'ctr';
 const METRICS: Record<Metric, { label: string; better: 'low' | 'high'; fmt: (n: number | null) => string; of: (r: GmnMetricRow) => number | null }> = {
   cpl: { label: 'CPL', better: 'low', fmt: n => fmtUsd(n), of: r => r.cpl },
   cpb: { label: 'CPB', better: 'low', fmt: n => fmtUsd(n), of: r => r.cpb },
-  bookRate: { label: 'Booking rate', better: 'high', fmt: n => fmtPct(n), of: r => (r.leads && r.bookings != null ? (r.bookings / r.leads) * 100 : null) },
+  bookRate: { label: 'Booking rate', better: 'high', fmt: n => fmtPct(n), of: r => { const b = paidOf(r); return r.leads && b != null ? (b / r.leads) * 100 : null; } },
   ctr: { label: 'CTR', better: 'high', fmt: n => fmtPct(n), of: r => r.ctr },
 };
+// Snapshots with the paid split (Bookings – Paid / CPB – paid ads): rates use paid bookings; older ones use Bookings.
+function paidOf(r: GmnMetricRow): number | null { return r.bookingsPaid !== undefined ? r.bookingsPaid : r.bookings; }
+const hasPaid = (r: GmnMetricRow) => r.bookingsPaid !== undefined;
+const metricLabel = (k: Metric, paid: boolean) => (k === 'cpb' && paid ? 'CPB – paid ads' : METRICS[k].label);
 
 const median = (xs: number[]) => {
   const s = [...xs].sort((a, b) => a - b);
@@ -53,7 +57,7 @@ export default function EnhancedView({ report, brand, onOpenLocation, onOpenOffe
   renderCreatives: (cs: GmnCreative[]) => ReactNode;
 }) {
   const T = report.locationsTotal;
-  const bookRate = T.leads && T.bookings != null ? (T.bookings / T.leads) * 100 : null;
+  const bookRate = METRICS.bookRate.of(T);
   return (
     <div className="space-y-12 gmn-enhanced">
       {/* eslint-disable-next-line @next/next/no-page-custom-font */}
@@ -111,10 +115,12 @@ function Hero({ report, bookRate }: { report: GmnReportPayload; bookRate: number
   const big: [string, string, string][] = [
     ['Ad spend', fmtUsd(T.spend), `${fmtInt(report.overview.totalLocations)} locations · avg ${fmtUsd(report.overview.avgLocationSpend)}`],
     ['Leads', fmtInt(T.leads), `CPL ${fmtUsd(T.cpl)}`],
-    ['Bookings', fmtInt(T.bookings), `CPB ${fmtUsd(T.cpb)}`],
+    hasPaid(T)
+      ? ['Bookings', fmtInt(T.bookings), `${fmtInt(T.bookingsPaid ?? null)} from paid ads · CPB – paid ads ${fmtUsd(T.cpb)}`]
+      : ['Bookings', fmtInt(T.bookings), `CPB ${fmtUsd(T.cpb)}`],
   ];
   const small: [string, string][] = [
-    ['Lead → booking', fmtPct(bookRate)], ['CTR', fmtPct(T.ctr)], ['Link clicks', fmtInt(T.linkClicks)],
+    [hasPaid(T) ? 'Lead → paid booking' : 'Lead → booking', fmtPct(bookRate)], ['CTR', fmtPct(T.ctr)], ['Link clicks', fmtInt(T.linkClicks)],
     ['Impressions', fmtInt(T.impressions)], ['Cost / click', fmtUsd(T.linkClicks ? T.spend / T.linkClicks : null)],
     ['CPM', fmtUsd(T.impressions ? (T.spend / T.impressions) * 1000 : null)],
   ];
@@ -149,7 +155,7 @@ function Funnel({ report }: { report: GmnReportPayload }) {
     ['Impressions', T.impressions, ''],
     ['Link clicks', T.linkClicks, `${fmtPct(T.ctr)} of impressions`],
     ['Leads', T.leads ?? 0, T.linkClicks ? `${fmtPct(((T.leads ?? 0) / T.linkClicks) * 100)} of clicks` : ''],
-    ['Bookings', T.bookings ?? 0, T.leads ? `${fmtPct(((T.bookings ?? 0) / T.leads) * 100)} of leads` : ''],
+    [hasPaid(T) ? 'Paid bookings' : 'Bookings', paidOf(T) ?? 0, T.leads ? `${fmtPct(((paidOf(T) ?? 0) / T.leads) * 100)} of leads` : ''],
   ];
   const max = Math.log10(Math.max(1, steps[0][1]));
   return (
@@ -158,7 +164,7 @@ function Funnel({ report }: { report: GmnReportPayload }) {
         <div key={l} className="flex items-center gap-3 text-sm">
           <span className="w-24 text-slate-400 shrink-0">{l}</span>
           <div className="flex-1 h-6 bg-black/20 rounded-md overflow-hidden">
-            <div className="h-full rounded-r-md" style={{ width: `${Math.max(4, (Math.log10(Math.max(1, v)) / max) * 100)}%`, background: l === 'Bookings' ? C.accent : C.blue, opacity: l === 'Bookings' ? 0.9 : 0.75 }} />
+            <div className="h-full rounded-r-md" style={{ width: `${Math.max(4, (Math.log10(Math.max(1, v)) / max) * 100)}%`, background: /ookings$/.test(l) ? C.accent : C.blue, opacity: /ookings$/.test(l) ? 0.9 : 0.75 }} />
           </div>
           <span className="w-24 text-right tabular-nums font-semibold">{fmtInt(v)}</span>
           <span className="w-40 text-xs text-slate-500 hidden sm:block">{s}</span>
@@ -179,8 +185,8 @@ function Spotlights({ report, onOpenLocation }: { report: GmnReportPayload; onOp
     if (bestCpl) out.push({ tone: 'good', icon: '▲', title: 'Most efficient location', value: fmtUsd(bestCpl.cpl), who: short(bestCpl.label), detail: `CPL on ${fmtUsd(bestCpl.spend)} spend · ${fmtInt(bestCpl.leads)} leads`, link: bestCpl.label });
     const vol = pick(L.filter(r => r.leads != null), r => r.leads!, -1);
     if (vol) out.push({ tone: 'info', icon: '◆', title: 'Lead volume leader', value: `${fmtInt(vol.leads)} leads`, who: short(vol.label), detail: `${fmtUsd(vol.spend)} spend · CPL ${fmtUsd(vol.cpl)}`, link: vol.label });
-    const br = pick(L.filter(r => (r.leads ?? 0) >= 20 && r.bookings != null), r => r.bookings! / r.leads!, -1);
-    if (br) out.push({ tone: 'good', icon: '▲', title: 'Best lead → booking rate', value: fmtPct((br.bookings! / br.leads!) * 100), who: short(br.label), detail: `${fmtInt(br.bookings)} bookings from ${fmtInt(br.leads)} leads`, link: br.label });
+    const br = pick(L.filter(r => (r.leads ?? 0) >= 20 && paidOf(r) != null), r => paidOf(r)! / r.leads!, -1);
+    if (br) out.push({ tone: 'good', icon: '▲', title: hasPaid(br) ? 'Best lead → paid booking rate' : 'Best lead → booking rate', value: fmtPct((paidOf(br)! / br.leads!) * 100), who: short(br.label), detail: `${fmtInt(paidOf(br))} ${hasPaid(br) ? 'paid ' : ''}bookings from ${fmtInt(br.leads)} leads`, link: br.label });
     const worst = pick(L.filter(r => r.spend >= 1000 && r.cpl != null), r => r.cpl!, -1);
     if (worst) out.push({ tone: 'warning', icon: '!', title: 'Highest CPL at $1k+ spend', value: fmtUsd(worst.cpl), who: short(worst.label), detail: `${fmtUsd(worst.spend)} spend for ${fmtInt(worst.leads)} leads — worth a creative/offer review`, link: worst.label });
     const offers = report.offers.filter(o => (o.leads ?? 0) >= 20 && o.cpb != null);
@@ -268,7 +274,11 @@ function EfficiencyMap({ rows, onOpenLocation }: { rows: GmnMetricRow[]; onOpenL
             <p className="font-semibold text-sm">{short(hover.label)}</p>
             <p className="text-slate-400">{quad(hover)}</p>
             <p className="mt-1 tabular-nums">Spend {fmtUsd(hover.spend)} · Leads {fmtInt(hover.leads)} · CPL {fmtUsd(hover.cpl)}</p>
-            <p className="tabular-nums">Bookings {fmtInt(hover.bookings)} · CPB {fmtUsd(hover.cpb)}</p>
+            <p className="tabular-nums">
+              {hasPaid(hover)
+                ? `Bookings ${fmtInt(hover.bookings)} (${fmtInt(hover.bookingsPaid ?? null)} paid) · CPB – paid ads ${fmtUsd(hover.cpb)}`
+                : `Bookings ${fmtInt(hover.bookings)} · CPB ${fmtUsd(hover.cpb)}`}
+            </p>
           </div>
         )}
         <div className="flex flex-wrap gap-4 text-xs text-slate-400 mt-2 px-2">
@@ -286,6 +296,7 @@ function Leaderboard({ rows, total, onOpenLocation }: { rows: GmnMetricRow[]; to
   const [metric, setMetric] = useState<Metric>('cpl');
   const [hover, setHover] = useState<string | null>(null);
   const M = METRICS[metric];
+  const paid = hasPaid(total);
   const data = rows.map(r => ({ r, v: M.of(r) })).filter(d => d.v != null && d.r.spend > 0) as { r: GmnMetricRow; v: number }[];
   data.sort((a, b) => (M.better === 'low' ? a.v - b.v : b.v - a.v));
   const avg = M.of(total);
@@ -294,12 +305,12 @@ function Leaderboard({ rows, total, onOpenLocation }: { rows: GmnMetricRow[]; to
     <section>
       <SectionTitle
         title="Location leaderboard"
-        sub={`Ranked best to worst by ${M.label}. Blue = better than the network (${M.fmt(avg)}), red = worse. Click a bar to open the location.`}
+        sub={`Ranked best to worst by ${metricLabel(metric, paid)}. Blue = better than the network (${M.fmt(avg)}), red = worse. Click a bar to open the location.`}
         right={
           <div className="flex bg-black/30 border border-white/10 rounded-lg p-0.5" role="tablist" aria-label="Metric">
             {(Object.keys(METRICS) as Metric[]).map(k => (
               <button key={k} type="button" role="tab" aria-selected={metric === k} onClick={() => setMetric(k)}
-                className={`text-xs px-3 py-1.5 rounded-md transition-colors ${metric === k ? 'bg-[#E1E000] text-black font-semibold' : 'text-slate-300 hover:text-white'}`}>{METRICS[k].label}</button>
+                className={`text-xs px-3 py-1.5 rounded-md transition-colors ${metric === k ? 'bg-[#E1E000] text-black font-semibold' : 'text-slate-300 hover:text-white'}`}>{metricLabel(k, paid)}</button>
             ))}
           </div>
         }
@@ -487,7 +498,7 @@ function CopyList({ title, items, kind, onOpenCopy, className = '' }: {
 
 // ---------- 7. heat table: sortable, searchable, CSV ----------
 type Col = { key: keyof GmnMetricRow | 'bookRate'; label: string; fmt: (r: GmnMetricRow) => string; val: (r: GmnMetricRow) => number | null; heat?: 'low' | 'high' };
-const HCOLS: Col[] = [
+const BASE_HCOLS: Col[] = [
   { key: 'spend', label: 'Spend', fmt: r => fmtUsd(r.spend), val: r => r.spend },
   { key: 'reach', label: 'Reach', fmt: r => fmtInt(r.reach), val: r => r.reach },
   { key: 'impressions', label: 'Impr.', fmt: r => fmtInt(r.impressions), val: r => r.impressions },
@@ -499,14 +510,29 @@ const HCOLS: Col[] = [
   { key: 'cpb', label: 'CPB', fmt: r => fmtUsd(r.cpb), val: r => r.cpb, heat: 'low' },
   { key: 'bookRate', label: 'Book rate', fmt: r => fmtPct(METRICS.bookRate.of(r)), val: r => METRICS.bookRate.of(r), heat: 'high' },
 ];
+// SPS (distinct people), only for snapshots that have them; null = the location records no SPS in GoHighLevel that month.
+const spsFmt = (n: number | null | undefined) => (n === null ? 'N/A' : fmtInt(n ?? null));
+const SPS_HCOLS: Col[] = [
+  { key: 'spsPaid', label: 'SPS paid', fmt: r => spsFmt(r.spsPaid), val: r => r.spsPaid ?? null },
+  { key: 'spsTotal', label: 'SPS total', fmt: r => spsFmt(r.spsTotal), val: r => r.spsTotal ?? null },
+];
 
 function HeatTable({ rows, total, month, onOpenLocation }: { rows: GmnMetricRow[]; total: GmnMetricRow; month: string; onOpenLocation?: (l: string) => void }) {
+  const HCOLS = useMemo(() => {
+    // paid split: Bookings → "Bookings paid" + "Bookings total", CPB → "CPB paid ads"
+    const base = rows.some(hasPaid)
+      ? BASE_HCOLS.flatMap(c => c.key === 'bookings'
+        ? [{ key: 'bookingsPaid' as const, label: 'Bookings paid', fmt: (r: GmnMetricRow) => fmtInt(r.bookingsPaid ?? null), val: (r: GmnMetricRow) => r.bookingsPaid ?? null }, { ...c, label: 'Bookings total' }]
+        : c.key === 'cpb' ? [{ ...c, label: 'CPB paid ads' }] : [c])
+      : BASE_HCOLS;
+    return rows.some(r => r.spsTotal !== undefined) ? [...base, ...SPS_HCOLS] : base;
+  }, [rows]);
   const [sort, setSort] = useState<{ key: Col['key'] | 'label'; dir: 1 | -1 }>({ key: 'spend', dir: -1 });
   const [q, setQ] = useState('');
   const meds = useMemo(() => Object.fromEntries(HCOLS.filter(c => c.heat).map(c => {
     const xs = rows.map(c.val).filter((v): v is number => v != null);
     return [c.key, { med: median(xs), min: Math.min(...xs), max: Math.max(...xs) }];
-  })), [rows]);
+  })), [rows, HCOLS]);
   const shown = rows.filter(r => r.label.toLowerCase().includes(q.toLowerCase())).sort((a, b) => {
     if (sort.key === 'label') return sort.dir * a.label.localeCompare(b.label);
     const col = HCOLS.find(c => c.key === sort.key)!;

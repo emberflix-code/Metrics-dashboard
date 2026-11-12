@@ -16,8 +16,17 @@ export interface GmnMetricRow {
   ctr: number | null;        // percent, e.g. 1.26
   leads: number | null;
   cpl: number | null;
-  bookings: number | null;   // calendar count (deck "Bookings")
-  cpb: number | null;        // spend / calendar count (deck "CPB")
+  // Snapshots with bookingsPaid (Oct 2026 on): bookings = Bookings – Total, unique person + date (a person booked on
+  // another date counts again), staff / internal entries left out; bookingsPaid = those from our paid ads;
+  // cpb = spend / bookingsPaid ("CPB – paid ads"). Older snapshots: bookings = calendar count, cpb = spend / bookings.
+  bookings: number | null;
+  bookingsPaid?: number | null;
+  cpb: number | null;
+  // Starting Point Sessions, counted like bookings: unique person + date, staff / internal entries left out.
+  // spsPaid = those from our paid ads, spsTotal = paid + organic. null = N/A (the location records no SPS in GoHighLevel
+  // that month); absent = the snapshot predates SPS columns (the page then hides them).
+  spsPaid?: number | null;
+  spsTotal?: number | null;
 }
 
 export interface GmnCreativeLocation {
@@ -92,7 +101,13 @@ export interface GmnReportPayload {
   // modal fetches one location at a time from /api/gmn-report/bookings.
   bookingDetails?: Record<string, GmnBooking[]>;
   bookingDetailLocations?: string[];
+  // The same for each location's SPS numbers (every SPS appointment that month); stripped and fetched the same way.
+  spsDetails?: Record<string, GmnBooking[]>;
+  spsDetailLocations?: string[];
 }
+
+/** Which click-through list a location's number opens: its Bookings entries or its SPS entries. */
+export type GmnBookingKind = 'bookings' | 'sps';
 
 export interface GmnBooking {
   name: string;
@@ -153,11 +168,12 @@ export async function listPublishedMonths(clientId: string): Promise<GmnReportMo
   return rows.map(r => ({ month: r.month, label: r.label || r.month }));
 }
 
-/** The entries behind one location's "Bookings" number in a published month, or null when there are none. */
-export async function loadBookingDetails(clientId: string, month: string, location: string): Promise<GmnBooking[] | null> {
+/** The entries behind one location's "Bookings" (or SPS) numbers in a published month, or null when there are none. */
+export async function loadBookingDetails(clientId: string, month: string, location: string, kind: GmnBookingKind = 'bookings'): Promise<GmnBooking[] | null> {
   if (!/^\d{4}-\d{2}$/.test(month) || !location) return null;
+  const key = kind === 'sps' ? 'spsDetails' : 'bookingDetails';
   const [row] = await query<{ rows: GmnBooking[] | null }>(
-    `SELECT payload->'bookingDetails'->$3 AS rows FROM client_monthly_reports
+    `SELECT payload->'${key}'->$3 AS rows FROM client_monthly_reports
      WHERE client_id = $1 AND month = $2::date AND published_at IS NOT NULL`,
     [clientId, `${month}-01`, location]
   ).catch(() => []);
@@ -175,10 +191,12 @@ export async function loadPublishedReport(clientId: string, month: string): Prom
   if (!row?.payload) return null;
   // The page doesn't show ad copy or headlines; blank them so they never reach the browser either.
   const strip = (cs: GmnCreative[] | undefined) => (cs ?? []).map(c => ({ ...c, title: null, body: null }));
-  const { bookingDetails, ...p } = row.payload;
+  const { bookingDetails, spsDetails, ...p } = row.payload;
+  const withRows = (d?: Record<string, GmnBooking[]>) => (d ? Object.keys(d).filter(k => d[k]?.length) : undefined);
   return {
     ...p,
-    bookingDetailLocations: bookingDetails ? Object.keys(bookingDetails).filter(k => bookingDetails[k]?.length) : undefined,
+    bookingDetailLocations: withRows(bookingDetails),
+    spsDetailLocations: withRows(spsDetails),
     topCreatives: strip(p.topCreatives),
     locationDetails: p.locationDetails
       ? Object.fromEntries(Object.entries(p.locationDetails).map(([k, d]) => [k, { ...d, topCreatives: strip(d.topCreatives) }]))

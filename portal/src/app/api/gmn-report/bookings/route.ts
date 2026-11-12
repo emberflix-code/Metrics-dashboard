@@ -7,7 +7,7 @@ import { loadBookingDetails } from '@/lib/gmnReport';
 export const dynamic = 'force-dynamic';
 
 // The entries behind one location's "Bookings" number in a published GMN Marketing Report month
-// (?month=YYYY-MM&location=<location row label>). Same access rule as the report page: a client user whose
+// (?month=YYYY-MM&location=<location row label>; &kind=sps for its SPS numbers instead). Same access rule as the report page: a client user whose
 // client has the report switched on, reading only that client's own published snapshots.
 export async function GET(req: NextRequest) {
   const session = await getServerSession(authOptions);
@@ -19,7 +19,8 @@ export async function GET(req: NextRequest) {
   if (!client?.show_gmn_report) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   const month = req.nextUrl.searchParams.get('month') || '';
   const location = req.nextUrl.searchParams.get('location') || '';
-  const rows = await loadBookingDetails(client.id, month, location);
+  const kind = req.nextUrl.searchParams.get('kind') === 'sps' ? 'sps' : 'bookings';
+  const rows = await loadBookingDetails(client.id, month, location, kind);
   if (!rows) return NextResponse.json({ error: 'Not found' }, { status: 404 });
   return NextResponse.json({ rows }, { headers: { 'Cache-Control': 'private, max-age=300' } });
 }
