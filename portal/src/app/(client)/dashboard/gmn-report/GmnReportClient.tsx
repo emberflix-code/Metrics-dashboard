@@ -370,7 +370,7 @@ function BookingsPanel({ location, kind, paidOnly = false, month, monthLabel, ro
   location: string; kind: GmnBookingKind; paidOnly?: boolean; month: string; monthLabel: string; row?: GmnMetricRow; brand?: BrandKey; onClose: () => void;
 }) {
   const sps = kind === 'sps';
-  const [rows, setRows] = useState<GmnBooking[] | null>(null);
+  const [allRows, setRows] = useState<GmnBooking[] | null>(null);
   const [error, setError] = useState(false);
   // opened from a Paid number: start with only the paid-ad leads (the checkbox still shows everyone when unticked)
   const [onlyAds, setOnlyAds] = useState(paidOnly);
@@ -384,10 +384,16 @@ function BookingsPanel({ location, kind, paidOnly = false, month, monthLabel, ro
     return () => { live = false; };
   }, [month, location, sps]);
   const isOurs = (r: GmnBooking) => !!(r.campaign || r.adLead || r.via === 'our_form');
-  const fromAds = rows?.filter(isOurs).length ?? 0;
   // With the paid split, a person counts once per date: a second entry for the same person on the same date is a
   // repeat (on another date it counts again). Older snapshots count every entry, so any later entry is a repeat.
   const perDate = sps || row?.bookingsPaid !== undefined;
+  // Staff / internal calendar events (club events, visits - not leads) aren't counted, so with the paid split they
+  // aren't listed either. Older snapshots counted them, so they stay listed there.
+  const rows = useMemo(
+    () => (allRows && perDate ? allRows.filter(r => !(r.viaNote ?? '').startsWith('Staff')) : allRows),
+    [allRows, perDate],
+  );
+  const fromAds = rows?.filter(isOurs).length ?? 0;
   const repeatOf = useMemo(() => {
     const personKey = (r: GmnBooking) => r.name.trim().toLowerCase().replace(/\s+/g, ' ') + (perDate ? `|${r.date}` : '');
     const seen = new Map<string, number>();
@@ -412,12 +418,12 @@ function BookingsPanel({ location, kind, paidOnly = false, month, monthLabel, ro
               ['SPS – Paid', fmtInt(row?.spsPaid ?? null)],
               ['SPS – Total', fmtInt(row?.spsTotal ?? null)],
               ['SPS entries', fmtInt(rows.length)],
-              ['Same-day repeats / staff', fmtInt(rows.length - (row?.spsTotal ?? uniquePeople))],
+              ['Same-day repeats', fmtInt(rows.length - uniquePeople)],
             ] : perDate ? [
               ['Bookings – Paid', fmtInt(row?.bookingsPaid ?? null)],
               ['Bookings – Total', fmtInt(row?.bookings ?? null)],
               ['Calendar entries', fmtInt(rows.length)],
-              ['Same-day repeats / staff', fmtInt(rows.length - (row?.bookings ?? uniquePeople))],
+              ['Same-day repeats', fmtInt(rows.length - uniquePeople)],
             ] : [
               ['Bookings', fmtInt(row?.bookings ?? rows.length)],
               ['Unique people', fmtInt(uniquePeople)],
@@ -436,7 +442,7 @@ function BookingsPanel({ location, kind, paidOnly = false, month, monthLabel, ro
                 Calendar{calendars.length === 1 ? '' : 's'}: {calendars.join(' · ')}. &quot;From our paid ads&quot; = the lead carries the
                 location&apos;s ad-lead tag or submitted one of our ad forms; the campaign shows when GoHighLevel recorded it.{' '}
                 {perDate
-                  ? `Every ${sps ? 'SPS appointment' : 'calendar entry'} this month is listed. The numbers count each person once per date (booked again on another date = counted again); a second entry on the same date is marked "Repeat", and staff / internal entries are left out.`
+                  ? `Every ${sps ? 'SPS appointment' : 'calendar entry'} this month is listed, except staff / internal events (not leads). The numbers count each person once per date (booked again on another date = counted again); a second entry on the same date is marked "Repeat".`
                   : 'Bookings counts every calendar entry, so a person who booked more than once is listed again and marked "Repeat".'}
               </p>
               <label className="text-xs text-slate-300 flex items-center gap-2 cursor-pointer select-none">
