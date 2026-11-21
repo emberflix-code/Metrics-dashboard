@@ -2348,6 +2348,7 @@ async function syncCreatives(
         // row's bytes get persisted, so a freshly-synced creative doesn't
         // land low-res the way it did before this check existed.
         const width = (await sharp(bytes).metadata().catch(() => null))?.width || 0;
+        let finalWidth = width;
         if (width > 0 && width < THUMBNAIL_MIN_WIDTH) {
           const larger = await resolveFullResThumbnail(accountId, token, row.asset_key, width).catch(() => null);
           if (larger) {
@@ -2359,8 +2360,34 @@ async function syncCreatives(
                 sourceUrl = larger;
                 bytes = bytes2;
                 contentType = res2.headers.get('content-type') || contentType;
+                finalWidth = width2;
               }
             }
+          }
+        }
+
+        // Never shrink a stored preview. The 30-day refresh re-downloads every
+        // preview; on older accounts the full-res lookup above often fails and
+        // only Meta's 64×64 list placeholder comes back, which used to overwrite
+        // a sharp preview (Rob Moffett went from 57 to 276 blurry images in Nov
+        // 2026). When the stored bytes are wider than what we just got, keep
+        // them and only mark the row as checked (filling phash if it's missing).
+        if (finalWidth < THUMBNAIL_MIN_WIDTH) {
+          const [stored] = await query<{ thumbnail_bytes: Buffer | null }>(
+            `SELECT thumbnail_bytes FROM meta_creative_assets WHERE account_id = $1 AND asset_key = $2`,
+            [accountId, row.asset_key]
+          );
+          const storedBytes = stored?.thumbnail_bytes;
+          const storedWidth = storedBytes ? (await sharp(storedBytes).metadata().catch(() => null))?.width || 0 : 0;
+          if (storedBytes && storedWidth > finalWidth) {
+            const storedHash = await computePhash(storedBytes).catch(() => null);
+            await query(
+              `UPDATE meta_creative_assets
+               SET thumbnail_bytes_fetched_at = now(), phash = COALESCE(phash, $3)
+               WHERE account_id = $1 AND asset_key = $2`,
+              [accountId, row.asset_key, storedHash]
+            );
+            continue;
           }
         }
 
